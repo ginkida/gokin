@@ -323,6 +323,54 @@ func TestCancelledRecoveryTurnKeepsClaimedMarker(t *testing.T) {
 	}
 }
 
+func TestAcceptedRecoveryCancelledBeforePipelineReturnsToSchedule(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	session := chat.NewSession()
+	session.SetID("cancelled-before-pipeline")
+	session.SetWorkDir(t.TempDir())
+	recovery := validSerializedRecovery(
+		"pre-pipeline-cancel", session.GetID(), chat.PendingRecoveryScheduled)
+	recovery.GenerationSignature = chat.PendingRecoveryGenerationSignature(recovery)
+	session.AddPendingRecovery(recovery, "")
+	application := newPendingRecoveryTestApp(t, session)
+	epoch := application.recoveryEpoch.Load()
+	claimed, checkpoints, err := application.claimPendingRecovery(
+		recovery.ID, recovery.SessionID, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.markRecoveryDispatched(claimed.SessionID, claimed.ID)
+	application.mu.Lock()
+	application.processing = true
+	application.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	application.runAcceptedSubmitWithRecoveryIdentity(
+		ctx,
+		claimed.Message,
+		"",
+		nil,
+		false,
+		claimed.ID,
+		claimed.SessionID,
+		claimed.UserMessage,
+		epoch,
+		checkpoints,
+	)
+
+	got := session.GetPendingRecoveries()
+	if len(got) != 1 || got[0].State != chat.PendingRecoveryScheduled {
+		t.Fatalf("pre-pipeline cancellation recovery state = %+v, want scheduled", got)
+	}
+	application.mu.Lock()
+	processing := application.processing
+	application.mu.Unlock()
+	if processing {
+		t.Fatal("pre-pipeline cancellation retained foreground ownership")
+	}
+}
+
 func TestClearConversationBoundaryIsDurableAndInvalidatesQueuedRecovery(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	session := chat.NewSession()
@@ -845,6 +893,79 @@ func TestRecoveryDispatchCannotStartThroughActiveCancelGate(t *testing.T) {
 	application.recoveryTimerMu.Unlock()
 	if timers != 0 {
 		t.Fatalf("cancel-gated recovery armed %d timer(s), want paused", timers)
+	}
+}
+
+func TestShutdownBetweenRecoveryClaimAndForegroundStartReleasesClaim(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	session := chat.NewSession()
+	session.SetID("shutdown-before-recovery-start")
+	session.SetWorkDir(t.TempDir())
+	recovery := validSerializedRecovery(
+		"shutdown-unstarted-claim", session.GetID(), chat.PendingRecoveryScheduled)
+	recovery.NotBefore = time.Now().Add(time.Hour)
+	recovery.GenerationSignature = chat.PendingRecoveryGenerationSignature(recovery)
+	session.AddPendingRecovery(recovery, "")
+	application := newPendingRecoveryTestApp(t, session)
+	epoch := application.recoveryEpoch.Load()
+	claimed, checkpoints, err := application.claimPendingRecovery(
+		recovery.ID, recovery.SessionID, epoch)
+	if err != nil {
+		t.Fatalf("claimPendingRecovery: %v", err)
+	}
+
+	application.mu.Lock()
+	application.processing = true
+	foregroundCtx := application.claimForegroundContextLocked()
+	application.markRecoveryDispatched(claimed.SessionID, claimed.ID)
+	application.mu.Unlock()
+	application.beginShutdown()
+
+	application.startAcceptedSubmitWithRecoveryIdentity(
+		foregroundCtx,
+		claimed.Message,
+		"",
+		nil,
+		false,
+		claimed.ID,
+		claimed.SessionID,
+		claimed.UserMessage,
+		epoch,
+		checkpoints,
+	)
+
+	got := session.GetPendingRecoveries()
+	if len(got) != 1 || got[0].State != chat.PendingRecoveryScheduled {
+		t.Fatalf("shutdown-before-start recovery state = %+v, want scheduled", got)
+	}
+	application.mu.Lock()
+	processing := application.processing
+	application.mu.Unlock()
+	if processing {
+		t.Fatal("rejected recovery retained foreground ownership")
+	}
+	application.recoveryTimerMu.Lock()
+	_, awaiting := application.recoveryAwaitingDispatch[recoveryTimerKey{
+		sessionID: session.GetID(), recoveryID: recovery.ID,
+	}]
+	timers := len(application.recoveryTimers)
+	application.recoveryTimerMu.Unlock()
+	if awaiting || timers != 0 {
+		t.Fatalf("released recovery lifecycle: awaiting=%v timers=%d, want paused", awaiting, timers)
+	}
+
+	history, err := chat.NewHistoryManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := history.LoadFull(session.GetID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.PendingRecoveries) != 1 ||
+		state.PendingRecoveries[0].State != chat.PendingRecoveryScheduled {
+		t.Fatalf("durable shutdown-before-start state = %+v, want scheduled",
+			state.PendingRecoveries)
 	}
 }
 

@@ -47,6 +47,17 @@ func clampSSHTimeoutSeconds(seconds int) int {
 	return seconds
 }
 
+func sshExecutionTimeout(args map[string]any) time.Duration {
+	if GetBoolDefault(args, "run_in_background", false) {
+		return 0
+	}
+	seconds, ok := GetInt(args, "timeout")
+	if !ok {
+		return 0
+	}
+	return time.Duration(clampSSHTimeoutSeconds(seconds)) * time.Second
+}
+
 // NewSSHTool creates a new SSH tool.
 func NewSSHTool() *SSHTool {
 	return &SSHTool{

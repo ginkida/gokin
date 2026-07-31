@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type PromptHandler func(ctx context.Context, req *Request) (Decision, error)
 type Manager struct {
 	rules    *Rules
 	enabled  bool
+	dontAsk  bool
 	revision uint64
 
 	// parent/overrides turn this manager into a bounded invocation capability
@@ -28,6 +30,12 @@ type Manager struct {
 	parent         *Manager
 	overrides      map[string]Level
 	parentRevision uint64
+
+	// runAllows/runDenies are process-scoped CLI permission rules. They are
+	// separate from config policies and session decisions: run denies are a
+	// hard invocation boundary, while run allows only suppress prompts.
+	runAllows []string
+	runDenies []string
 
 	// Session cache for "allow for session" and "deny for session" decisions
 	sessionCache *cache.LRUCache[string, cachedDecision]
@@ -80,8 +88,11 @@ func (m *Manager) WithPolicyOverrides(overrides map[string]Level) *Manager {
 	m.mu.RLock()
 	rules := cloneRules(m.rules)
 	enabled := m.enabled
+	dontAsk := m.dontAsk
 	handler := m.promptHandler
 	parentRevision := m.revision
+	runAllows := append([]string(nil), m.runAllows...)
+	runDenies := append([]string(nil), m.runDenies...)
 	m.mu.RUnlock()
 	if rules == nil {
 		rules = DefaultRules()
@@ -96,6 +107,9 @@ func (m *Manager) WithPolicyOverrides(overrides map[string]Level) *Manager {
 	scoped.parent = m
 	scoped.overrides = clonePolicyOverrides(overrides)
 	scoped.parentRevision = parentRevision
+	scoped.runAllows = runAllows
+	scoped.runDenies = runDenies
+	scoped.dontAsk = dontAsk
 	scoped.SetPromptHandler(handler)
 	return scoped
 }
@@ -114,7 +128,7 @@ func clonePolicyOverrides(overrides map[string]Level) map[string]Level {
 // refreshFromParent makes an invocation-local manager follow the live parent
 // policy without inheriting ambient session allows. It returns a hard/session
 // deny when the parent has revoked this exact invocation.
-func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Response {
+func (m *Manager) refreshFromParent(toolName string, args map[string]any, workDir string) *Response {
 	if m == nil || m.parent == nil {
 		return nil
 	}
@@ -122,8 +136,11 @@ func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Respo
 	parent.mu.RLock()
 	rules := cloneRules(parent.rules)
 	enabled := parent.enabled
+	dontAsk := parent.dontAsk
 	handler := parent.promptHandler
 	parentRevision := parent.revision
+	runAllows := append([]string(nil), parent.runAllows...)
+	runDenies := append([]string(nil), parent.runDenies...)
 	parent.mu.RUnlock()
 	if rules == nil {
 		rules = DefaultRules()
@@ -133,7 +150,9 @@ func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Respo
 	// revision-bound and therefore becomes unusable as soon as parent policy
 	// changes; clearing reclaims it eagerly.
 	m.mu.Lock()
-	changed := m.parentRevision != parentRevision || m.enabled != enabled
+	changed := m.parentRevision != parentRevision ||
+		m.enabled != enabled ||
+		m.dontAsk != dontAsk
 	if changed {
 		effective := cloneRules(rules)
 		for tool, level := range m.overrides {
@@ -143,6 +162,9 @@ func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Respo
 		}
 		m.rules = effective
 		m.enabled = enabled
+		m.dontAsk = dontAsk
+		m.runAllows = runAllows
+		m.runDenies = runDenies
 		m.parentRevision = parentRevision
 		m.revision++
 	}
@@ -161,7 +183,7 @@ func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Respo
 
 	// A parent session denial is a revocation floor. Parent session ALLOW is not
 	// consulted: plan-step capabilities and their approvals stay invocation-local.
-	key := parent.cacheKey(toolName, args)
+	key := parent.cacheKeyWithWorkDir(toolName, args, workDir)
 	if cached, ok := parent.sessionCache.Get(key); ok && cached.Revision == parentRevision && cached.Decision == DecisionDenySession {
 		return &Response{Allowed: false, Decision: DecisionDenySession, Reason: "Denied for parent session"}
 	}
@@ -172,11 +194,19 @@ func (m *Manager) refreshFromParent(toolName string, args map[string]any) *Respo
 // cacheKey generates a cache key for a tool invocation.
 // For sensitive tools, the key includes a hash of relevant arguments.
 func (m *Manager) cacheKey(toolName string, args map[string]any) string {
+	return m.cacheKeyWithWorkDir(toolName, args, "")
+}
+
+func (m *Manager) cacheKeyWithWorkDir(toolName string, args map[string]any, workDir string) string {
 	switch toolName {
 	case "write", "edit":
 		// These tools execute file_path; ignore unrelated extra fields so they
 		// cannot redirect the cache key away from the path being authorized.
 		if path, ok := args["file_path"].(string); ok {
+			if !filepath.IsAbs(path) && workDir != "" {
+				path = filepath.Join(workDir, path)
+			}
+			path = filepath.Clean(path)
 			return fmt.Sprintf("%s:%s", toolName, path)
 		}
 	}
@@ -197,15 +227,31 @@ func (m *Manager) cacheKey(toolName string, args map[string]any) string {
 // Check checks if a tool is allowed to execute.
 // Returns a Response indicating whether execution is allowed.
 func (m *Manager) Check(ctx context.Context, toolName string, args map[string]any) (*Response, error) {
-	if denied := m.refreshFromParent(toolName, args); denied != nil {
+	workDir := WorkDirFromContext(ctx)
+	if denied := m.refreshFromParent(toolName, args, workDir); denied != nil {
 		return denied, nil
 	}
 	// Snapshot config fields under lock to avoid races with SetEnabled/SetRules
 	m.mu.RLock()
 	enabled := m.enabled
+	dontAsk := m.dontAsk
 	rules := m.rules
 	revision := m.revision
+	runAllows := append([]string(nil), m.runAllows...)
+	runDenies := append([]string(nil), m.runDenies...)
 	m.mu.RUnlock()
+
+	// Explicit run deny rules remain authoritative even in bypassPermissions:
+	// the user supplied both flags for this invocation, and the narrower rule
+	// must win. Bare/wildcard denies are also removed from model schemas by the
+	// CLI wiring; this runtime check blocks hallucinated and late-added tools.
+	if temporaryToolDenyMatchesAny(runDenies, toolName, args, workDir) {
+		return &Response{
+			Allowed:  false,
+			Decision: DecisionDeny,
+			Reason:   "Tool is denied by a run-scoped CLI rule",
+		}, nil
+	}
 
 	// If permissions are disabled, allow everything
 	if !enabled {
@@ -224,6 +270,11 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		}, nil
 	}
 
+	// Run-scoped allows are pre-approvals, not capability grants. Config deny
+	// above still wins, and elevated Bash calls still reach the confirmation
+	// floor below.
+	runAllowed := temporaryToolGrantMatchesAny(runAllows, toolName, args, workDir)
+
 	// A normal LevelAllow is authoritative. Elevated bash commands are the one
 	// exception: an identical, explicitly session-approved call may satisfy the
 	// action-semantics confirmation floor below.
@@ -233,7 +284,7 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 
 	// Reusable decisions are scoped to both the normalized invocation and the
 	// current policy revision. DecisionAllow never enters this cache.
-	key := m.cacheKey(toolName, args)
+	key := m.cacheKeyWithWorkDir(toolName, args, workDir)
 	if cached, ok := m.sessionCache.Get(key); ok && cached.Revision == revision {
 		switch cached.Decision {
 		case DecisionAllowSession:
@@ -246,6 +297,19 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 			}, nil
 		}
 	}
+	if runAllowed && !isElevatedBash(toolName, args) {
+		return &Response{Allowed: true, Decision: DecisionAllow}, nil
+	}
+	if dontAsk {
+		if toolName == "bash" && IsReadOnlyBashArgs(args) {
+			return &Response{Allowed: true, Decision: DecisionAllow}, nil
+		}
+		return &Response{
+			Allowed:  false,
+			Decision: DecisionDeny,
+			Reason:   "Tool requires approval and was auto-denied by dontAsk mode",
+		}, nil
+	}
 
 	switch policy {
 	case LevelAllow:
@@ -257,16 +321,70 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		// already short-circuited via the cache above, so this never re-prompts
 		// a command the user just OK'd.
 		if isElevatedBash(toolName, args) {
-			return m.askUser(ctx, toolName, args, revision)
+			return m.askUser(ctx, toolName, args, workDir, revision)
 		}
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 
 	case LevelAsk:
-		return m.askUser(ctx, toolName, args, revision)
+		return m.askUser(ctx, toolName, args, workDir, revision)
 	}
 
 	// Default to asking
-	return m.askUser(ctx, toolName, args, revision)
+	return m.askUser(ctx, toolName, args, workDir, revision)
+}
+
+// SetRunToolRules atomically replaces process-scoped CLI allow/deny rules.
+// Inputs must already be canonicalized by the shared parser.
+func (m *Manager) SetRunToolRules(allows, denies []string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.runAllows = append([]string(nil), allows...)
+	m.runDenies = append([]string(nil), denies...)
+	m.revision++
+	m.sessionCache.Clear()
+	m.mu.Unlock()
+}
+
+// SetDontAsk controls fail-closed non-interactive permission behavior. When
+// enabled, calls that would otherwise prompt are denied immediately; explicit
+// allows, turn/run grants, and conservative read-only Bash remain usable.
+func (m *Manager) SetDontAsk(enabled bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	changed := m.dontAsk != enabled
+	m.dontAsk = enabled
+	if changed {
+		m.revision++
+		m.sessionCache.Clear()
+	}
+	m.mu.Unlock()
+}
+
+// IsDontAsk reports whether prompt-required calls are auto-denied.
+func (m *Manager) IsDontAsk() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	enabled := m.dontAsk
+	m.mu.RUnlock()
+	return enabled
+}
+
+// GetRunToolRules returns defensive snapshots for diagnostics and tests.
+func (m *Manager) GetRunToolRules() (allows, denies []string) {
+	if m == nil {
+		return nil, nil
+	}
+	m.mu.RLock()
+	allows = append([]string(nil), m.runAllows...)
+	denies = append([]string(nil), m.runDenies...)
+	m.mu.RUnlock()
+	return allows, denies
 }
 
 // isElevatedBash reports whether a call is a bash command that must be
@@ -291,7 +409,13 @@ func isElevatedBash(toolName string, args map[string]any) bool {
 }
 
 // askUser prompts the user for permission.
-func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]any, revision uint64) (*Response, error) {
+func (m *Manager) askUser(
+	ctx context.Context,
+	toolName string,
+	args map[string]any,
+	workDir string,
+	revision uint64,
+) (*Response, error) {
 	m.mu.RLock()
 	handler := m.promptHandler
 	m.mu.RUnlock()
@@ -325,7 +449,7 @@ func (m *Manager) askUser(ctx context.Context, toolName string, args map[string]
 	}
 
 	// Generate cache key for session decisions
-	key := m.cacheKey(toolName, args)
+	key := m.cacheKeyWithWorkDir(toolName, args, workDir)
 
 	// Handle the decision
 	switch decision {

@@ -419,7 +419,12 @@ func (a *App) finalizeReleasedRecoveries(keys []recoveryTimerKey, reason string,
 	}
 }
 
-func (a *App) releaseClaimedRecovery(id, sessionID string, expectedEpoch uint64, reason string) error {
+func (a *App) releaseClaimedRecovery(
+	id, sessionID string,
+	expectedEpoch uint64,
+	reason string,
+	rearm bool,
+) error {
 	if a == nil || a.session == nil || id == "" || sessionID == "" {
 		return nil
 	}
@@ -434,7 +439,7 @@ func (a *App) releaseClaimedRecovery(id, sessionID string, expectedEpoch uint64,
 	if err != nil && !commitUncertain {
 		return fmt.Errorf("release unstarted recovery: %w", err)
 	}
-	a.finalizeReleasedRecoveries([]recoveryTimerKey{key}, reason, true)
+	a.finalizeReleasedRecoveries([]recoveryTimerKey{key}, reason, rearm)
 	if commitUncertain {
 		return fmt.Errorf("%w: release unstarted recovery: %v", errRecoveryCommitUncertain, err)
 	}

@@ -667,8 +667,13 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 			"model", modelID)
 	}
 
-	// Use custom base URL if provided, otherwise use default
-	baseURL := cfg.API.OllamaBaseURL
+	// The run-scoped --base-url override is stored in Model.CustomBaseURL for
+	// every provider. Prefer it here as well so Ollama follows the same CLI
+	// contract as hosted providers, then fall back to its persistent setting.
+	baseURL := strings.TrimSpace(cfg.Model.CustomBaseURL)
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(cfg.API.OllamaBaseURL)
+	}
 	if baseURL == "" {
 		baseURL = config.DefaultOllamaBaseURL
 	}

@@ -387,6 +387,19 @@ func DefaultRegistry(workDir string) *Registry {
 	return r
 }
 
+// BareRegistry constructs the physically minimal automation registry. Keep
+// this separate from DefaultRegistry instead of filtering after construction:
+// several default tools discover skills or initialize optional subsystems in
+// their constructors, which violates --bare's no-auto-discovery contract even
+// when their declarations are later hidden from the model.
+func BareRegistry(workDir string) *Registry {
+	r := NewRegistry()
+	r.MustRegister(NewReadTool(workDir))
+	r.MustRegister(NewEditTool(workDir))
+	r.MustRegister(NewBashTool(workDir))
+	return r
+}
+
 // ========== LazyRegistry - Lazy-Loading Tool Registry ==========
 
 // ToolLister interface for listing tools without full registry access.
@@ -636,8 +649,9 @@ func (r *LazyRegistry) TotalCount() int {
 func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	r := NewLazyRegistry()
 
-	// Get all static declarations
-	declarations := GetAllDeclarations()
+	// Build model-facing declarations from the same live contracts as the
+	// factories below, without retaining the temporary tool instances.
+	declarations := getAllDeclarationsForWorkDir(workDir)
 
 	// Core file tools
 	r.RegisterFactory("read", func() Tool { return NewReadTool(workDir) }, declarations["read"])

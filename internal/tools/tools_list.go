@@ -62,6 +62,7 @@ type mcpServerSource interface {
 func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	serverFilter, _ := args["server"].(string)
 	serverFilter = strings.TrimSpace(serverFilter)
+	ceiling, restricted := ToolCapabilityCeilingFromContext(ctx)
 
 	var output strings.Builder
 	if serverFilter != "" {
@@ -76,6 +77,9 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 		// Eager registry path — we have Tool objects, so per-server filter works.
 		tools := t.baseRegistry.List()
 		for _, tool := range tools {
+			if restricted && !toolCapabilityAllows(ceiling, tool.Name()) {
+				continue
+			}
 			if serverFilter != "" {
 				src, ok := tool.(mcpServerSource)
 				if !ok || src.GetServerName() != serverFilter {
@@ -96,6 +100,9 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 			), nil
 		}
 		for _, decl := range t.lister.Declarations() {
+			if restricted && !toolCapabilityAllows(ceiling, decl.Name) {
+				continue
+			}
 			desc := decl.Description
 			if runes := []rune(desc); len(runes) > 100 {
 				desc = string(runes[:97]) + "..."
@@ -120,7 +127,7 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	// current toolkit actually includes it — otherwise the hint tells
 	// Kimi to call a tool it doesn't have, which is exactly the
 	// silent-failure pattern we're trying to eliminate.
-	if t.hasRequestTool() {
+	if t.hasRequestTool(ctx) {
 		output.WriteString("\nIf you need a tool that is not in your current toolkit, use 'request_tool' to request it.")
 	}
 	return NewSuccessResult(output.String()), nil
@@ -131,7 +138,11 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 // main-agent responses don't advertise a sub-agent-only capability.
 // Works against both the eager Registry and the LazyRegistry/ToolLister
 // interfaces — whichever is wired for this instance.
-func (t *ToolsListTool) hasRequestTool() bool {
+func (t *ToolsListTool) hasRequestTool(ctx context.Context) bool {
+	if ceiling, restricted := ToolCapabilityCeilingFromContext(ctx); restricted &&
+		!toolCapabilityAllows(ceiling, "request_tool") {
+		return false
+	}
 	if t.baseRegistry != nil {
 		_, ok := t.baseRegistry.Get("request_tool")
 		return ok

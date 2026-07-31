@@ -42,7 +42,9 @@ type OllamaClient struct {
 	systemInstruction string
 	// turnContext — per-turn ephemeral context, see SetTurnContext. Guarded by mu.
 	turnContext string
-	mu          sync.RWMutex
+	// directHealthTracking is disabled for fallback-owned children.
+	directHealthTracking bool
+	mu                   sync.RWMutex
 }
 
 // authTransport adds Authorization header to HTTP requests.
@@ -124,9 +126,10 @@ func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
 	ollamaClient := api.NewClient(baseURL, httpClient)
 
 	return &OllamaClient{
-		client: ollamaClient,
-		config: config,
-		tools:  make([]*genai.Tool, 0),
+		client:               ollamaClient,
+		config:               config,
+		tools:                make([]*genai.Tool, 0),
+		directHealthTracking: true,
 	}, nil
 }
 
@@ -244,6 +247,7 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 
 	var lastErr error
 	maxDelay := 30 * time.Second
+	providerAttempted := false
 
 	// Retry loop
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
@@ -280,9 +284,10 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 			}
 		}
 
+		providerAttempted = true
 		response, err := c.doStreamChat(ctx, req)
 		if err == nil {
-			return response, nil
+			return c.observeDirectHealth(ctx, response), nil
 		}
 
 		lastErr = WrapProviderHTTPTimeout(err, "ollama", c.config.HTTPTimeout)
@@ -293,7 +298,9 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 			if rateLimiter != nil {
 				rateLimiter.ReturnTokens(1, estimatedTokens)
 			}
-			return nil, c.wrapOllamaError(lastErr)
+			err := c.wrapOllamaError(lastErr)
+			c.recordDirectHealthFailure(providerAttempted, err)
+			return nil, err
 		}
 
 		logging.Warn("Ollama request failed, will retry", "attempt", attempt, "error", lastErr)
@@ -303,7 +310,37 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 	if rateLimiter != nil {
 		rateLimiter.ReturnTokens(1, estimatedTokens)
 	}
-	return nil, fmt.Errorf("max retries (%d) exceeded: %w", c.config.MaxRetries, c.wrapOllamaError(lastErr))
+	err := fmt.Errorf("max retries (%d) exceeded: %w", c.config.MaxRetries, c.wrapOllamaError(lastErr))
+	c.recordDirectHealthFailure(providerAttempted, err)
+	return nil, err
+}
+
+func (c *OllamaClient) setDirectHealthTracking(enabled bool) {
+	c.mu.Lock()
+	c.directHealthTracking = enabled
+	c.mu.Unlock()
+}
+
+func (c *OllamaClient) observeDirectHealth(ctx context.Context, stream *StreamingResponse) *StreamingResponse {
+	c.mu.RLock()
+	enabled := c.directHealthTracking
+	c.mu.RUnlock()
+	if !enabled {
+		return stream
+	}
+	return observeProviderStream(ctx, "ollama", stream)
+}
+
+func (c *OllamaClient) recordDirectHealthFailure(attempted bool, err error) {
+	if !attempted || !shouldFallbackToNextProvider(err) {
+		return
+	}
+	c.mu.RLock()
+	enabled := c.directHealthTracking
+	c.mu.RUnlock()
+	if enabled {
+		recordProviderFailure("ollama", IsRetryableError(err))
+	}
 }
 
 // doStreamChat performs a single streaming chat request.
@@ -520,6 +557,7 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 	sc := c.statusCallback
 	si := c.systemInstruction
 	tc := c.turnContext
+	trackHealth := c.directHealthTracking
 	c.mu.RUnlock()
 
 	newConfig.Model = modelName
@@ -541,6 +579,7 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 	if tc != "" {
 		newClient.SetTurnContext(tc)
 	}
+	newClient.setDirectHealthTracking(trackHealth)
 	return newClient
 }
 
@@ -549,13 +588,14 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 func (c *OllamaClient) cloneForSession() Client {
 	c.mu.RLock()
 	clone := &OllamaClient{
-		client:            c.client,
-		config:            c.config,
-		tools:             append([]*genai.Tool(nil), c.tools...),
-		rateLimiter:       c.rateLimiter,
-		statusCallback:    c.statusCallback,
-		systemInstruction: c.systemInstruction,
-		turnContext:       c.turnContext,
+		client:               c.client,
+		config:               c.config,
+		tools:                append([]*genai.Tool(nil), c.tools...),
+		rateLimiter:          c.rateLimiter,
+		statusCallback:       c.statusCallback,
+		systemInstruction:    c.systemInstruction,
+		turnContext:          c.turnContext,
+		directHealthTracking: c.directHealthTracking,
 	}
 	c.mu.RUnlock()
 	return clone

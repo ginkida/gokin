@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +132,36 @@ func TestTasks_DetailShowsOutputTailAndFile(t *testing.T) {
 	}
 	if strings.Contains(out, strings.Repeat("x", 3500)) {
 		t.Fatal("detail output was not tail-capped")
+	}
+}
+
+func TestTasks_DetailReadsRunningAgentLiveTranscript(t *testing.T) {
+	outputFile := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(outputFile, []byte("crate 4/10 still compiling\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeTaskRunner{
+		summaries: []agent.TaskSummary{{
+			ID: "715ca37352122226", Type: "bash",
+			Status: agent.AgentStatusRunning, Task: "cargo test --workspace",
+		}},
+		results: map[string]*agent.AgentResult{
+			"715ca37352122226": {
+				AgentID: "715ca37352122226",
+				Status:  agent.AgentStatusRunning, OutputFile: outputFile,
+			},
+		},
+	}
+
+	out, err := (&TasksCommand{}).Execute(
+		context.Background(), []string{"715ca37352122226"}, newTasksApp(runner),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "crate 4/10 still compiling") ||
+		strings.Contains(out, "no output captured yet") {
+		t.Fatalf("running detail did not read live transcript:\n%s", out)
 	}
 }
 
@@ -322,6 +354,26 @@ func TestTasks_DetailShowsShellTaskOutput(t *testing.T) {
 	for _, needle := range []string{"task_9_1", "go build ./...", "Exit code: 1", "build error: undefined foo"} {
 		if !strings.Contains(out, needle) {
 			t.Fatalf("shell detail missing %q:\n%s", needle, out)
+		}
+	}
+}
+
+func TestTasks_ShellDetailKeepsCargoAggregateWhenTailIsOnlyDocTests(t *testing.T) {
+	shells := &fakeShellRunner{infos: []tasks.Info{{
+		ID:         "task_10_1",
+		Command:    "cargo test --workspace",
+		Status:     "completed",
+		Summary:    "Cargo test totals: 1710 passed; 0 failed across 3 test harnesses.",
+		Output:     strings.Repeat("main test output\n", 400) + "Doc-tests demo\n0 passed; 0 failed\n",
+		OutputFile: "/workspace/.gokin/task-output/task_10_1.log",
+	}}}
+	out, err := (&TasksCommand{}).Execute(context.Background(), []string{"task_10_1"}, newTasksAppWithShells(nil, shells))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"1710 passed", "0 failed", "Full output:", "task_10_1.log"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("shell detail missing %q:\n%s", want, out)
 		}
 	}
 }

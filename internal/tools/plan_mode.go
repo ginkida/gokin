@@ -558,10 +558,33 @@ func (t *ExitPlanModeTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *ExitPlanModeTool) Validate(args map[string]any) error {
+	if value, present := args["reason"]; present {
+		reason, ok := value.(string)
+		if !ok {
+			return NewValidationError("reason", "must be a string")
+		}
+		switch strings.ToLower(strings.TrimSpace(reason)) {
+		case "", "completed", "abandoned", "error":
+		default:
+			return NewValidationError("reason", "must be one of: completed, abandoned, error")
+		}
+	}
+	if value, present := args["summary"]; present {
+		if _, ok := value.(string); !ok {
+			return NewValidationError("summary", "must be a string")
+		}
+	}
 	return nil
 }
 
 func (t *ExitPlanModeTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+	// The executor validates normal model calls. Defend direct/internal callers
+	// too: an unknown reason historically fell through to LifecycleCancelled,
+	// cleared the plan, and still returned success.
+	if err := t.Validate(args); err != nil {
+		return NewErrorResult(fmt.Sprintf("exit_plan_mode invalid arguments: %v", err)), nil
+	}
+
 	if t.manager == nil {
 		return NewErrorResult("plan manager not configured"), nil
 	}
@@ -570,7 +593,10 @@ func (t *ExitPlanModeTool) Execute(ctx context.Context, args map[string]any) (To
 		return NewErrorResult("cannot exit plan mode during orchestrated execution — the orchestrator manages plan completion automatically"), nil
 	}
 
-	reason := GetStringDefault(args, "reason", "completed")
+	reason := strings.ToLower(strings.TrimSpace(GetStringDefault(args, "reason", "completed")))
+	if reason == "" {
+		reason = "completed"
+	}
 	summary, _ := GetString(args, "summary")
 
 	p := t.manager.GetCurrentPlan()

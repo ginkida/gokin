@@ -33,7 +33,7 @@ func TestExactResumeHeadlessPassesPriorHistoryAndKeepsSessionID(t *testing.T) {
 		t.Fatalf("SaveFull: %v", err)
 	}
 
-	mock := testkit.NewMockClient().EnqueueText("continued with the prior constraint")
+	mock := testkit.NewMockClient().EnqueueText(`{"continued":true}`)
 	application, _ := newHeadlessPolicyTestApp(t, mock, &appHeadlessScriptedTool{
 		name:    "unused",
 		results: []tools.ToolResult{tools.NewSuccessResult("unused")},
@@ -49,11 +49,17 @@ func TestExactResumeHeadlessPassesPriorHistoryAndKeepsSessionID(t *testing.T) {
 	if err := application.ResumeSession("saved-headless-session"); err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}
+	schema, err := CompileStructuredOutputSchema(
+		`{"type":"object","properties":{"continued":{"const":true}},"required":["continued"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var stdout bytes.Buffer
 	result, err := application.RunHeadlessWithOptions(context.Background(), "continue exactly", HeadlessOptions{
 		OutputFormat: HeadlessOutputJSON,
 		Stdout:       &stdout,
 		Stderr:       io.Discard,
+		JSONSchema:   schema,
 	})
 	if err != nil {
 		t.Fatalf("RunHeadlessWithOptions: %v", err)
@@ -61,6 +67,9 @@ func TestExactResumeHeadlessPassesPriorHistoryAndKeepsSessionID(t *testing.T) {
 	_ = decodeSingleHeadlessResult(t, stdout.Bytes())
 	if result.SessionID != "saved-headless-session" || application.session.GetID() != "saved-headless-session" {
 		t.Fatalf("session identity drifted: result=%q active=%q", result.SessionID, application.session.GetID())
+	}
+	if result.StructuredOutput == nil {
+		t.Fatal("structured output missing after exact resume")
 	}
 
 	calls := mock.Calls()

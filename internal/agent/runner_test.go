@@ -461,6 +461,9 @@ func TestBashAgentsUseManagedIsolatedWorkspace(t *testing.T) {
 	registry.MustRegister(tools.NewBashTool(workDir))
 	registry.MustRegister(tools.NewReadTool(workDir))
 	registry.MustRegister(tools.NewGlobTool(workDir))
+	registry.MustRegister(tools.NewRunTestsTool(workDir))
+	registry.MustRegister(tools.NewVerifyCodeTool(workDir))
+	registry.MustRegister(tools.NewTaskOutputTool())
 	registry.MustRegister(tools.NewWriteTool(workDir))
 	registry.MustRegister(tools.NewGitCommitTool(workDir))
 
@@ -486,6 +489,14 @@ func TestBashAgentsUseManagedIsolatedWorkspace(t *testing.T) {
 	if !bashTool.ManagedWorkspaceApplyBackModeEnabled() {
 		t.Fatal("expected managed apply-back mode for isolated bash tool")
 	}
+	if _, advertised := bashTool.Declaration().Parameters.Properties["run_in_background"]; advertised {
+		t.Fatal("isolated bash schema must not advertise unsupported background execution")
+	}
+	for _, name := range []string{"run_tests", "verify_code", "task_output"} {
+		if _, ok := agent.registry.Get(name); !ok {
+			t.Fatalf("isolated bash agent missing long-verification fallback %q", name)
+		}
+	}
 
 	result, err := bashTool.Execute(context.Background(), map[string]any{"command": "cd .."})
 	if err != nil {
@@ -508,8 +519,8 @@ func TestBashAgentsUseManagedIsolatedWorkspace(t *testing.T) {
 	if result.Success {
 		t.Fatalf("expected background execution to be blocked: %#v", result)
 	}
-	if !strings.Contains(result.Error, "run_in_background is not supported") {
-		t.Fatalf("background error = %q, want isolated apply-back error", result.Error)
+	if !strings.Contains(result.Error, "run_in_background is disabled") {
+		t.Fatalf("background error = %q, want disabled-policy error", result.Error)
 	}
 
 	result, err = bashTool.Execute(context.Background(), map[string]any{"command": "git commit -m test"})

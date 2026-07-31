@@ -17,6 +17,9 @@ func (a *App) buildEvidenceFooterIfEnabled(response string) string {
 	if a == nil {
 		return ""
 	}
+	if a.config != nil && a.config.Bare {
+		return ""
+	}
 	if a.config != nil && !a.config.Completion.EvidenceFooter {
 		return ""
 	}

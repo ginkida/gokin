@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"gokin/internal/skills"
@@ -383,19 +384,18 @@ func (s *SessionState) GenerateSummary() string {
 		return ""
 	}
 
-	// Find first user message after system prompt
-	for i, content := range s.History {
-		if i < 2 { // Skip system prompt and initial response
+	// The system instruction is stored separately from History, so the first
+	// real user message is normally at index zero. Ignore only Gokin's strictly
+	// parsed internal active-skill carry message and non-conversational parts.
+	for _, content := range s.History {
+		if content.Role != "user" || isSerializedSkillCarry(content) {
 			continue
 		}
-		if content.Role == "user" && len(content.Parts) > 0 {
-			text := ""
-			for _, part := range content.Parts {
-				if part.Type == "text" && part.Text != "" {
-					text = part.Text
-					break
-				}
+		for _, part := range content.Parts {
+			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
+				continue
 			}
+			text := part.Text
 			if runes := []rune(text); len(runes) > 100 {
 				return string(runes[:97]) + "..."
 			}
@@ -404,4 +404,13 @@ func (s *SessionState) GenerateSummary() string {
 	}
 
 	return ""
+}
+
+func isSerializedSkillCarry(content SerializedContent) bool {
+	if content.Role != "user" || len(content.Parts) != 1 {
+		return false
+	}
+	part := content.Parts[0]
+	return part.Type == "text" && !part.Thought && len(part.ThoughtSignature) == 0 &&
+		skills.IsSyntheticCarryText(part.Text)
 }

@@ -12,6 +12,7 @@ import (
 
 	"gokin/internal/client"
 	"gokin/internal/testkit"
+	"gokin/internal/tools"
 )
 
 func TestWatchMessageIdle_LatchesTimeoutBeforeCancellingInnerContext(t *testing.T) {
@@ -128,6 +129,178 @@ func TestRunHeadlessWithOptions_ModelRoundTimeoutIsTyped(t *testing.T) {
 	}
 	if !strings.Contains(result.Error.Message, string(client.FailureReasonModelRoundTimeout)) {
 		t.Fatalf("model timeout diagnostic = %q", result.Error.Message)
+	}
+}
+
+func TestRunHeadlessWithOptions_OverallTimeoutIsTypedAndDoesNotLeak(t *testing.T) {
+	mock := testkit.NewMockClient().
+		EnqueueScript(testkit.ResponseScript{
+			DelayBeforeFirstChunk: time.Second,
+			Chunks:                []client.ResponseChunk{{Text: "too late"}},
+		}).
+		EnqueueText("healthy next invocation")
+	app, _ := newHeadlessPolicyTestApp(t, mock, &appHeadlessScriptedTool{name: "unused"})
+
+	started := time.Now()
+	result, err := app.RunHeadlessWithOptions(context.Background(), "finish within the invocation", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+		Timeout:      20 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("overall timeout error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("overall timeout returned after %v, want prompt cancellation", elapsed)
+	}
+	if result.Status != "timeout" || result.Error == nil || result.Error.Kind != "timeout" {
+		t.Fatalf("overall timeout result = %+v", result)
+	}
+
+	second, err := app.RunHeadlessWithOptions(context.Background(), "try again", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+	})
+	if err != nil || second.Status != "success" || second.Result != "healthy next invocation" {
+		t.Fatalf("timeout leaked into next invocation: result=%+v err=%v", second, err)
+	}
+}
+
+func TestRunHeadlessWithOptions_MaxTurnsIsTypedAndDoesNotLeak(t *testing.T) {
+	mock := testkit.NewMockClient().
+		EnqueueToolCall("inspect", map[string]any{"path": "main.go"}).
+		EnqueueText("healthy next invocation")
+	tool := &appHeadlessScriptedTool{
+		name:    "inspect",
+		results: []tools.ToolResult{tools.NewSuccessResult("inspection complete")},
+	}
+	app, _ := newHeadlessPolicyTestApp(t, mock, tool)
+
+	var stdout bytes.Buffer
+	result, err := app.RunHeadlessWithOptions(context.Background(), "inspect until capped", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       &stdout,
+		Stderr:       io.Discard,
+		MaxTurns:     1,
+	})
+	if !errors.Is(err, tools.ErrMaxTurnsExceeded) {
+		t.Fatalf("max-turns error = %v, want ErrMaxTurnsExceeded", err)
+	}
+	if result.Status != "error" || result.Error == nil || result.Error.Kind != "max_turns" {
+		t.Fatalf("max-turns result = %+v", result)
+	}
+	decoded := decodeSingleHeadlessResult(t, stdout.Bytes())
+	if decoded.Error == nil || decoded.Error.Kind != "max_turns" {
+		t.Fatalf("encoded max-turns result = %+v", decoded)
+	}
+	if tool.CallCount() != 1 {
+		t.Fatalf("tool call count = %d, want 1", tool.CallCount())
+	}
+
+	second, err := app.RunHeadlessWithOptions(context.Background(), "try again", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+	})
+	if err != nil || second.Status != "success" || second.Result != "healthy next invocation" {
+		t.Fatalf("turn limit leaked into next invocation: result=%+v err=%v", second, err)
+	}
+}
+
+func TestRunHeadlessWithOptions_MaxBudgetStopsToolSideEffects(t *testing.T) {
+	mock := testkit.NewMockClient().
+		EnqueueToolCall("inspect", map[string]any{"path": "main.go"})
+	tool := &appHeadlessScriptedTool{
+		name:    "inspect",
+		results: []tools.ToolResult{tools.NewSuccessResult("must not run")},
+	}
+	app, executor := newHeadlessPolicyTestApp(t, mock, tool)
+	executor.SetCostCalculator(func(_, _ string, _, _, _ int) (float64, bool) {
+		return 0.60, true
+	})
+
+	var stdout bytes.Buffer
+	result, err := app.RunHeadlessWithOptions(context.Background(), "inspect within budget", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       &stdout,
+		Stderr:       io.Discard,
+		MaxBudgetUSD: 0.50,
+	})
+	if !errors.Is(err, tools.ErrBudgetExceeded) {
+		t.Fatalf("budget error = %v, want ErrBudgetExceeded", err)
+	}
+	if result.Status != "error" || result.Error == nil || result.Error.Kind != "budget_exceeded" {
+		t.Fatalf("budget result = %+v", result)
+	}
+	if !result.Cost.Tracked || result.Cost.EstimatedUSD != 0.60 {
+		t.Fatalf("budget cost = %+v, want tracked $0.60", result.Cost)
+	}
+	if tool.CallCount() != 0 {
+		t.Fatalf("tool call count = %d, want 0", tool.CallCount())
+	}
+	decoded := decodeSingleHeadlessResult(t, stdout.Bytes())
+	if decoded.Error == nil || decoded.Error.Kind != "budget_exceeded" {
+		t.Fatalf("encoded budget result = %+v", decoded)
+	}
+}
+
+func TestRunHeadlessWithOptions_MaxBudgetRequiresPricingAndDoesNotLeak(t *testing.T) {
+	mock := testkit.NewMockClient().EnqueueText("healthy unbudgeted invocation")
+	app, _ := newHeadlessPolicyTestApp(t, mock, &appHeadlessScriptedTool{name: "unused"})
+
+	result, err := app.RunHeadlessWithOptions(context.Background(), "do not call provider", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+		MaxBudgetUSD: 0.50,
+	})
+	if !errors.Is(err, tools.ErrCostUnavailable) {
+		t.Fatalf("pricing error = %v, want ErrCostUnavailable", err)
+	}
+	if result.Status != "error" || result.Error == nil || result.Error.Kind != "cost_unavailable" {
+		t.Fatalf("pricing result = %+v", result)
+	}
+	if len(mock.Calls()) != 0 {
+		t.Fatalf("provider calls = %d, want 0", len(mock.Calls()))
+	}
+	if result.Usage != (HeadlessUsage{}) {
+		t.Fatalf("preflight usage = %+v, want zero", result.Usage)
+	}
+	if result.Cost.Tracked || result.Cost.EstimatedUSD != 0 {
+		t.Fatalf("preflight cost = %+v, want untracked zero", result.Cost)
+	}
+
+	second, err := app.RunHeadlessWithOptions(context.Background(), "run without a budget", HeadlessOptions{
+		OutputFormat: HeadlessOutputJSON,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+	})
+	if err != nil || second.Status != "success" || second.Result != "healthy unbudgeted invocation" {
+		t.Fatalf("budget leaked into next invocation: result=%+v err=%v", second, err)
+	}
+}
+
+func TestRunHeadlessWithOptions_RejectsNegativeLimitsBeforeExecution(t *testing.T) {
+	tests := []HeadlessOptions{
+		{OutputFormat: HeadlessOutputJSON, MaxTurns: -1},
+		{OutputFormat: HeadlessOutputJSON, Timeout: -time.Second},
+		{OutputFormat: HeadlessOutputJSON, MaxBudgetUSD: -0.01},
+	}
+	for _, opts := range tests {
+		mock := testkit.NewMockClient().EnqueueText("must remain queued")
+		app, _ := newHeadlessPolicyTestApp(t, mock, &appHeadlessScriptedTool{name: "unused"})
+		opts.Stdout = io.Discard
+		opts.Stderr = io.Discard
+
+		result, err := app.RunHeadlessWithOptions(context.Background(), "do not execute", opts)
+		if err == nil || result.Error == nil || result.Error.Kind != "validation" {
+			t.Fatalf("negative limit result=%+v err=%v", result, err)
+		}
+		if len(mock.Calls()) != 0 {
+			t.Fatalf("invalid limit reached model: %d calls", len(mock.Calls()))
+		}
 	}
 }
 

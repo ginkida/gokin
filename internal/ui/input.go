@@ -383,7 +383,7 @@ func DefaultCommands() []CommandInfo {
 		{Name: "config", Description: "Show current configuration", Category: "Auth"},
 		{Name: "set", Description: "View or change a setting (live)", Category: "Auth",
 			Args: []ArgInfo{{Name: "key|preset", Required: false, Type: "option",
-				Options: []string{"permissions", "sandbox", "diff", "autocompact", "memory", "globalmemory", "sessionmemory", "plan", "donegate", "thinking", "session", "watcher", "searchcache", "tokens", "compactui", "reducedmotion", "toolcalls", "hints", "bell", "nativealerts", "glmsearch", "preset"}},
+				Options: []string{"permissions", "sandbox", "diff", "autocompact", "memory", "globalmemory", "sessionmemory", "plan", "donegate", "thinking", "session", "watcher", "searchcache", "tokens", "compactui", "reducedmotion", "toolcalls", "markdown", "hints", "bell", "nativealerts", "glmsearch", "preset"}},
 				{Name: "value", Required: false, Type: "option", Options: []string{"on", "off"},
 					OptionsByPrevious: map[string][]string{"preset": {"safe", "balanced", "fast"}}}},
 			Usage: "/set [<key> <on|off> | preset <safe|balanced|fast>]"},

@@ -46,6 +46,10 @@ func TestSafeBufferTruncationNoticeHonesty(t *testing.T) {
 	if s := withFile.String(); !strings.Contains(s, "Full output in: "+path) {
 		t.Fatalf("healthy file pointer missing:\n...%s", s[len(s)-200:])
 	}
+	if full := withFile.FullString(); len(full) != len(big)+len("overflow") ||
+		!strings.HasSuffix(full, "overflow") {
+		t.Fatalf("FullString did not recover file-backed overflow: len=%d suffix=%q", len(full), full[len(full)-min(len(full), 20):])
+	}
 
 	// Mid-stream failure: the file is incomplete and must be labeled so.
 	var failed safeBuffer

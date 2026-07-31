@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -403,15 +404,13 @@ This later paragraph is not catalog metadata.`)
 
 func TestCatalogRejectsUnsupportedExecutionFrontmatterExplicitly(t *testing.T) {
 	fields := map[string]string{
-		"allowed-tools":    "[Read]",
-		"disallowed-tools": "[Bash]",
-		"model":            "sonnet",
-		"effort":           "high",
-		"context":          "fork",
-		"agent":            "Explore",
-		"hooks":            "{}",
-		"paths":            "['src/**']",
-		"shell":            "bash",
+		"model":   "sonnet",
+		"effort":  "high",
+		"context": "fork",
+		"agent":   "Explore",
+		"hooks":   "{}",
+		"paths":   "['src/**']",
+		"shell":   "bash",
 	}
 	for field, value := range fields {
 		t.Run(field, func(t *testing.T) {
@@ -427,6 +426,132 @@ func TestCatalogRejectsUnsupportedExecutionFrontmatterExplicitly(t *testing.T) {
 			want := fmt.Sprintf("field %q is recognized but unsupported", field)
 			if !strings.Contains(warnings, want) {
 				t.Fatalf("warnings = %q, want %q", warnings, want)
+			}
+		})
+	}
+}
+
+func TestCatalogLoadsAndCanonicalizesDisallowedTools(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "review", `---
+description: Review without mutations or pushes
+disallowed-tools:
+  - Write
+  - Bash(git push *)
+  - Read(/secrets/**)
+  - Agent(Explore)
+  - mcp__*
+  - Write
+---
+Review the change without modifying it.`)
+
+	catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+	skill, ok := catalog.Get("review")
+	if !ok {
+		t.Fatalf("skill missing: %q", strings.Join(catalog.Warnings(), "\n"))
+	}
+	want := []string{
+		"write",
+		"bash(git push *)",
+		"read(/secrets/**)",
+		"task(Explore)",
+		"mcp__*",
+	}
+	if !reflect.DeepEqual(skill.DisallowedTools, want) {
+		t.Fatalf("disallowed tools = %#v, want %#v", skill.DisallowedTools, want)
+	}
+	skill.DisallowedTools[0] = "mutated"
+	again, _ := catalog.Get("review")
+	if !reflect.DeepEqual(again.DisallowedTools, want) {
+		t.Fatalf("catalog snapshot was mutated through caller: %#v", again.DisallowedTools)
+	}
+}
+
+func TestCatalogRejectsMalformedDisallowedTools(t *testing.T) {
+	tests := map[string]string{
+		"unbalanced":  "Bash(git push",
+		"empty scope": "Bash()",
+		"unsupported": "SSH(prod.example.com)",
+		"mapping":     "{Write: true}",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSkill(t, root, "controlled", fmt.Sprintf(`---
+description: controlled workflow
+disallowed-tools: %s
+---
+Run controlled workflow.`, value))
+			catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+			if _, ok := catalog.Get("controlled"); ok {
+				t.Fatal("malformed disallowed-tools skill was loaded")
+			}
+			if warnings := strings.Join(catalog.Warnings(), "\n"); !strings.Contains(warnings, "disallowed-tools") {
+				t.Fatalf("warnings = %q", warnings)
+			}
+		})
+	}
+}
+
+func TestCatalogLoadsAndCanonicalizesAllowedTools(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "commit", `---
+description: Commit a reviewed change
+allowed-tools:
+  - Read
+  - Read(/src/**)
+  - Bash(git status --short)
+  - Bash(git commit *)
+  - WebFetch(domain:example.com)
+  - mcp__github__*
+  - Read
+---
+Review and commit the change.`)
+
+	catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+	skill, ok := catalog.Get("commit")
+	if !ok {
+		t.Fatalf("skill missing: %q", strings.Join(catalog.Warnings(), "\n"))
+	}
+	want := []string{
+		"read",
+		"read(/src/**)",
+		"bash(git status --short)",
+		"bash(git commit *)",
+		"web_fetch(domain:example.com)",
+		"mcp__github__*",
+	}
+	if !reflect.DeepEqual(skill.AllowedTools, want) {
+		t.Fatalf("allowed tools = %#v, want %#v", skill.AllowedTools, want)
+	}
+	skill.AllowedTools[0] = "mutated"
+	again, _ := catalog.Get("commit")
+	if !reflect.DeepEqual(again.AllowedTools, want) {
+		t.Fatalf("catalog snapshot was mutated through caller: %#v", again.AllowedTools)
+	}
+}
+
+func TestCatalogRejectsMalformedAllowedTools(t *testing.T) {
+	tests := map[string]string{
+		"unbalanced":  "Bash(git status",
+		"empty scope": "Bash()",
+		"unsupported": "SSH(prod.example.com)",
+		"mapping":     "{Read: true}",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSkill(t, root, "controlled", fmt.Sprintf(`---
+description: controlled workflow
+allowed-tools: %s
+---
+Run controlled workflow.`, value))
+			catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+			if _, ok := catalog.Get("controlled"); ok {
+				t.Fatal("malformed allowed-tools skill was loaded")
+			}
+			if warnings := strings.Join(catalog.Warnings(), "\n"); !strings.Contains(warnings, "allowed-tools") {
+				t.Fatalf("warnings = %q", warnings)
 			}
 		})
 	}

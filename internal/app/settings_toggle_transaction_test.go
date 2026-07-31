@@ -46,6 +46,7 @@ func TestApplySettingToggleUIOnlyDoesNotRequireValidProvider(t *testing.T) {
 		{"reducedmotion", true, func(c *config.Config) bool { return c.UI.ReducedMotion }},
 		{"hints", false, func(c *config.Config) bool { return !c.UI.HintsEnabled }},
 		{"toolcalls", false, func(c *config.Config) bool { return !c.UI.ShowToolCalls }},
+		{"markdown", false, func(c *config.Config) bool { return !c.UI.MarkdownRendering }},
 		{"bell", false, func(c *config.Config) bool { return !c.UI.Bell }},
 		{"nativealerts", true, func(c *config.Config) bool { return c.UI.NativeNotifications }},
 	}

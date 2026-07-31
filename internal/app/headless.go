@@ -44,14 +44,42 @@ func (e *headlessTimeoutError) Error() string { return e.message }
 
 func (e *headlessTimeoutError) Unwrap() error { return context.DeadlineExceeded }
 
+// headlessMaxTurnsError preserves errors.Is semantics after the app's terminal
+// outcome latch has converted the executor error into durable kind/message data.
+type headlessMaxTurnsError struct {
+	message string
+}
+
+func (e *headlessMaxTurnsError) Error() string { return e.message }
+
+func (e *headlessMaxTurnsError) Unwrap() error { return tools.ErrMaxTurnsExceeded }
+
+type headlessBudgetError struct {
+	message string
+}
+
+func (e *headlessBudgetError) Error() string { return e.message }
+
+func (e *headlessBudgetError) Unwrap() error { return tools.ErrBudgetExceeded }
+
+type headlessCostUnavailableError struct {
+	message string
+}
+
+func (e *headlessCostUnavailableError) Error() string { return e.message }
+
+func (e *headlessCostUnavailableError) Unwrap() error { return tools.ErrCostUnavailable }
+
 // HeadlessOutputFormat selects the stable stdout contract used by
 // RunHeadlessWithOptions. Text preserves the traditional streamed answer;
-// JSON emits exactly one versioned result object after the turn completes.
+// JSON emits exactly one versioned result object after the turn completes;
+// stream-json emits JSONL progress followed by that same terminal object.
 type HeadlessOutputFormat string
 
 const (
-	HeadlessOutputText HeadlessOutputFormat = "text"
-	HeadlessOutputJSON HeadlessOutputFormat = "json"
+	HeadlessOutputText       HeadlessOutputFormat = "text"
+	HeadlessOutputJSON       HeadlessOutputFormat = "json"
+	HeadlessOutputStreamJSON HeadlessOutputFormat = "stream-json"
 
 	HeadlessSchemaVersion = 1
 )
@@ -63,6 +91,25 @@ type HeadlessOptions struct {
 	OutputFormat HeadlessOutputFormat
 	Stdout       io.Writer
 	Stderr       io.Writer
+	// JSONSchema requests a validated final JSON value. It is compiled before
+	// execution and may be reused safely across stream-json input records.
+	JSONSchema *StructuredOutputSchema
+	// StreamState keeps stream-json event sequence numbers monotonic across
+	// several RunHeadlessWithOptions calls sharing one JSONL connection.
+	StreamState *HeadlessStreamState
+	// MaxTurns sets the executor's model/tool-round limit for this invocation
+	// only. Zero disables the turn cap, matching headless CLI semantics.
+	MaxTurns int
+	// Timeout is an overall execution deadline for this invocation. Zero means
+	// no extra wall-clock deadline; model/tool/idle safety timeouts still apply.
+	Timeout time.Duration
+	// MaxBudgetUSD is a hard invocation cost ceiling. Zero disables the ceiling.
+	// Positive limits require an explicitly known provider/model tariff.
+	MaxBudgetUSD float64
+	// InlineExternalSteers keeps accepted final-window steering inside this
+	// synchronous invocation. Detached workers enable it so durable inbox
+	// messages can be acknowledged without an invisible asynchronous turn.
+	InlineExternalSteers bool
 }
 
 // HeadlessUsage is the usage delta for this invocation, not a cumulative
@@ -93,16 +140,17 @@ type HeadlessError struct {
 
 // HeadlessResult is the versioned, single-object automation envelope.
 type HeadlessResult struct {
-	SchemaVersion int            `json:"schema_version"`
-	Type          string         `json:"type"`
-	Result        string         `json:"result"`
-	SessionID     string         `json:"session_id"`
-	Status        string         `json:"status"`
-	Error         *HeadlessError `json:"error,omitempty"`
-	Usage         HeadlessUsage  `json:"usage"`
-	Cost          HeadlessCost   `json:"cost"`
-	DurationMS    int64          `json:"duration_ms"`
-	Warnings      []string       `json:"warnings,omitempty"`
+	SchemaVersion    int            `json:"schema_version"`
+	Type             string         `json:"type"`
+	Result           string         `json:"result"`
+	StructuredOutput *any           `json:"structured_output,omitempty"`
+	SessionID        string         `json:"session_id"`
+	Status           string         `json:"status"`
+	Error            *HeadlessError `json:"error,omitempty"`
+	Usage            HeadlessUsage  `json:"usage"`
+	Cost             HeadlessCost   `json:"cost"`
+	DurationMS       int64          `json:"duration_ms"`
+	Warnings         []string       `json:"warnings,omitempty"`
 }
 
 // RunHeadless executes one user prompt through the normal request pipeline
@@ -133,8 +181,8 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	if format == "" {
 		format = HeadlessOutputText
 	}
-	if format != HeadlessOutputText && format != HeadlessOutputJSON {
-		return result, fmt.Errorf("unsupported headless output format %q (want text or json)", format)
+	if format != HeadlessOutputText && format != HeadlessOutputJSON && format != HeadlessOutputStreamJSON {
+		return result, fmt.Errorf("unsupported headless output format %q (want text, json, or stream-json)", format)
 	}
 	if opts.Stdout == nil {
 		opts.Stdout = os.Stdout
@@ -149,7 +197,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		if a != nil && a.session != nil {
 			result.SessionID = a.session.GetID()
 		}
-		if format == HeadlessOutputJSON {
+		if format == HeadlessOutputJSON || format == HeadlessOutputStreamJSON {
 			if err := json.NewEncoder(opts.Stdout).Encode(result); err != nil {
 				return result, errors.Join(failure, fmt.Errorf("write headless JSON result: %w", err))
 			}
@@ -157,12 +205,32 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		return result, failure
 	}
 
+	if opts.MaxTurns < 0 {
+		return emitEarlyFailure("validation", fmt.Errorf("max turns must be zero or greater"))
+	}
+	if opts.Timeout < 0 {
+		return emitEarlyFailure("validation", fmt.Errorf("timeout must be zero or greater"))
+	}
+	if opts.MaxBudgetUSD < 0 {
+		return emitEarlyFailure("validation", fmt.Errorf("maximum budget must be zero or greater"))
+	}
+	if opts.JSONSchema != nil && format == HeadlessOutputText {
+		return emitEarlyFailure(
+			"validation",
+			fmt.Errorf("structured output requires json or stream-json output format"),
+		)
+	}
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return emitEarlyFailure("validation", fmt.Errorf("prompt is required"))
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if opts.Timeout > 0 {
+		var deadlineCancel context.CancelFunc
+		ctx, deadlineCancel = context.WithTimeout(ctx, opts.Timeout)
+		defer deadlineCancel()
 	}
 	if a == nil {
 		return emitEarlyFailure("app_init", fmt.Errorf("app is nil"))
@@ -184,6 +252,8 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// untouched: in particular, a headless caller must never replace another
 	// turn's cancellation owner and later clear its processing flag.
 	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = tools.ContextWithMaxTurns(runCtx, opts.MaxTurns)
+	runCtx = tools.ContextWithMaxBudgetUSD(runCtx, opts.MaxBudgetUSD)
 	claim, err := a.claimHeadlessForeground(cancel)
 	if err != nil {
 		cancel()
@@ -192,6 +262,8 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// claimHeadlessForeground creates this invocation's terminal owner; bind
 	// delegated-agent accounting only after that token exists.
 	runCtx = a.withHeadlessInvocationScope(runCtx)
+	restoreInlineSteers := a.executor.SetInlineFinalUserSteers(opts.InlineExternalSteers)
+	defer restoreInlineSteers()
 	pipelineStarted := false
 	defer func() {
 		cancel()
@@ -237,11 +309,17 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// builder's handler that silently drifted (no plan-step effects, no
 	// token-estimate fires).
 	previousPresenter := a.currentPresenter()
-	presenterWriter := io.Discard
-	if format == HeadlessOutputText {
-		presenterWriter = opts.Stdout
+	var sp headlessOutputPresenter
+	switch format {
+	case HeadlessOutputStreamJSON:
+		sp = newStreamJSONPresenter(opts.Stdout, result.SessionID, opts.StreamState)
+	default:
+		presenterWriter := io.Discard
+		if format == HeadlessOutputText {
+			presenterWriter = opts.Stdout
+		}
+		sp = newStdoutPresenter(presenterWriter)
 	}
-	sp := newStdoutPresenter(presenterWriter)
 	a.setPresenter(sp)
 	presenterRestored := false
 	defer func() {
@@ -251,6 +329,8 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}()
 	finishOutput := sp.Finish
 	a.prepareHeadlessRuntime()
+	restoreStructuredInstruction := a.installStructuredOutputInstruction(opts.JSONSchema)
+	defer restoreStructuredInstruction()
 
 	// Prefer direct execution over the task router: one agent, deterministic
 	// behavior — the right default for evals and scripts. NOTE: since the
@@ -262,6 +342,38 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// recur even with routing enabled.
 	pipelineStarted = true
 	a.processMessageWithMemoryQuery(runCtx, prompt, memoryQuery)
+	result.Result = selectHeadlessResult(sp.Result(), a.headlessFinalResultSnapshot())
+
+	// Provider-native structured output is not uniformly available across
+	// Gokin's five backends. Validate locally and give the model a small,
+	// tool-free correction budget after its real workflow. The shared cost
+	// ledger/deadline remain in force across corrections.
+	var structuredErr error
+	if opts.JSONSchema != nil && a.headlessPipelineHealthy(runCtx) {
+		for attempt := 0; attempt <= maxStructuredOutputRetries; attempt++ {
+			var value any
+			value, structuredErr = opts.JSONSchema.Validate(result.Result)
+			if structuredErr == nil {
+				result.StructuredOutput = &value
+				break
+			}
+			if attempt == maxStructuredOutputRetries {
+				break
+			}
+			correctionCtx := tools.ContextWithToolCapabilityCeiling(runCtx, []string{})
+			correctionCtx = withStructuredOutputCorrection(correctionCtx)
+			a.processMessageWithMemoryQuery(
+				correctionCtx,
+				opts.JSONSchema.correctionPrompt(structuredErr),
+				memoryQuery,
+			)
+			result.Result = selectHeadlessResult(
+				sp.Result(), a.headlessFinalResultSnapshot())
+			if !a.headlessPipelineHealthy(runCtx) {
+				break
+			}
+		}
+	}
 	finishOutput()
 	// The shared finalizer retains foreground ownership while the headless token
 	// is active. Restore presenter/routing immediately; the slot itself remains
@@ -311,10 +423,20 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 			PolicyKind: string(blocked.Block.Kind),
 		}
 	} else if terminal := a.headlessTerminalOutcomeSnapshot(); terminal != nil {
-		if terminal.Kind == "timeout" {
+		switch terminal.Kind {
+		case "timeout":
 			runErr = &headlessTimeoutError{message: terminal.Message}
 			result.Status = "timeout"
-		} else {
+		case "max_turns":
+			runErr = &headlessMaxTurnsError{message: terminal.Message}
+			result.Status = "error"
+		case "budget_exceeded":
+			runErr = &headlessBudgetError{message: terminal.Message}
+			result.Status = "error"
+		case "cost_unavailable":
+			runErr = &headlessCostUnavailableError{message: terminal.Message}
+			result.Status = "error"
+		default:
 			runErr = errors.New(terminal.Message)
 			result.Status = "error"
 		}
@@ -331,6 +453,13 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		runErr = fmt.Errorf("%s", lastErr)
 		result.Status = "error"
 		result.Error = &HeadlessError{Kind: "execution", Message: runErr.Error()}
+	} else if structuredErr != nil {
+		runErr = structuredErr
+		result.Status = "error"
+		result.Error = &HeadlessError{
+			Kind:    "structured_output",
+			Message: structuredErr.Error(),
+		}
 	} else if saveErr != nil {
 		runErr = saveErr
 		result.Status = "error"
@@ -346,6 +475,15 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 
 	result.Usage, result.Cost = a.headlessInvocationMetricsSnapshot()
+	if budgetLedger, budgeted := tools.InvocationBudgetLedgerFromContext(runCtx); budgeted {
+		_, spent := budgetLedger.Snapshot()
+		// The shared ledger is authoritative for a budgeted invocation. Agent
+		// callbacks can aggregate nested results differently (and auxiliary
+		// planner/summarizer rounds are not all represented by AgentResult), so
+		// using their sum here can either double-count or omit real spend.
+		result.Cost.EstimatedUSD = spent
+		result.Cost.Tracked = !errors.Is(runErr, tools.ErrCostUnavailable)
+	}
 	result.DurationMS = time.Since(started).Milliseconds()
 	result.SessionID = a.session.GetID()
 
@@ -360,7 +498,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 	}
 
-	if format == HeadlessOutputJSON {
+	if format == HeadlessOutputJSON || format == HeadlessOutputStreamJSON {
 		if err := json.NewEncoder(opts.Stdout).Encode(result); err != nil {
 			outputErr := fmt.Errorf("write headless JSON result: %w", err)
 			if runErr != nil {
@@ -371,6 +509,20 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 
 	return result, runErr
+}
+
+func (a *App) headlessPipelineHealthy(ctx context.Context) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if a == nil || a.headlessPolicyFailureSnapshot() != nil ||
+		a.headlessTerminalOutcomeSnapshot() != nil {
+		return false
+	}
+	a.mu.Lock()
+	lastErr := strings.TrimSpace(a.lastError)
+	a.mu.Unlock()
+	return lastErr == ""
 }
 
 func headlessUsageDelta(before, after commands.TokenStats) HeadlessUsage {
@@ -401,6 +553,7 @@ func selectHeadlessResult(streamed, final string) string {
 type headlessForegroundClaim struct {
 	terminal       *headlessTerminalOutcome
 	previousDirect bool
+	tracked        bool
 }
 
 // claimHeadlessForeground atomically checks and occupies the application's
@@ -413,7 +566,7 @@ func (a *App) claimHeadlessForeground(cancel context.CancelFunc) (*headlessForeg
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.headlessRunActive || a.processing || a.running {
+	if a.shuttingDown || a.headlessRunActive || a.processing || a.running {
 		return nil, fmt.Errorf("headless execution cannot start while the application foreground is busy")
 	}
 
@@ -421,6 +574,9 @@ func (a *App) claimHeadlessForeground(cancel context.CancelFunc) (*headlessForeg
 	defer a.processingMu.Unlock()
 	if a.processingCancel != nil {
 		return nil, fmt.Errorf("headless execution cannot start while the application foreground is busy")
+	}
+	if !a.foregroundWorkers.Add() {
+		return nil, fmt.Errorf("headless execution cannot start while the application is shutting down")
 	}
 
 	previousDirect := a.headlessDirect
@@ -433,6 +589,7 @@ func (a *App) claimHeadlessForeground(cancel context.CancelFunc) (*headlessForeg
 	return &headlessForegroundClaim{
 		terminal:       a.headlessTerminal,
 		previousDirect: previousDirect,
+		tracked:        true,
 	}, nil
 }
 
@@ -456,6 +613,9 @@ func (a *App) restoreHeadlessDirect(claim *headlessForegroundClaim) {
 func (a *App) releaseHeadlessForeground(claim *headlessForegroundClaim, pipelineStarted bool) {
 	if claim == nil {
 		return
+	}
+	if claim.tracked {
+		defer a.foregroundWorkers.Done()
 	}
 
 	a.mu.Lock()
@@ -623,7 +783,9 @@ func (a *App) headlessFinalResultSnapshot() string {
 
 func (a *App) prepareHeadlessRuntime() {
 	// Keep logs out of stdout/stderr so eval output remains the model answer.
-	logging.DisableLogging()
+	if a.config == nil || !a.config.Debug {
+		logging.DisableLogging()
+	}
 
 	// A one-shot result cannot truthfully succeed while detached work is still
 	// running: the process releases its session lease and cancels App resources
@@ -643,9 +805,14 @@ func (a *App) prepareHeadlessRuntime() {
 	}
 
 	if a.promptBuilder != nil {
-		a.detectedProjectContext = a.detectProjectContext()
-		if a.detectedProjectContext != "" {
-			a.promptBuilder.SetDetectedContext(a.detectedProjectContext)
+		// a.config is explicitly treated as possibly-nil at the top of this
+		// function; keep that contract here rather than panicking on the first
+		// caller that has not built one yet.
+		if a.config == nil || !a.config.Bare {
+			a.detectedProjectContext = a.detectProjectContext()
+			if a.detectedProjectContext != "" {
+				a.promptBuilder.SetDetectedContext(a.detectedProjectContext)
+			}
 		}
 		a.promptBuilder.SetPlanMode(a.planningModeEnabled)
 	}
@@ -654,15 +821,10 @@ func (a *App) prepareHeadlessRuntime() {
 	}
 
 	systemPrompt := ""
-	if a.promptBuilder != nil {
-		systemPrompt = a.promptBuilder.Build()
-	}
-	systemPrompt += a.buildModelEnhancement()
-	if strings.TrimSpace(systemPrompt) != "" && a.client != nil {
-		a.client.SetSystemInstruction(systemPrompt)
-		if a.session != nil {
-			a.session.SetSystemInstruction(systemPrompt)
-		}
+	systemPrompt = a.buildDefaultSystemInstruction()
+	if (strings.TrimSpace(systemPrompt) != "" || a.hasRunSystemPromptCustomization()) &&
+		a.client != nil {
+		a.applySystemInstruction(a.client, systemPrompt, true)
 	}
 	a.pushTurnContext()
 	if a.session != nil {

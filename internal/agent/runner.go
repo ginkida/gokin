@@ -810,6 +810,10 @@ func (r *Runner) newConfiguredAgent(
 ) *Agent {
 	agentBaseRegistry := deps.baseRegistry
 	agentWorkDir := strings.TrimSpace(deps.workDir)
+	agentClient := deps.client
+	if _, budgeted := tools.InvocationBudgetLedgerFromContext(ctx); budgeted {
+		agentClient = newInvocationBudgetClient(deps.client)
+	}
 	var isolated *isolatedWorkspace
 	parentToolCeiling, parentToolsRestricted := tools.AgentToolCapabilityCeilingFromContext(ctx)
 	if parentToolsRestricted {
@@ -847,7 +851,7 @@ func (r *Runner) newConfiguredAgent(
 		if dynType, ok := deps.typeRegistry.GetDynamic(agentType); ok {
 			agent = NewAgentWithDynamicType(
 				dynType,
-				deps.client,
+				agentClient,
 				agentBaseRegistry,
 				agentWorkDir,
 				maxTurns,
@@ -865,7 +869,7 @@ func (r *Runner) newConfiguredAgent(
 			// prevents a concurrent registry removal or direct caller typo from
 			// silently widening authority to every tool.
 			AgentType(agentType),
-			deps.client,
+			agentClient,
 			agentBaseRegistry,
 			agentWorkDir,
 			maxTurns,
@@ -959,6 +963,11 @@ func (r *Runner) newConfiguredAgent(
 
 	if deps.treePlanner != nil {
 		planner := cloneTreePlanner(deps.treePlanner)
+		// Planner expansion and replanning are billable model calls too. Bind
+		// this per-agent clone to the same metered client and reflector instead
+		// of retaining the runner prototype's unmetered dependencies.
+		planner.client = agent.client
+		planner.reflector = agent.reflector
 		agent.SetTreePlanner(planner)
 		if deps.planningModeEnabled {
 			agent.EnablePlanningMode(nil)
@@ -1068,6 +1077,7 @@ var workspaceIsolationReadOnlyTools = toolNameSet(
 	"git_status", "git_diff", "git_log", "git_blame", "review_changes",
 	"go_to_definition", "find_references",
 	"run_tests", "verify_code", "check_impact",
+	"task_output",
 	"shared_memory", "update_scratchpad", "pin_context", "history_search",
 	"memory", "memorize",
 )
@@ -1081,6 +1091,7 @@ var workspaceIsolationApplyBackTools = toolNameSet(
 	"git_status", "git_diff", "git_log", "git_blame", "review_changes",
 	"go_to_definition", "find_references",
 	"run_tests", "verify_code", "check_impact",
+	"task_output",
 	"shared_memory", "update_scratchpad", "pin_context", "history_search",
 	"memory", "memorize",
 	"write", "edit", "batch", "refactor", "copy", "move", "delete", "mkdir",
@@ -1212,7 +1223,11 @@ func (r *Runner) finalizeAgentWorkspace(agent *Agent, result *AgentResult) error
 				}
 				if len(previews) > 0 {
 					result.Metadata["isolated_workspace_review_required"] = true
-					approvedFiles, err := reviewHandler(context.Background(), previews)
+					reviewCtx := agent.RunContext()
+					if reviewCtx == nil {
+						reviewCtx = context.Background()
+					}
+					approvedFiles, err := reviewHandler(reviewCtx, previews)
 					if err != nil {
 						reviewErr := fmt.Errorf("failed to review isolated workspace changes: %w", err)
 						result.Status = AgentStatusFailed

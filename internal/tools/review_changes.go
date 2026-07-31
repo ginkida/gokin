@@ -71,7 +71,7 @@ func (t *ReviewChangesTool) gitCmd(ctx context.Context, args ...string) *exec.Cm
 	// --literal-pathspecs prevents values such as :(top)secret from escaping a
 	// nested workspace after their filesystem spelling has passed validation.
 	full := append([]string{"-c", "core.quotepath=off", "--literal-pathspecs"}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := newProcessGroupCommand(ctx, "git", full...)
 	cmd.Dir = t.workDir
 	return cmd
 }
@@ -139,20 +139,22 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, args map[string]any) (T
 		if relFile != "" {
 			othersArgs = append(othersArgs, "--", relFile)
 		}
-		if othersOut, err := t.gitCmd(ctx, othersArgs...).Output(); err == nil {
-			if raw := strings.TrimSpace(string(othersOut)); raw != "" {
-				var untrackedPaths map[string]string
-				var scopeErr error
-				untracked, untrackedPaths, scopeErr = t.validateReportedPaths(strings.Split(raw, "\n"))
-				if scopeErr != nil {
-					return NewErrorResult(fmt.Sprintf("review_changes rejected git path: %s", scopeErr)), nil
-				}
-				for _, f := range untracked {
-					untrackedSet[f] = true
-				}
-				for rel, abs := range untrackedPaths {
-					validatedPaths[rel] = abs
-				}
+		othersOut, othersErr := t.gitCmd(ctx, othersArgs...).Output()
+		if othersErr != nil {
+			return NewErrorResult(fmt.Sprintf("review_changes failed to list untracked files: %s", gitErrText(othersErr))), nil
+		}
+		if raw := strings.TrimSpace(string(othersOut)); raw != "" {
+			var untrackedPaths map[string]string
+			var scopeErr error
+			untracked, untrackedPaths, scopeErr = t.validateReportedPaths(strings.Split(raw, "\n"))
+			if scopeErr != nil {
+				return NewErrorResult(fmt.Sprintf("review_changes rejected git path: %s", scopeErr)), nil
+			}
+			for _, f := range untracked {
+				untrackedSet[f] = true
+			}
+			for rel, abs := range untrackedPaths {
+				validatedPaths[rel] = abs
 			}
 		}
 	}

@@ -19,6 +19,16 @@ type TaskOutputTool struct {
 	runner  AgentRunner // For agent tasks
 }
 
+// Keep each incremental page below the normal tool-result compaction limit.
+// Advancing next_offset past bytes that the compactor removed would make the
+// omitted middle permanently unreadable.
+const (
+	maxTaskOutputReadBytes       int64 = 24 * 1024
+	DefaultTaskOutputWaitTimeout       = 2 * time.Minute
+	MaxTaskOutputWaitTimeout           = 10 * time.Minute
+	minTaskOutputWaitTimeout           = 100 * time.Millisecond
+)
+
 // NewTaskOutputTool creates a new task output tool.
 func NewTaskOutputTool() *TaskOutputTool {
 	return &TaskOutputTool{}
@@ -64,7 +74,7 @@ func (t *TaskOutputTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"timeout_ms": {
 					Type:        genai.TypeInteger,
-					Description: "Timeout in milliseconds when blocking. Default: 60000 (1 minute). Max: 600000 (10 minutes).",
+					Description: "Timeout in milliseconds when blocking. Default: 120000 (2 minutes). Max: 600000 (10 minutes).",
 				},
 				"offset": {
 					Type:        genai.TypeInteger,
@@ -83,6 +93,15 @@ func (t *TaskOutputTool) Validate(args map[string]any) error {
 			return NewValidationError("task_id", "task_id is required for this action")
 		}
 	}
+	if _, present := args["offset"]; present {
+		offset, ok := GetInt(args, "offset")
+		if !ok {
+			return NewValidationError("offset", "must be an integer")
+		}
+		if offset < 0 {
+			return NewValidationError("offset", "must be non-negative")
+		}
+	}
 
 	return nil
 }
@@ -91,17 +110,9 @@ func (t *TaskOutputTool) Execute(ctx context.Context, args map[string]any) (Tool
 	action := GetStringDefault(args, "action", "get")
 	taskID, _ := GetString(args, "task_id")
 	block := GetBoolDefault(args, "block", false)
-	timeoutMs := GetIntDefault(args, "timeout_ms", 120000)
 	offset := int64(GetIntDefault(args, "offset", 0))
-
-	// Clamp timeout to reasonable range
-	if timeoutMs < 100 {
-		timeoutMs = 100
-	}
-	if timeoutMs > 600000 {
-		timeoutMs = 600000
-	}
-	timeout := time.Duration(timeoutMs) * time.Millisecond
+	_, incrementalRead := args["offset"]
+	timeout := taskOutputWaitTimeout(args)
 
 	switch action {
 	case "list":
@@ -109,13 +120,27 @@ func (t *TaskOutputTool) Execute(ctx context.Context, args map[string]any) (Tool
 	case "cancel":
 		return t.cancelTask(ctx, taskID)
 	default:
-		return t.getTaskOutput(ctx, taskID, block, timeout, offset)
+		return t.getTaskOutput(ctx, taskID, block, timeout, offset, incrementalRead)
 	}
 }
 
-func (t *TaskOutputTool) getTaskOutput(ctx context.Context, taskID string, block bool, timeout time.Duration, offset int64) (ToolResult, error) {
+func taskOutputWaitTimeout(args map[string]any) time.Duration {
+	timeout := DefaultTaskOutputWaitTimeout
+	if timeoutMs, ok := GetInt(args, "timeout_ms"); ok {
+		timeout = time.Duration(timeoutMs) * time.Millisecond
+	}
+	if timeout < minTaskOutputWaitTimeout {
+		return minTaskOutputWaitTimeout
+	}
+	if timeout > MaxTaskOutputWaitTimeout {
+		return MaxTaskOutputWaitTimeout
+	}
+	return timeout
+}
+
+func (t *TaskOutputTool) getTaskOutput(ctx context.Context, taskID string, block bool, timeout time.Duration, offset int64, incrementalRead bool) (ToolResult, error) {
 	if runnerOwnsAgent(t.runner, taskID) {
-		return t.getAgentOutput(ctx, taskID, block, timeout, offset)
+		return t.getAgentOutput(ctx, taskID, block, timeout, offset, incrementalRead)
 	}
 
 	// Fall back to shell task manager
@@ -131,6 +156,9 @@ func (t *TaskOutputTool) getTaskOutput(ctx context.Context, taskID string, block
 	info, ok := t.manager.GetInfo(taskID)
 	if !ok {
 		return NewErrorResult(fmt.Sprintf("task not found: %s", taskID)), nil
+	}
+	if incrementalRead && info.OutputFile != "" {
+		return t.readShellOutputFromFile(info, offset)
 	}
 
 	return t.formatShellTaskResult(info), nil
@@ -165,7 +193,7 @@ func runnerOwnsAgent(runner AgentRunner, taskID string) bool {
 }
 
 // getAgentOutput retrieves output from an agent task
-func (t *TaskOutputTool) getAgentOutput(ctx context.Context, agentID string, block bool, timeout time.Duration, offset int64) (ToolResult, error) {
+func (t *TaskOutputTool) getAgentOutput(ctx context.Context, agentID string, block bool, timeout time.Duration, offset int64, incrementalRead bool) (ToolResult, error) {
 	// If blocking, wait for completion with timeout
 	if block {
 		return t.waitForAgentTask(ctx, agentID, timeout)
@@ -177,8 +205,12 @@ func (t *TaskOutputTool) getAgentOutput(ctx context.Context, agentID string, blo
 		return NewErrorResult(fmt.Sprintf("agent not found: %s", agentID)), nil
 	}
 
-	// If offset provided and output file exists, do incremental read
-	if offset > 0 && result.OutputFile != "" {
+	// A running agent's finalized Output field is intentionally not published
+	// yet. Read its live transcript even on the first/default request so callers
+	// do not need to guess that offset=0 is required just to see progress.
+	// Explicit offsets retain normal paginated semantics for every status.
+	if result.OutputFile != "" &&
+		(incrementalRead || (!result.Completed && result.Output == "")) {
 		return t.readAgentOutputFromFile(result, offset)
 	}
 
@@ -204,15 +236,26 @@ func (t *TaskOutputTool) waitForAgentTask(ctx context.Context, agentID string, t
 				return NewErrorResult(fmt.Sprintf("agent not found: %s", agentID)), nil
 			}
 			// Return partial result with timeout indicator
+			partial := t.formatAgentResult(result)
+			if result.Output == "" && result.OutputFile != "" {
+				partial, _ = t.readAgentOutputFromFile(result, 0)
+			}
 			var builder strings.Builder
 			builder.WriteString("**Timeout waiting for agent completion**\n\n")
-			builder.WriteString(t.formatAgentResult(result).Content)
-			return NewSuccessResultWithData(builder.String(), map[string]any{
+			builder.WriteString(partial.Content)
+			data := map[string]any{
 				"agent_id":  agentID,
 				"status":    string(result.Status),
 				"completed": result.Completed,
 				"timeout":   true,
-			}), nil
+			}
+			if partialData, ok := partial.Data.(map[string]any); ok {
+				for key, value := range partialData {
+					data[key] = value
+				}
+				data["timeout"] = true
+			}
+			return NewSuccessResultWithData(builder.String(), data), nil
 
 		case <-ticker.C:
 			result, ok := t.runner.GetResult(agentID)
@@ -281,21 +324,88 @@ func (t *TaskOutputTool) formatShellTaskResult(info tasks.Info) ToolResult {
 	if info.ExitCode != 0 {
 		fmt.Fprintf(&builder, "Exit Code: %d\n", info.ExitCode)
 	}
+	if info.Summary != "" {
+		fmt.Fprintf(&builder, "Verification: %s\n", info.Summary)
+	}
 
 	if info.Output != "" {
 		builder.WriteString("\nOutput:\n")
 		builder.WriteString(info.Output)
 	}
 
-	return NewSuccessResultWithData(builder.String(), map[string]any{
+	data := map[string]any{
 		"task_id":   info.ID,
 		"status":    info.Status,
 		"command":   info.Command,
+		"summary":   info.Summary,
 		"output":    info.Output,
 		"error":     info.Error,
 		"exit_code": info.ExitCode,
 		"running":   info.Status == "running",
-	})
+	}
+	if info.OutputFile != "" {
+		data["output_file"] = info.OutputFile
+		if fi, err := os.Stat(info.OutputFile); err == nil {
+			data["total_bytes"] = fi.Size()
+		}
+	}
+	return NewSuccessResultWithData(builder.String(), data)
+}
+
+func (t *TaskOutputTool) readShellOutputFromFile(info tasks.Info, offset int64) (ToolResult, error) {
+	f, err := os.Open(info.OutputFile)
+	if err != nil {
+		return t.formatShellTaskResult(info), nil
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return t.formatShellTaskResult(info), nil
+	}
+	if offset >= stat.Size() {
+		return NewSuccessResultWithData("No new output since last read.", map[string]any{
+			"task_id":     info.ID,
+			"status":      info.Status,
+			"running":     info.Status == "running",
+			"offset":      offset,
+			"next_offset": offset,
+			"total_bytes": stat.Size(),
+			"summary":     info.Summary,
+		}), nil
+	}
+	if _, err := f.Seek(offset, 0); err != nil {
+		return t.formatShellTaskResult(info), nil
+	}
+	readSize := stat.Size() - offset
+	if readSize > maxTaskOutputReadBytes {
+		readSize = maxTaskOutputReadBytes
+	}
+	buf := make([]byte, readSize)
+	n, _ := f.Read(buf)
+	nextOffset := offset + int64(n)
+
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "Task: %s (incremental read)\n", info.ID)
+	fmt.Fprintf(&builder, "Status: %s\n", info.Status)
+	fmt.Fprintf(&builder, "Bytes: %d-%d of %d\n", offset, nextOffset, stat.Size())
+	if info.Summary != "" {
+		fmt.Fprintf(&builder, "Verification: %s\n", info.Summary)
+	}
+	builder.WriteString("\nNew output:\n")
+	builder.Write(buf[:n])
+
+	return NewSuccessResultWithData(builder.String(), map[string]any{
+		"task_id":     info.ID,
+		"status":      info.Status,
+		"running":     info.Status == "running",
+		"offset":      offset,
+		"next_offset": nextOffset,
+		"total_bytes": stat.Size(),
+		"summary":     info.Summary,
+		"output":      string(buf[:n]),
+		"output_file": info.OutputFile,
+	}), nil
 }
 
 // readAgentOutputFromFile reads agent output from file starting at offset.
@@ -332,7 +442,11 @@ func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int6
 		return t.formatAgentResult(result), nil
 	}
 
-	buf := make([]byte, stat.Size()-offset)
+	readSize := stat.Size() - offset
+	if readSize > maxTaskOutputReadBytes {
+		readSize = maxTaskOutputReadBytes
+	}
+	buf := make([]byte, readSize)
 	n, _ := f.Read(buf)
 	newOutput := string(buf[:n])
 	nextOffset := offset + int64(n)
@@ -389,7 +503,6 @@ func (t *TaskOutputTool) formatAgentResult(result AgentResult) ToolResult {
 		data["output_file"] = result.OutputFile
 		if fi, err := os.Stat(result.OutputFile); err == nil {
 			data["total_bytes"] = fi.Size()
-			data["next_offset"] = fi.Size()
 		}
 	}
 

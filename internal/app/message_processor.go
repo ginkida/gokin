@@ -115,6 +115,18 @@ func isHeadlessTimeoutFailure(err error) bool {
 // Keeping those steps together prevents one operation type from leaving queued
 // user input stranded after success, error, panic, or early validation failure.
 func (a *App) finishForegroundProcessing(beforePending func()) {
+	// Shutdown owns terminal persistence now. Do not synchronously send final UI
+	// messages or dequeue another request: handleQuit runs in Bubble Tea's Update
+	// callback, where Program.Send cannot complete until Update returns.
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.processing = false
+		a.dropSteerLeftovers = true
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
+
 	if beforePending != nil {
 		func() {
 			defer func() {
@@ -150,6 +162,12 @@ func (a *App) finishForegroundProcessing(beforePending func()) {
 	// pending item exists removes the idle gap in which later input could claim
 	// the foreground and overtake the FIFO head.
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.processing = false
+		a.dropSteerLeftovers = true
+		a.mu.Unlock()
+		return
+	}
 	var pendingRequest pendingRequest
 	var remaining int
 	var ok bool
@@ -288,6 +306,13 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// pipeline when that accepted turn was already cancelled before launch.
 	if ctx.Err() != nil {
 		return
+	}
+	if ceiling, restricted := a.toolCapabilitySnapshot(); restricted {
+		if inherited, inheritedRestricted :=
+			tools.ToolCapabilityCeilingFromContext(ctx); inheritedRestricted {
+			ceiling = intersectCapabilityNames(ceiling, inherited)
+		}
+		ctx = tools.ContextWithToolCapabilityCeiling(ctx, ceiling)
 	}
 
 	if a.session == nil {
@@ -773,6 +798,12 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// timeout that recovered is still a successful turn.
 		if isHeadlessTimeoutFailure(err) {
 			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "timeout", err.Error())
+		} else if errors.Is(err, tools.ErrMaxTurnsExceeded) {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "max_turns", err.Error())
+		} else if errors.Is(err, tools.ErrBudgetExceeded) {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "budget_exceeded", err.Error())
+		} else if errors.Is(err, tools.ErrCostUnavailable) {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "cost_unavailable", err.Error())
 		}
 
 		cancelled := errors.Is(err, context.Canceled)
@@ -1143,8 +1174,11 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		}
 	}
 
-	if !a.runCompletionReviewIfNeeded(ctx, message, &response, &turnUsage) {
-		return
+	formatCorrection := isStructuredOutputCorrection(ctx)
+	if !formatCorrection {
+		if !a.runCompletionReviewIfNeeded(ctx, message, &response, &turnUsage) {
+			return
+		}
 	}
 	// Completion review may replace the draft response. Capture the resulting
 	// terminal answer before the done-gate starts any internal auto-fix model
@@ -1152,23 +1186,25 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	a.recordHeadlessFinalResult(response)
 
 	// Hard done-gate before response completion.
-	if !a.enforceDoneGate(ctx, message) {
-		return
-	}
+	if !formatCorrection {
+		if !a.enforceDoneGate(ctx, message) {
+			return
+		}
 
-	// Evidence footer: deterministic audit-trail streamed after the model's
-	// prose answer for code-change turns. Runs AFTER done-gate so a failing
-	// verification never gets a "✓ Verified" claim under it. Skipped when
-	// the response already names every touched file + verification signal.
-	// Intentionally NOT mixed into `response` — working memory already
-	// derives its own "Files changed / Verification" lines from the raw
-	// touched-paths + commands snapshots, so folding the footer back in
-	// would produce redundant entries on the next turn.
-	if footer := a.buildEvidenceFooterIfEnabled(response); footer != "" {
-		a.safeSendToProgram(ui.StreamTextMsg(footer))
-	}
+		// Evidence footer: deterministic audit-trail streamed after the model's
+		// prose answer for code-change turns. Runs AFTER done-gate so a failing
+		// verification never gets a "✓ Verified" claim under it. Skipped when
+		// the response already names every touched file + verification signal.
+		// Intentionally NOT mixed into `response` — working memory already
+		// derives its own "Files changed / Verification" lines from the raw
+		// touched-paths + commands snapshots, so folding the footer back in
+		// would produce redundant entries on the next turn.
+		if footer := a.buildEvidenceFooterIfEnabled(response); footer != "" {
+			a.safeSendToProgram(ui.StreamTextMsg(footer))
+		}
 
-	a.updateWorkingMemoryFromTurn(message, response)
+		a.updateWorkingMemoryFromTurn(message, response)
+	}
 
 	// A successful recovered turn is terminal for its claimed durable record.
 	// Clear it before queuing the normal session save so a second restart cannot
@@ -1225,13 +1261,17 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	// End-of-turn hooks: a FailOnError stop hook can request ONE bounded
 	// continuation (see runStopHooks).
-	a.runStopHooks(ctx, response)
+	if !formatCorrection {
+		a.runStopHooks(ctx, response)
+	}
 
 	// Tool-budget auto-continuation: a turn that exhausted the per-turn tool
 	// budget with UNFINISHED todos queues a synthetic "continue" (fresh turn =
 	// fresh budget) so the user doesn't have to type it — bounded per real
 	// user request (see budget_auto_continue.go).
-	a.maybeAutoContinueAfterBudget()
+	if !formatCorrection {
+		a.maybeAutoContinueAfterBudget()
+	}
 
 	// Signal completion - copy metadata under lock
 	a.mu.Lock()
@@ -1424,6 +1464,17 @@ func (a *App) executeTracked(
 		input, output := a.executor.GetLastTokenUsage()
 		cacheCreation, cacheRead := a.executor.GetLastCacheMetrics()
 		cost, tracked := a.executor.GetLastEstimatedCost()
+		// A budget pricing preflight fails before any provider request. Do not
+		// feed the local diagnostic marker through the ordinary no-metadata
+		// token fallback: that would invent billable usage and session spend for
+		// a request that never left the process. A post-response pricing failure
+		// has a recorded provider/model identity and remains fully accounted.
+		if errors.Is(err, tools.ErrCostUnavailable) {
+			provider, model := a.executor.GetLastProviderIdentity()
+			if provider == "" && model == "" {
+				return
+			}
+		}
 		usage.add(input, output, cacheCreation, cacheRead, estimatedInput, response, cost, tracked)
 	}()
 	return a.executor.Execute(ctx, history, prompt)
@@ -1617,6 +1668,26 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 		return
 	}
 
+	// Capture the exact shared undo-history delta for this execution segment.
+	// The plan may pause and resume across multiple turns; the plan extension
+	// appends each segment's stable change IDs to one transaction.
+	if a.planManager != nil && a.undoManager != nil {
+		if err := a.planManager.BeginPlanUndoCapture(a.undoManager.Snapshot()); err != nil {
+			logging.Warn("plan file-change undo capture unavailable",
+				"plan_id", approvedPlan.ID,
+				"error", err)
+		} else {
+			// The closure is load-bearing: deferred CALL ARGUMENTS are evaluated
+			// at defer time, so `defer Finish(undoManager.Snapshot())` would
+			// capture the pre-execution snapshot as the "after" side and make
+			// every plan transaction empty — undo_plan would find nothing to
+			// revert.
+			defer func() {
+				a.planManager.FinishPlanUndoCapture(a.undoManager.Snapshot())
+			}()
+		}
+	}
+
 	delegated := a.config.Plan.DelegateSteps && a.agentRunner != nil
 	if delegated && a.shouldUseSafeMode() {
 		a.safeSendToProgram(ui.StreamTextMsg(
@@ -1653,7 +1724,7 @@ func (a *App) preparePlanExecutionBoundary(approvedPlan *plan.Plan) error {
 	planPrompt := a.promptBuilder.BuildPlanExecutionPromptWithContext(
 		approvedPlan.Title, approvedPlan.Description, stepInfos, contextSnapshot)
 	if a.planManager != nil {
-		if err := a.planManager.SaveCurrentPlan(); err != nil {
+		if err := a.saveCurrentPlanWithVisibility("plan execution boundary"); err != nil {
 			return fmt.Errorf("save approved plan before context replacement: %w", err)
 		}
 	}
@@ -2699,7 +2770,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			step.Title,
 			step.Description,
 		}, " ")
-		projectCtx = a.promptBuilder.BuildSubAgentPromptForTask(memoryQuery)
+		projectCtx = a.buildSubAgentProjectContext(memoryQuery)
 	}
 
 	// Get SharedMemory context for this sub-agent
@@ -3540,7 +3611,7 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 		if approvedPlan != nil {
 			approvedPlan.RecordStepEffect(step.ID, "bash", map[string]any{"command": wrapped})
 			if a.planManager != nil {
-				_ = a.planManager.SaveCurrentPlan()
+				_ = a.saveCurrentPlanWithVisibility("step verification command")
 			}
 		}
 

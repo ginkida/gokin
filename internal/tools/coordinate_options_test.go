@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCoordinateTool_MaxParallelIsAppliedAndClamped(t *testing.T) {
@@ -49,6 +50,41 @@ func TestCoordinateTool_OmittedMaxParallelKeepsFactoryDefault(t *testing.T) {
 	_, _ = tool.Execute(context.Background(), map[string]any{"tasks": tasksArg("a")})
 	if fc.maxParallel != 0 {
 		t.Fatalf("SetMaxParallel was called for an omitted option: got %d", fc.maxParallel)
+	}
+}
+
+func TestCoordinateTool_TimeoutOptionMatchesExecutorBudget(t *testing.T) {
+	fc := &fakeCoordinator{waitResults: map[string]any{
+		"internal-1": map[string]any{"status": "completed"},
+	}}
+	tool := NewCoordinateTool()
+	tool.SetCoordinatorFactory(func() any { return fc })
+
+	result, err := tool.Execute(context.Background(), map[string]any{
+		"tasks":           tasksArg("a"),
+		"timeout_minutes": 30,
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("Execute failed: result=%+v err=%v", result, err)
+	}
+	if fc.waitTimeout != 30*time.Minute {
+		t.Fatalf("coordinator wait timeout = %v, want 30m", fc.waitTimeout)
+	}
+	wantOuter := 30*time.Minute + coordinateCleanupTimeout + toolTimeoutCompletionGrace
+	if got := toolExecutionTimeout(2*time.Minute, 0, false, "coordinate",
+		map[string]any{"timeout_minutes": 30}); got != wantOuter {
+		t.Fatalf("executor coordinate timeout = %v, want %v", got, wantOuter)
+	}
+}
+
+func TestCoordinateTool_RejectsFractionalTimeout(t *testing.T) {
+	tool := NewCoordinateTool()
+	err := tool.Validate(map[string]any{
+		"tasks":           tasksArg("a"),
+		"timeout_minutes": 1.5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be an integer") {
+		t.Fatalf("Validate fractional timeout error = %v", err)
 	}
 }
 

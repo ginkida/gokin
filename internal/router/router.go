@@ -434,10 +434,23 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 	// unconditionally (even with no SuggestedToolSets) keeps the schema safe
 	// regardless of what tools a prior request left on the shared client.
 	if r.registry != nil {
-		if r.isPlanMode() {
-			cl.SetTools(r.registry.PlanModeGeminiTools())
-		} else if len(decision.SuggestedToolSets) > 0 {
-			cl.SetTools(r.registry.FilteredGeminiTools(decision.SuggestedToolSets...))
+		var schema []*genai.Tool
+		switch {
+		case r.isPlanMode():
+			schema = r.registry.PlanModeGeminiTools()
+		case len(decision.SuggestedToolSets) > 0:
+			schema = r.registry.FilteredGeminiTools(decision.SuggestedToolSets...)
+		}
+		if schema != nil {
+			// The per-request schema is pushed onto the SHARED client, so it
+			// replaces whatever the invocation capability ceiling
+			// (--tools/--disallowedTools) filtered at startup. Re-apply it here
+			// or the model is handed tools the executor will refuse at call
+			// time.
+			if ceiling, restricted := tools.ToolCapabilityCeilingFromContext(ctx); restricted {
+				schema = tools.FilterGeminiToolsByCapability(schema, ceiling)
+			}
+			cl.SetTools(schema)
 		}
 	}
 
@@ -456,6 +469,15 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 	// originalMessage before the result is persisted (see
 	// restoreOriginalUserMessage).
 	priorLen := len(history)
+
+	// Skill authority is one-shot per user request, and Executor.Execute is the
+	// only handler that promotes-and-clears it. Direct, sub-agent and
+	// coordinated turns bypass that boundary entirely, so an explicit `/skill`
+	// handoff routed to one of them would stay pending and activate in a later,
+	// unrelated request. Close the turn here for exactly those handlers.
+	if decision.Handler != HandlerExecutor {
+		tools.BeginSkillPermissionTurn(r.registry)
+	}
 
 	switch decision.Handler {
 	case HandlerDirect:
@@ -582,7 +604,10 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 	if background {
 		// Spawn in background, return immediately
 		agentID = r.agentRunner.SpawnAsync(ctx, agentType, message, 30, "")
-		backgroundMsg := fmt.Sprintf("Background agent %s started for the task. ID: %s\nUse /task_output %s to check status.", agentType, agentID, agentID)
+		if agentID == "" {
+			return nil, "", fmt.Errorf("background %s agent failed to start: runner returned an empty ID", agentType)
+		}
+		backgroundMsg := fmt.Sprintf("Background agent %s started for the task. ID: %s\nUse /tasks %s to view live output or /tasks stop %s to cancel.", agentType, agentID, agentID, agentID)
 		return nil, backgroundMsg, nil
 	}
 
@@ -1355,10 +1380,6 @@ func (r *Router) updateConversationMode(toolName string) {
 func (r *Router) GetConversationMode() string {
 	r.historyMu.RLock()
 	defer r.historyMu.RUnlock()
-
-	if r.conversationMode == "" {
-		return "exploring"
-	}
 	return r.conversationMode
 }
 

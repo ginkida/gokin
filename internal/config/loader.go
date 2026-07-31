@@ -30,6 +30,7 @@ func Load() (*Config, error) {
 				return nil, err
 			}
 		}
+		cfg.savePath = configPath
 	}
 
 	// Override with environment variables
@@ -44,6 +45,31 @@ func Load() (*Config, error) {
 	// rewrite silently so existing YAML configs don't error out.
 	migrateLegacyKimiModelName(cfg)
 
+	return cfg, nil
+}
+
+// LoadFrom loads an explicit global config file, then applies the same
+// environment and per-project overlays as Load. Unlike the optional default
+// file, an explicit path must exist and parse successfully. Subsequent Save
+// calls (including on Clone results) write back to this same file.
+func LoadFrom(path string) (*Config, error) {
+	path = strings.TrimSpace(expandTilde(path))
+	if path == "" {
+		return nil, fmt.Errorf("config path is required")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path %q: %w", path, err)
+	}
+
+	cfg := DefaultConfig()
+	if err := loadFromFile(cfg, absolute); err != nil {
+		return nil, fmt.Errorf("load config %q: %w", absolute, err)
+	}
+	cfg.savePath = absolute
+	loadFromEnv(cfg)
+	loadProjectConfig(cfg)
+	migrateLegacyKimiModelName(cfg)
 	return cfg, nil
 }
 
@@ -109,6 +135,7 @@ func loadProjectConfig(cfg *Config) {
 		if _, err := os.Stat(projectConfig); err == nil {
 			// Found project config, merge it
 			userAllowsGlobal := cfg.Memory.AllowGlobal
+			userTrustedWorkspaces := append([]string(nil), cfg.Hooks.TrustedWorkspaces...)
 			if err := loadFromFile(cfg, projectConfig); err != nil {
 				slog.Warn("failed to load project config", "path", projectConfig, "error", err)
 			}
@@ -116,6 +143,11 @@ func loadProjectConfig(cfg *Config) {
 			// may grant itself. A project may explicitly disable it, but cannot
 			// widen a user-level false into cross-project prompt injection.
 			cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
+			// Workspace trust is also user-owned authority. A repository may
+			// configure hook behavior after the user trusts it, but it may not
+			// add its own path to the trust ledger and thereby activate
+			// executable hooks or SKILL.md allowed-tools grants.
+			cfg.Hooks.TrustedWorkspaces = userTrustedWorkspaces
 			return
 		}
 
@@ -393,7 +425,10 @@ func (c *Config) Save() error {
 	configSaveMu.Lock()
 	defer configSaveMu.Unlock()
 
-	configPath := getConfigPath()
+	configPath := c.savePath
+	if configPath == "" {
+		configPath = getConfigPath()
+	}
 	if configPath == "" {
 		return fmt.Errorf("could not determine config path")
 	}

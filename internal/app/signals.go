@@ -23,9 +23,10 @@ const (
 
 // GoroutineTracker tracks running goroutines for graceful shutdown.
 type GoroutineTracker struct {
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	closed bool
+	mu       sync.Mutex
+	closed   bool
+	inFlight int
+	idle     chan struct{}
 }
 
 // NewGoroutineTracker creates a new goroutine tracker.
@@ -40,37 +41,72 @@ func (t *GoroutineTracker) Add() bool {
 	if t.closed {
 		return false
 	}
-	t.wg.Add(1)
+	if t.inFlight == 0 {
+		t.idle = make(chan struct{})
+	}
+	t.inFlight++
 	return true
 }
 
 // Done marks a goroutine as completed.
 func (t *GoroutineTracker) Done() {
-	t.wg.Done()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.inFlight == 0 {
+		panic("app: GoroutineTracker.Done called without matching Add")
+	}
+	t.inFlight--
+	if t.inFlight == 0 {
+		close(t.idle)
+		t.idle = nil
+	}
 }
 
 // Wait waits for all tracked goroutines to complete.
 func (t *GoroutineTracker) Wait() {
-	t.wg.Wait()
+	t.mu.Lock()
+	idle := t.idle
+	t.mu.Unlock()
+	if idle != nil {
+		<-idle
+	}
 }
 
 // WaitWithTimeout waits for all goroutines with a timeout.
 // Returns true if all goroutines completed, false if timed out.
 func (t *GoroutineTracker) WaitWithTimeout(timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		t.wg.Wait()
-		close(done)
-	}()
+	t.mu.Lock()
+	idle := t.idle
+	t.mu.Unlock()
+	if idle == nil {
+		return true
+	}
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
-	case <-done:
+	case <-idle:
 		return true
 	case <-timer.C:
 		return false
+	}
+}
+
+// WaitWithContext waits until all work admitted before Close has completed.
+func (t *GoroutineTracker) WaitWithContext(ctx context.Context) error {
+	t.mu.Lock()
+	idle := t.idle
+	t.mu.Unlock()
+	if idle == nil {
+		return nil
+	}
+
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -168,9 +204,7 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	logging.Debug("starting graceful shutdown")
 
 	// 1. Cancel all ongoing operations (this signals goroutines to stop)
-	if a.cancel != nil {
-		a.cancel()
-	}
+	a.beginShutdown()
 
 	// 2. Cleanup signal handler
 	if a.signalCleanup != nil {
@@ -210,11 +244,34 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	}
 
 	// 4b. Cancel all running background agents
+	var cancelledAgentIDs []string
 	if a.agentRunner != nil {
-		for _, agentID := range a.agentRunner.ListRunning() {
-			logging.Debug("cancelling background agent", "agent_id", agentID)
-			_ = a.agentRunner.Cancel(agentID)
+		cancelledAgentIDs = a.agentRunner.CancelAll()
+		for _, agentID := range cancelledAgentIDs {
+			logging.Debug("cancelled background agent; awaiting finalization", "agent_id", agentID)
 		}
+	}
+
+	// 4c. Cancellation only signals work to stop. Do not tear down MCP/client
+	// dependencies or exit while run goroutines are still committing tool-pair
+	// history, closing transcript files, applying isolated workspaces, and
+	// persisting terminal results. Shell and agent waits share the shutdown
+	// deadline and run concurrently so one slow group cannot starve the other.
+	a.waitForBackgroundFinalization(ctx, cancelledAgentIDs)
+
+	// Persist the result of the lifecycle barrier before tearing down session
+	// dependencies. If foreground work finalized, its terminal transition has
+	// cleared processing and the next launch must not report a false crash. If
+	// the shutdown deadline expired first, processing deliberately remains true
+	// so startup recovery honestly reports an interrupted request.
+	if err := a.saveRecoverySnapshot(); err != nil {
+		// The TUI has already stopped on the normal quit path. stderr is the
+		// only reliable user-visible channel left; a log-only warning can be
+		// invisible when file logging is disabled.
+		logging.Error("final recovery snapshot failed during shutdown",
+			"error", err)
+		fmt.Fprintf(os.Stderr,
+			"WARNING: failed to save crash-recovery state at shutdown: %v\n", err)
 	}
 
 	// 5. Shutdown MCP servers
@@ -222,6 +279,15 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		logging.Debug("shutting down MCP servers")
 		if err := a.mcpManager.Shutdown(ctx); err != nil {
 			logging.Debug("error shutting down MCP", "error", err)
+		}
+	}
+
+	// 5b. Stop the independently managed gopls MCP process. It is lazy, so this
+	// is a cheap no-op when semantic intelligence was never used.
+	if a.codeIntelProvider != nil {
+		logging.Debug("shutting down managed Go intelligence")
+		if err := a.codeIntelProvider.Close(); err != nil {
+			logging.Warn("failed to shut down managed Go intelligence", "error", err)
 		}
 	}
 
@@ -375,6 +441,79 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	// 14. Close logging last
 	logging.Debug("shutdown complete")
 	logging.Close()
+}
+
+func (a *App) waitForBackgroundFinalization(ctx context.Context, agentIDs []string) {
+	type waitResult struct {
+		kind string
+		err  error
+	}
+	waiters := 0
+	results := make(chan waitResult, 3)
+
+	waiters++
+	go func() {
+		results <- waitResult{
+			kind: "foreground processing",
+			err:  a.foregroundWorkers.WaitWithContext(ctx),
+		}
+	}()
+
+	if a.taskManager != nil {
+		waiters++
+		go func() {
+			results <- waitResult{kind: "shell tasks", err: a.taskManager.WaitAll(ctx)}
+		}()
+	}
+	if a.agentRunner != nil && len(agentIDs) > 0 {
+		waiters++
+		go func() {
+			results <- waitResult{
+				kind: "agents",
+				err:  a.agentRunner.WaitAllWithContext(ctx, agentIDs),
+			}
+		}()
+	}
+
+	for range waiters {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				logging.Warn("background finalization incomplete during shutdown",
+					"kind", result.kind, "error", result.err)
+			}
+		case <-ctx.Done():
+			logging.Warn("shutdown deadline reached while awaiting background finalization",
+				"error", ctx.Err())
+			return
+		}
+	}
+}
+
+// beginShutdown atomically closes foreground admission, then cancels the owner
+// that may already be running. Close-before-wait guarantees no Add can race
+// the shutdown snapshot: a request that claimed processing just before this
+// boundary is either already tracked or rejected by Add.
+func (a *App) beginShutdown() {
+	a.mu.Lock()
+	a.shuttingDown = true
+	a.dropSteerLeftovers = true
+	a.mu.Unlock()
+
+	// Close is idempotent. Call it on every entry so concurrent quit/signal
+	// paths cannot observe shuttingDown=true before the first caller has sealed
+	// the tracker and begin waiting while Add is still possible.
+	a.foregroundWorkers.Close()
+
+	a.processingMu.Lock()
+	if a.processingCancel != nil {
+		a.processingCancel()
+	}
+	a.processingMu.Unlock()
+
+	if a.cancel != nil {
+		a.cancel()
+	}
 }
 
 // saveSessionHistory saves the current session to disk.

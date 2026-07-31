@@ -73,6 +73,59 @@ type TaskTool struct {
 	backgroundAllowed        bool
 }
 
+// taskForegroundTimeout mirrors the agent package's per-type normal/quick/
+// thorough wall-clock budgets. The task tool cannot import agent without an
+// import cycle, but its executor context must outlive the child-owned timeout;
+// otherwise the generic two-minute tool deadline cancels a healthy foreground
+// sub-agent long before it can finish and persist its partial result.
+func taskForegroundTimeout(args map[string]any) time.Duration {
+	if GetBoolDefault(args, "run_in_background", false) {
+		return 0
+	}
+	if resume := strings.TrimSpace(GetStringDefault(args, "resume", "")); resume != "" {
+		// A restored agent may be any type/thoroughness. Match the largest
+		// built-in budget (thorough bash) rather than guessing from absent args.
+		return 35 * time.Minute
+	}
+
+	agentType := strings.TrimSpace(GetStringDefault(args, "subagent_type", ""))
+	thoroughness := ParseThoroughness(GetStringDefault(args, "thoroughness", ""))
+	switch agentType {
+	case "bash":
+		switch thoroughness {
+		case ThoroughnessQuick:
+			return 3 * time.Minute
+		case ThoroughnessThorough:
+			return 35 * time.Minute
+		default:
+			return 15 * time.Minute
+		}
+	case "explore":
+		switch thoroughness {
+		case ThoroughnessQuick:
+			return time.Minute
+		case ThoroughnessThorough:
+			return 5 * time.Minute
+		default:
+			return 10 * time.Minute
+		}
+	case "plan":
+		if thoroughness == ThoroughnessQuick {
+			return 2 * time.Minute
+		}
+		return 10 * time.Minute
+	case "general":
+		if thoroughness == ThoroughnessQuick {
+			return 2 * time.Minute
+		}
+		return 10 * time.Minute
+	default:
+		// Guide and dynamic agent types inherit config.DefaultAgentTimeout,
+		// currently ten minutes.
+		return 10 * time.Minute
+	}
+}
+
 // NewTaskTool creates a new TaskTool instance.
 func NewTaskTool() *TaskTool {
 	return &TaskTool{backgroundAllowed: true}
@@ -227,8 +280,18 @@ func (t *TaskTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	if state.runner == nil {
 		return NewErrorResult("task runner not initialized"), nil
 	}
-	if state.toolCapabilityRestricted {
-		ctx = ContextWithAgentToolCapabilityCeiling(ctx, state.toolCapabilityCeiling)
+	effectiveCeiling := state.toolCapabilityCeiling
+	effectiveRestricted := state.toolCapabilityRestricted
+	if parentCeiling, parentRestricted := ToolCapabilityCeilingFromContext(ctx); parentRestricted {
+		if effectiveRestricted {
+			effectiveCeiling = intersectToolCapabilities(effectiveCeiling, parentCeiling)
+		} else {
+			effectiveCeiling = parentCeiling
+		}
+		effectiveRestricted = true
+	}
+	if effectiveRestricted {
+		ctx = ContextWithAgentToolCapabilityCeiling(ctx, effectiveCeiling)
 	}
 
 	prompt, _ := GetString(args, "prompt")

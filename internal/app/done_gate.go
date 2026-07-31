@@ -170,6 +170,10 @@ func (a *App) doneGatePolicy() donegate.Policy {
 	if a.config == nil {
 		return p
 	}
+	if a.config.Bare {
+		p.Enabled = false
+		return p
+	}
 
 	cfg := a.config.DoneGate
 	p.Enabled = cfg.Enabled

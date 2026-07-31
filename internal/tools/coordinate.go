@@ -4,12 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
 
 	"gokin/internal/logging"
 	"google.golang.org/genai"
+)
+
+const (
+	DefaultCoordinateTimeout = 10 * time.Minute
+	MaxCoordinateTimeout     = 120 * time.Minute
+	coordinateCleanupTimeout = 5 * time.Second
 )
 
 // CoordinatedTaskDef defines a task for coordination.
@@ -111,7 +118,7 @@ func (t *CoordinateTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"timeout_minutes": {
 					Type:        genai.TypeInteger,
-					Description: "Maximum time to wait for all tasks (in minutes). Default: 10",
+					Description: "Maximum time to wait for all tasks in minutes (default: 10, clamped to 1-120)",
 				},
 			},
 			Required: []string{"tasks"},
@@ -124,8 +131,37 @@ func (t *CoordinateTool) Validate(args map[string]any) error {
 	if !ok || len(tasks) == 0 {
 		return NewValidationError("tasks", "must be a non-empty array")
 	}
+	for _, key := range []string{"max_parallel", "timeout_minutes"} {
+		if value, present := args[key]; present && !isCoordinateInteger(value) {
+			return NewValidationError(key, "must be an integer")
+		}
+	}
 	_, err := prepareCoordinateTasks(tasks)
 	return err
+}
+
+func isCoordinateInteger(value any) bool {
+	switch number := value.(type) {
+	case int, int32, int64:
+		return true
+	case float64:
+		return !math.IsNaN(number) && !math.IsInf(number, 0) && math.Trunc(number) == number
+	default:
+		return false
+	}
+}
+
+func coordinateTimeout(args map[string]any) time.Duration {
+	minutes := int(DefaultCoordinateTimeout / time.Minute)
+	if requested, ok := GetInt(args, "timeout_minutes"); ok {
+		minutes = requested
+	}
+	if minutes < 1 {
+		minutes = 1
+	} else if maximum := int(MaxCoordinateTimeout / time.Minute); minutes > maximum {
+		minutes = maximum
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 type coordinateTaskInput struct {
@@ -277,12 +313,12 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	if t.coordinatorFactory == nil {
 		return NewErrorResult("coordinator not configured"), nil
 	}
+	if err := t.Validate(args); err != nil {
+		return NewErrorResult(fmt.Sprintf("coordinate invalid arguments: %v", err)), nil
+	}
 
 	// Parse arguments
-	tasksAny, ok := args["tasks"].([]any)
-	if !ok || len(tasksAny) == 0 {
-		return NewErrorResult("tasks must be a non-empty array"), nil
-	}
+	tasksAny := args["tasks"].([]any)
 	orderedTasks, err := prepareCoordinateTasks(tasksAny)
 	if err != nil {
 		return NewErrorResult(err.Error()), nil
@@ -303,19 +339,6 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	if maxParallel > len(orderedTasks) {
 		maxParallel = len(orderedTasks)
 	}
-	timeoutMinutes := 10
-	if tm, ok := args["timeout_minutes"].(float64); ok {
-		timeoutMinutes = int(tm)
-	}
-	// Clamp to a sane range: a negative/zero value yields an instant (or past)
-	// deadline, and a huge one overflows time.Duration(n)*time.Minute to a
-	// negative wait. Bound to [1, 120] minutes.
-	if timeoutMinutes < 1 {
-		timeoutMinutes = 1
-	} else if timeoutMinutes > 120 {
-		timeoutMinutes = 120
-	}
-
 	// Create coordinator via factory
 	coordAny := t.coordinatorFactory()
 	if coordAny == nil {
@@ -357,7 +380,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 		if waiter, ok := coordAny.(interface {
 			CancelRunningAndWait(context.Context) int
 		}); ok {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), coordinateCleanupTimeout)
 			cancelled = waiter.CancelRunningAndWait(cleanupCtx)
 			cleanupCancel()
 		} else {
@@ -388,7 +411,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	coord.Start()
 
 	// Wait for completion
-	timeout := time.Duration(timeoutMinutes) * time.Minute
+	timeout := coordinateTimeout(args)
 	results, waitErr := coord.WaitWithTimeout(ctx, timeout)
 	if waitErr != nil && len(results) == 0 {
 		// Nothing finished before the deadline/cancellation — there's

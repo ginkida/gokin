@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"gokin/internal/fileutil"
-	"gokin/internal/logging"
 	"gokin/internal/security"
 )
 
@@ -54,9 +53,9 @@ func NewExecutionJournal(workDir string) (*ExecutionJournal, error) {
 	}, nil
 }
 
-func (j *ExecutionJournal) Append(event string, details map[string]any) {
+func (j *ExecutionJournal) Append(event string, details map[string]any) error {
 	if j == nil {
-		return
+		return nil
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -68,7 +67,7 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) {
 
 	f, err := os.OpenFile(j.journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return
+		return fmt.Errorf("open execution journal %q: %w", j.journalPath, err)
 	}
 	defer f.Close()
 
@@ -79,16 +78,18 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) {
 	}
 	b, err := json.Marshal(entry)
 	if err != nil {
-		return
+		return fmt.Errorf("marshal execution journal event %q: %w", event, err)
 	}
 	if _, err := f.Write(append(b, '\n')); err != nil {
-		logging.Warn("failed to write journal entry", "path", j.journalPath, "event", event, "error", err)
+		return fmt.Errorf("write execution journal %q event %q: %w",
+			j.journalPath, event, err)
 	}
+	return nil
 }
 
-func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) {
+func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) error {
 	if j == nil {
-		return
+		return nil
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -108,11 +109,12 @@ func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) {
 	snapshot.Timestamp = time.Now()
 	b, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshal recovery snapshot: %w", err)
 	}
 	if err := fileutil.AtomicWrite(j.recoveryPath, b, 0o600); err != nil {
-		logging.Warn("failed to write recovery snapshot", "path", j.recoveryPath, "error", err)
+		return fmt.Errorf("write recovery snapshot %q: %w", j.recoveryPath, err)
 	}
+	return nil
 }
 
 func (j *ExecutionJournal) LoadRecovery() (*RecoverySnapshot, error) {

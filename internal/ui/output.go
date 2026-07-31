@@ -68,6 +68,9 @@ type OutputModel struct {
 	styles       *Styles
 	renderer     *glamour.TermRenderer
 	streamParser *MarkdownStreamParser
+	// markdownRendering controls both incremental response parsing and explicit
+	// AppendMarkdown calls. It is UI-loop owned and defaults on.
+	markdownRendering bool
 
 	// state holds mutex-protected mutable state (pointer to avoid copy issues)
 	state *outputState
@@ -85,9 +88,10 @@ func NewOutputModel(styles *Styles) OutputModel {
 	)
 
 	return OutputModel{
-		styles:       styles,
-		renderer:     renderer,
-		streamParser: NewMarkdownStreamParser(styles),
+		styles:            styles,
+		renderer:          renderer,
+		streamParser:      NewMarkdownStreamParser(styles),
+		markdownRendering: true,
 		state: &outputState{
 			content:    &strings.Builder{},
 			codeBlocks: NewCodeBlockRegistry(styles),
@@ -252,9 +256,9 @@ func (m *OutputModel) AppendText(text string) {
 
 // AppendTextStream appends streaming text with markdown parsing and syntax highlighting.
 func (m *OutputModel) AppendTextStream(text string) {
-	if m.streamParser == nil {
+	if !m.markdownRendering || m.streamParser == nil {
 		// Preserve the same external-content safety contract even if a caller
-		// constructs an OutputModel without the Markdown parser.
+		// disables Markdown or constructs an OutputModel without the parser.
 		m.AppendText(safeTerminalDisplayText(text))
 		return
 	}
@@ -391,6 +395,22 @@ func (m *OutputModel) ResetStream() {
 	}
 }
 
+// SetMarkdownRendering switches response rendering at a clean stream
+// boundary. Disabling first flushes parser-buffered text so a partial line or
+// code fence is not lost; enabling resets the parser so plaintext emitted
+// while disabled cannot affect later Markdown state.
+func (m *OutputModel) SetMarkdownRendering(enabled bool) {
+	if m.markdownRendering == enabled {
+		return
+	}
+	if !enabled {
+		m.FlushStream()
+	} else {
+		m.ResetStream()
+	}
+	m.markdownRendering = enabled
+}
+
 // GetCodeBlocks returns the code block registry.
 func (m *OutputModel) GetCodeBlocks() *CodeBlockRegistry {
 	m.state.mu.Lock()
@@ -412,6 +432,10 @@ func (m *OutputModel) AppendMarkdown(text string) {
 	// Glamour adds trusted styling after this point; discard any styling or
 	// terminal controls supplied by the external Markdown itself first.
 	text = safeTerminalDisplayText(text)
+	if !m.markdownRendering {
+		m.AppendLine(text)
+		return
+	}
 	if m.renderer != nil {
 		rendered, err := m.renderer.Render(text)
 		if err == nil {

@@ -33,7 +33,7 @@ func newUpdateCheckCmd() *cobra.Command {
 		Use:   "check",
 		Short: "Check for available updates",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			cfg, err := loadConfiguredConfig(cfgFile)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
@@ -45,7 +45,7 @@ func newUpdateCheckCmd() *cobra.Command {
 			}
 			defer updater.Cleanup()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), updater.GetConfig().Timeout)
 			defer cancel()
 
 			fmt.Println("Checking for updates...")
@@ -83,7 +83,7 @@ func newUpdateInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Download and install the latest update",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			cfg, err := loadConfiguredConfig(cfgFile)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
@@ -150,7 +150,7 @@ func newUpdateRollbackCmd() *cobra.Command {
 		Use:   "rollback",
 		Short: "Rollback to a previous version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			cfg, err := loadConfiguredConfig(cfgFile)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
@@ -191,7 +191,7 @@ func newUpdateListBackupsCmd() *cobra.Command {
 		Aliases: []string{"backups"},
 		Short:   "List available backup versions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			cfg, err := loadConfiguredConfig(cfgFile)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
@@ -230,24 +230,7 @@ func newUpdateListBackupsCmd() *cobra.Command {
 
 // convertConfig converts config.UpdateConfig to update.Config.
 func convertConfig(cfg *config.UpdateConfig) *update.Config {
-	timeout := cfg.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-
-	return &update.Config{
-		Enabled:           cfg.Enabled,
-		AutoCheck:         cfg.AutoCheck,
-		CheckInterval:     cfg.CheckInterval,
-		AutoDownload:      cfg.AutoDownload,
-		IncludePrerelease: cfg.IncludePrerelease,
-		Channel:           update.Channel(cfg.Channel),
-		GitHubRepo:        cfg.GitHubRepo,
-		MaxBackups:        cfg.MaxBackups,
-		VerifyChecksum:    cfg.VerifyChecksum,
-		NotifyOnly:        cfg.NotifyOnly,
-		Timeout:           timeout,
-	}
+	return update.FromConfig(cfg)
 }
 
 // CheckForUpdateOnStartup checks for updates on startup and notifies the user.

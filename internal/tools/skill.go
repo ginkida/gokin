@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,17 @@ type SkillTool struct {
 	// own ledger so concurrent agents cannot overwrite each other's context.
 	ledgerMu sync.RWMutex
 	ledger   *skills.InvocationLedger
+
+	// activePermissionGrants/Denies are turn-scoped rules loaded from skill
+	// frontmatter. They are deliberately separate from the durable invocation
+	// ledger: skill instructions survive compaction/session restore, while
+	// permission authority and restrictions never do.
+	grantMu                 sync.RWMutex
+	activePermissionGrants  map[string]struct{}
+	pendingPermissionGrants map[string]struct{}
+	activePermissionDenies  map[string]struct{}
+	pendingPermissionDenies map[string]struct{}
+	workspaceTrusted        bool
 }
 
 // NewSkillTool discovers native Gokin skills and Claude-compatible SKILL.md
@@ -53,9 +65,13 @@ type SkillTool struct {
 func NewSkillTool(workDir string) *SkillTool {
 	workDir = normalizeSkillWorkDir(workDir)
 	return &SkillTool{
-		catalog: skills.NewCatalog(skills.DefaultRoots(workDir)),
-		workDir: workDir,
-		ledger:  skills.NewInvocationLedger(),
+		catalog:                 skills.NewCatalog(skills.DefaultRoots(workDir)),
+		workDir:                 workDir,
+		ledger:                  skills.NewInvocationLedger(),
+		activePermissionGrants:  make(map[string]struct{}),
+		pendingPermissionGrants: make(map[string]struct{}),
+		activePermissionDenies:  make(map[string]struct{}),
+		pendingPermissionDenies: make(map[string]struct{}),
 	}
 }
 
@@ -82,10 +98,213 @@ func NewSkillToolWithCatalogAndWorkDir(catalog *skills.Catalog, workDir string) 
 		catalog = skills.NewCatalog(nil)
 	}
 	return &SkillTool{
-		catalog: catalog,
-		workDir: normalizeSkillWorkDir(workDir),
-		ledger:  skills.NewInvocationLedger(),
+		catalog:                 catalog,
+		workDir:                 normalizeSkillWorkDir(workDir),
+		ledger:                  skills.NewInvocationLedger(),
+		activePermissionGrants:  make(map[string]struct{}),
+		pendingPermissionGrants: make(map[string]struct{}),
+		activePermissionDenies:  make(map[string]struct{}),
+		pendingPermissionDenies: make(map[string]struct{}),
 	}
+}
+
+// SetWorkspaceTrusted controls whether repository-owned skills may activate
+// allowed-tools grants. User-owned global skills are trusted independently.
+func (t *SkillTool) SetWorkspaceTrusted(trusted bool) {
+	t.grantMu.Lock()
+	t.workspaceTrusted = trusted
+	t.grantMu.Unlock()
+}
+
+// WorkspaceTrusted reports the exact trust bit copied into agent-local clones.
+func (t *SkillTool) WorkspaceTrusted() bool {
+	t.grantMu.RLock()
+	trusted := t.workspaceTrusted
+	t.grantMu.RUnlock()
+	return trusted
+}
+
+// ResetActivePermissionGrants begins a new top-level request. Permission
+// authority is never carried across turns, retries after process restart, or
+// persisted sessions.
+func (t *SkillTool) ResetActivePermissionGrants() {
+	t.grantMu.Lock()
+	t.activePermissionGrants = make(map[string]struct{})
+	t.pendingPermissionGrants = make(map[string]struct{})
+	t.activePermissionDenies = make(map[string]struct{})
+	t.pendingPermissionDenies = make(map[string]struct{})
+	t.grantMu.Unlock()
+}
+
+// BeginPermissionTurn clears grants from the previous request and atomically
+// promotes an explicit /skill command's pending grants into its queued model
+// prompt. Pending authority is one-shot and cannot leak into a later turn.
+func (t *SkillTool) BeginPermissionTurn() {
+	t.grantMu.Lock()
+	t.activePermissionGrants = t.pendingPermissionGrants
+	if t.activePermissionGrants == nil {
+		t.activePermissionGrants = make(map[string]struct{})
+	}
+	t.pendingPermissionGrants = make(map[string]struct{})
+	t.activePermissionDenies = t.pendingPermissionDenies
+	if t.activePermissionDenies == nil {
+		t.activePermissionDenies = make(map[string]struct{})
+	}
+	t.pendingPermissionDenies = make(map[string]struct{})
+	t.grantMu.Unlock()
+}
+
+// InheritPermissionDenies seeds a delegated clone with the restrictions the
+// loop that spawned it is operating under. Denies — and only denies — are
+// inheritable: a restriction that stops at the `task` boundary is no
+// restriction at all, while inheriting GRANTS would hand a sub-agent authority
+// nobody asked it to have. The rules are installed as pending so the clone's
+// own BeginPermissionTurn promotes them exactly like a locally loaded skill.
+func (t *SkillTool) InheritPermissionDenies(denies []string) {
+	if t == nil || len(denies) == 0 {
+		return
+	}
+	t.grantMu.Lock()
+	if t.pendingPermissionDenies == nil {
+		t.pendingPermissionDenies = make(map[string]struct{}, len(denies))
+	}
+	if t.activePermissionDenies == nil {
+		t.activePermissionDenies = make(map[string]struct{}, len(denies))
+	}
+	for _, deny := range denies {
+		if deny == "" {
+			continue
+		}
+		t.pendingPermissionDenies[deny] = struct{}{}
+		t.activePermissionDenies[deny] = struct{}{}
+	}
+	t.grantMu.Unlock()
+}
+
+// ActivePermissionGrants returns a deterministic defensive snapshot.
+func (t *SkillTool) ActivePermissionGrants() []string {
+	t.grantMu.RLock()
+	result := make([]string, 0, len(t.activePermissionGrants))
+	for grant := range t.activePermissionGrants {
+		result = append(result, grant)
+	}
+	t.grantMu.RUnlock()
+	sort.Strings(result)
+	return result
+}
+
+// ActivePermissionDenies returns a deterministic defensive snapshot.
+func (t *SkillTool) ActivePermissionDenies() []string {
+	t.grantMu.RLock()
+	result := make([]string, 0, len(t.activePermissionDenies))
+	for deny := range t.activePermissionDenies {
+		result = append(result, deny)
+	}
+	t.grantMu.RUnlock()
+	sort.Strings(result)
+	return result
+}
+
+// ResetSkillPermissionGrants resets the active SkillTool, if the registry
+// exposes one. It is shared by the foreground and sub-agent turn boundaries.
+func ResetSkillPermissionGrants(registry ToolRegistry) {
+	if registry == nil {
+		return
+	}
+	tool, ok := registry.Get("skill")
+	if !ok {
+		return
+	}
+	if skillTool, ok := tool.(*SkillTool); ok {
+		skillTool.ResetActivePermissionGrants()
+	}
+}
+
+// BeginSkillPermissionTurn starts a fresh permission scope and promotes any
+// explicit /skill handoff prepared immediately before this model request.
+func BeginSkillPermissionTurn(registry ToolRegistry) {
+	if registry == nil {
+		return
+	}
+	tool, ok := registry.Get("skill")
+	if !ok {
+		return
+	}
+	if skillTool, ok := tool.(*SkillTool); ok {
+		skillTool.BeginPermissionTurn()
+	}
+}
+
+// SkillPermissionGrants snapshots current turn-scoped pre-approvals.
+func SkillPermissionGrants(registry ToolRegistry) []string {
+	if registry == nil {
+		return nil
+	}
+	tool, ok := registry.Get("skill")
+	if !ok {
+		return nil
+	}
+	if skillTool, ok := tool.(*SkillTool); ok {
+		return skillTool.ActivePermissionGrants()
+	}
+	return nil
+}
+
+// SkillPermissionDenies snapshots current turn-scoped skill restrictions.
+func SkillPermissionDenies(registry ToolRegistry) []string {
+	if registry == nil {
+		return nil
+	}
+	tool, ok := registry.Get("skill")
+	if !ok {
+		return nil
+	}
+	if skillTool, ok := tool.(*SkillTool); ok {
+		return skillTool.ActivePermissionDenies()
+	}
+	return nil
+}
+
+func (t *SkillTool) activatePermissionRules(skill skills.Skill, forUser bool) (grantsActive bool, ignoredReason string) {
+	t.grantMu.Lock()
+	defer t.grantMu.Unlock()
+	grantTarget := t.activePermissionGrants
+	denyTarget := t.activePermissionDenies
+	if forUser {
+		grantTarget = t.pendingPermissionGrants
+		denyTarget = t.pendingPermissionDenies
+	}
+	if denyTarget == nil {
+		denyTarget = make(map[string]struct{})
+		if forUser {
+			t.pendingPermissionDenies = denyTarget
+		} else {
+			t.activePermissionDenies = denyTarget
+		}
+	}
+	for _, deny := range skill.DisallowedTools {
+		denyTarget[deny] = struct{}{}
+	}
+
+	if len(skill.AllowedTools) == 0 {
+		return false, ""
+	}
+	trustedSource := skill.Source == "global" || skill.Source == "claude-global"
+	if !trustedSource && !t.workspaceTrusted {
+		return false, "workspace is not trusted for repository-owned executable configuration"
+	}
+	if grantTarget == nil {
+		grantTarget = make(map[string]struct{})
+		if forUser {
+			t.pendingPermissionGrants = grantTarget
+		} else {
+			t.activePermissionGrants = grantTarget
+		}
+	}
+	for _, grant := range skill.AllowedTools {
+		grantTarget[grant] = struct{}{}
+	}
+	return true, ""
 }
 
 // SetInvocationLedger binds the tool to an owner-managed invocation ledger.
@@ -279,6 +498,22 @@ func (t *SkillTool) execute(args map[string]any, forUser bool, positionalOverrid
 		"render_hash":  invocation.RenderHash,
 		"sequence":     invocation.Sequence,
 		"changed":      changed,
+	}
+	var grantsActive bool
+	var ignoredReason string
+	if len(skill.AllowedTools) > 0 || len(skill.DisallowedTools) > 0 {
+		grantsActive, ignoredReason = t.activatePermissionRules(skill, forUser)
+	}
+	if len(skill.AllowedTools) > 0 {
+		data["allowed_tools"] = append([]string(nil), skill.AllowedTools...)
+		data["permission_grants_active"] = grantsActive
+		if ignoredReason != "" {
+			data["permission_grants_ignored"] = ignoredReason
+		}
+	}
+	if len(skill.DisallowedTools) > 0 {
+		data["disallowed_tools"] = append([]string(nil), skill.DisallowedTools...)
+		data["permission_denies_active"] = true
 	}
 	if !changed {
 		return NewSuccessResultWithData(fmt.Sprintf(

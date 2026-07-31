@@ -53,7 +53,10 @@ func TestStoreFlush_WaitsForInFlightDebouncedWrite(t *testing.T) {
 	hookEntered := make(chan struct{})
 	proceedHook := make(chan struct{})
 	saveTestSeamMu.Lock()
-	saveIOHookForTest = func() {
+	saveIOHookForTest = func(owner *Store) {
+		if owner != store {
+			return
+		}
 		close(hookEntered)
 		<-proceedHook
 	}

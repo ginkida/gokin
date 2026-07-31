@@ -46,6 +46,7 @@ type Model struct {
 	todoItems        []string
 	lastRecapLine    string // dedup latch for the end-of-turn ※ recap (turn_recap.go)
 	workDir          string
+	initialPrompt    string
 
 	// Streaming timeout protection
 	streamStartTime time.Time
@@ -480,9 +481,17 @@ func (m Model) Init() tea.Cmd {
 		m.input.Init(),
 		m.spinner.Tick,
 	}
+	if strings.TrimSpace(m.initialPrompt) != "" {
+		prompt := m.initialPrompt
+		cmds = append(cmds, func() tea.Msg { return InitialPromptMsg(prompt) })
+	}
 
 	return tea.Batch(cmds...)
 }
+
+// InitialPromptMsg submits a CLI-provided first message after Bubble Tea has
+// started, avoiding a pre-Run Program.Send deadlock.
+type InitialPromptMsg string
 
 // ScratchpadMsg is sent when the agent scratchpad is updated.
 type ScratchpadMsg string
@@ -493,6 +502,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle critical messages FIRST - always process these regardless of welcome screen
 	switch msg := msg.(type) {
+	case InitialPromptMsg:
+		return m, m.submitPaletteLine(string(msg))
 	case ScratchpadMsg:
 		m.scratchpad = string(msg)
 		return m, nil
@@ -4370,6 +4381,9 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		if bellEnabled, ok := msg.Settings["bell"]; ok {
 			m.SetBellEnabled(bellEnabled)
 		}
+		if markdownRendering, ok := msg.Settings["markdown"]; ok {
+			m.SetMarkdownRendering(markdownRendering)
+		}
 		if modelName := safeKeyEntryText(msg.ModelName); modelName != "" {
 			m.currentModel = modelName
 			m.refreshTerminalTitle()
@@ -6071,6 +6085,11 @@ func (m *Model) applyResize(msg *tea.WindowSizeMsg) tea.Cmd {
 // SetBellEnabled enables or disables the terminal bell on prompts.
 func (m *Model) SetBellEnabled(enabled bool) {
 	m.bellEnabled = enabled
+}
+
+// SetMarkdownRendering toggles Markdown parsing for response output.
+func (m *Model) SetMarkdownRendering(enabled bool) {
+	m.output.SetMarkdownRendering(enabled)
 }
 
 // bellCmd returns a tea.Cmd that emits a terminal bell if bell is enabled.

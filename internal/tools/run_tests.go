@@ -4,26 +4,50 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"gokin/internal/security"
 
 	"google.golang.org/genai"
 )
 
+const (
+	// DefaultRunTestsTimeout is intentionally longer than the generic tool
+	// timeout: full workspaces commonly compile before running thousands of
+	// tests. The executor gives this tool matching outer-context headroom.
+	DefaultRunTestsTimeout = 10 * time.Minute
+	MaxRunTestsTimeout     = 30 * time.Minute
+)
+
 // RunTestsTool runs project tests and parses results.
 type RunTestsTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewRunTestsTool creates a new RunTestsTool instance.
 func NewRunTestsTool(workDir string) *RunTestsTool {
-	return &RunTestsTool{workDir: workDir}
+	workDir = canonicalToolWorkDir(workDir)
+	return &RunTestsTool{
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
+	}
+}
+
+// SetAllowedDirs adds explicitly granted directories to the execution scope.
+// run_tests executes project-controlled code, so its path boundary must match
+// read/write tools rather than trusting a model-supplied ../ path.
+func (t *RunTestsTool) SetAllowedDirs(dirs []string) {
+	t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
 }
 
 func (t *RunTestsTool) Name() string { return "run_tests" }
@@ -60,37 +84,88 @@ func (t *RunTestsTool) Declaration() *genai.FunctionDeclaration {
 					Description: "Force specific framework: 'go', 'pytest', 'jest', 'cargo', 'auto' (default: auto-detect)",
 					Enum:        []string{"auto", "go", "pytest", "jest", "cargo"},
 				},
+				"timeout_seconds": {
+					Type:        genai.TypeInteger,
+					Description: "Maximum test runtime in seconds (default: 600, max: 1800)",
+				},
 			},
 		},
 	}
 }
 
 func (t *RunTestsTool) Validate(args map[string]any) error {
-	return nil
+	for _, key := range []string{"path", "filter", "framework"} {
+		if value, present := args[key]; present {
+			if _, ok := value.(string); !ok {
+				return NewValidationError(key, "must be a string")
+			}
+		}
+	}
+	for _, key := range []string{"verbose", "coverage"} {
+		if value, present := args[key]; present {
+			if _, ok := value.(bool); !ok {
+				return NewValidationError(key, "must be a boolean")
+			}
+		}
+	}
+	if _, present := args["timeout_seconds"]; present {
+		seconds, ok := GetInt(args, "timeout_seconds")
+		if !ok {
+			return NewValidationError("timeout_seconds", "must be an integer")
+		}
+		if seconds < 1 || seconds > int(MaxRunTestsTimeout/time.Second) {
+			return NewValidationError("timeout_seconds", fmt.Sprintf("must be between 1 and %d", int(MaxRunTestsTimeout/time.Second)))
+		}
+	}
+	framework := strings.ToLower(strings.TrimSpace(GetStringDefault(args, "framework", "auto")))
+	if framework == "" {
+		framework = "auto"
+	}
+	switch framework {
+	case "auto", "go", "pytest", "jest", "cargo":
+		return nil
+	default:
+		return NewValidationError("framework", "must be one of: auto, go, pytest, jest, cargo")
+	}
 }
 
 func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+	// Executor calls Validate before Execute, but keeping this defensive check
+	// prevents direct/internal callers from turning malformed arguments into a
+	// real process launch (or the historical false PASS for an unknown runner).
+	if err := t.Validate(args); err != nil {
+		return NewErrorResult(fmt.Sprintf("run_tests invalid arguments: %v", err)), nil
+	}
+
 	testPath := GetStringDefault(args, "path", "")
 	filter := GetStringDefault(args, "filter", "")
 	verbose := GetBoolDefault(args, "verbose", false)
 	coverage := GetBoolDefault(args, "coverage", false)
-	framework := GetStringDefault(args, "framework", "auto")
+	framework := strings.ToLower(strings.TrimSpace(GetStringDefault(args, "framework", "auto")))
+	if framework == "" {
+		framework = "auto"
+	}
 
-	workDir := t.workDir
-	if testPath != "" {
-		if filepath.IsAbs(testPath) {
-			workDir = testPath
-		} else {
-			workDir = filepath.Join(t.workDir, testPath)
-		}
-		if info, err := os.Stat(workDir); err == nil && !info.IsDir() {
-			workDir = filepath.Dir(workDir)
-		}
+	pathCandidate := testPath
+	if pathCandidate == "" {
+		pathCandidate = "."
+	}
+	validatedPath, err := validateWorkspacePath(t.workDir, pathCandidate, t.pathValidator)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("run_tests rejected path: %v", err)), nil
+	}
+	info, err := os.Stat(validatedPath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("run_tests cannot access path: %v", err)), nil
+	}
+	workDir := validatedPath
+	if !info.IsDir() {
+		workDir = filepath.Dir(validatedPath)
 	}
 
 	// Auto-detect framework
 	if framework == "auto" {
-		framework = detectTestFramework(workDir)
+		framework = detectTestFrameworkInScope(workDir, 10, t.pathValidator)
 		if framework == "" {
 			return NewErrorResult("could not detect test framework. Specify 'framework' parameter."), nil
 		}
@@ -98,9 +173,18 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 
 	// Build command
 	cmdName, cmdArgs := buildTestCommand(framework, workDir, filter, verbose, coverage)
+	if cmdName == "" {
+		return NewErrorResult(fmt.Sprintf("run_tests has no command for framework %q", framework)), nil
+	}
 
-	// Execute with timeout
-	testCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// Execute with a workload-sized timeout. The executor independently gives
+	// run_tests a slightly larger outer budget so this inner deadline can
+	// return a classified partial result instead of being cut off first.
+	timeout := DefaultRunTestsTimeout
+	if seconds, ok := GetInt(args, "timeout_seconds"); ok {
+		timeout = time.Duration(seconds) * time.Second
+	}
+	testCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(testCtx, cmdName, cmdArgs...)
@@ -115,9 +199,25 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 
 	outStr := string(output)
 
-	// Parse results based on framework
-	result := parseTestResults(framework, outStr, err, duration)
 	if err != nil {
+		switch testCtx.Err() {
+		case context.DeadlineExceeded:
+			return interruptedTestResult(
+				fmt.Sprintf("tests timed out before completion (%s)", framework),
+				framework, outStr, err, duration,
+			), nil
+		case context.Canceled:
+			return interruptedTestResult(
+				fmt.Sprintf("tests cancelled before completion (%s)", framework),
+				framework, outStr, err, duration,
+			), nil
+		}
+		var lookupErr *exec.Error
+		var pathErr *os.PathError
+		if errors.As(err, &lookupErr) || errors.As(err, &pathErr) {
+			return NewErrorResult(fmt.Sprintf("test runner could not start (%s): %v", framework, err)), nil
+		}
+		result := parseTestResults(framework, outStr, err, duration)
 		return ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("tests failed (%s)", framework),
@@ -125,16 +225,30 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		}, nil
 	}
 
+	// Parse results based on framework.
+	result := parseTestResults(framework, outStr, nil, duration)
 	return NewSuccessResult(result), nil
 }
 
-// detectTestFramework auto-detects the test framework from project files.
-func detectTestFramework(dir string) string {
-	return detectTestFrameworkBounded(dir, 10)
+func interruptedTestResult(message, framework, output string, execErr error, duration time.Duration) ToolResult {
+	result := NewErrorResult(message)
+	if strings.TrimSpace(output) != "" {
+		result.Content = "Partial output before interruption:\n" +
+			parseTestResults(framework, output, execErr, duration)
+	}
+	return result
 }
 
-func detectTestFrameworkBounded(dir string, depth int) string {
-	if depth <= 0 {
+// detectTestFrameworkInScope is the execution-path variant of framework
+// detection. It may walk from a requested package directory to its module
+// root, but stops at the workspace/grant boundary instead of inspecting a
+// containing sibling project.
+func detectTestFrameworkInScope(dir string, depth int, validator *security.PathValidator) string {
+	if depth <= 0 || validator == nil {
+		return ""
+	}
+	validatedDir, err := validator.Validate(dir)
+	if err != nil {
 		return ""
 	}
 
@@ -150,19 +264,17 @@ func detectTestFrameworkBounded(dir string, depth int) string {
 		{"pyproject.toml", "pytest"},
 		{"requirements.txt", "pytest"},
 	}
-
 	for _, check := range checks {
-		if _, err := os.Stat(filepath.Join(dir, check.file)); err == nil {
+		if _, err := os.Stat(filepath.Join(validatedDir, check.file)); err == nil {
 			return check.framework
 		}
 	}
 
-	parent := filepath.Dir(dir)
-	if parent != dir {
-		return detectTestFrameworkBounded(parent, depth-1)
+	parent := filepath.Dir(validatedDir)
+	if parent == validatedDir {
+		return ""
 	}
-
-	return ""
+	return detectTestFrameworkInScope(parent, depth-1, validator)
 }
 
 // buildTestCommand creates the test command for the given framework.
@@ -213,18 +325,21 @@ func buildTestCommand(framework, _ string, filter string, verbose, coverage bool
 		return "npx", append([]string{"jest"}, args[1:]...)
 
 	case "cargo":
-		args := []string{"test"}
+		// --workspace is valid for a standalone package too and ensures a
+		// virtual Cargo workspace doesn't silently test only default-members.
+		args := []string{"test", "--workspace"}
 		if !verbose {
 			args = append(args, "--quiet")
 		}
 		if filter != "" {
 			args = append(args, filter)
 		}
-		args = append(args, "--", "--format", "json")
+		// Do not force libtest's unstable `--format json`: stable Rust rejects
+		// it, turning a healthy suite into a tool-induced failure.
 		return "cargo", args
 
 	default:
-		return "echo", []string{"unknown framework: " + framework}
+		return "", nil
 	}
 }
 
@@ -250,9 +365,60 @@ func parseTestResults(framework, output string, execErr error, duration time.Dur
 	switch framework {
 	case "go":
 		return parseGoTestResults(output, execErr, duration)
+	case "cargo":
+		return parseCargoTestResults(output, execErr, duration)
 	default:
 		return parseGenericTestResults(output, execErr, duration)
 	}
+}
+
+var cargoTestResultRE = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out`)
+
+// parseCargoTestResults aggregates every libtest harness in a workspace.
+// Cargo prints one "test result" line per crate/target/doc-test; a tail-only
+// view commonly contains only the final zero-test doc harness and loses the
+// main totals.
+func parseCargoTestResults(output string, execErr error, duration time.Duration) string {
+	matches := cargoTestResultRE.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return parseGenericTestResults(output, execErr, duration)
+	}
+
+	var passed, failed, ignored, measured, filtered int
+	for _, match := range matches {
+		values := []*int{&passed, &failed, &ignored, &measured, &filtered}
+		for i, dst := range values {
+			n, err := strconv.Atoi(match[i+1])
+			if err == nil {
+				*dst += n
+			}
+		}
+	}
+
+	var result strings.Builder
+	if execErr != nil || failed > 0 {
+		fmt.Fprintf(&result, "FAIL - %d passed, %d failed", passed, failed)
+	} else {
+		fmt.Fprintf(&result, "PASS - %d tests passed", passed)
+	}
+	if ignored > 0 {
+		fmt.Fprintf(&result, ", %d ignored", ignored)
+	}
+	if measured > 0 {
+		fmt.Fprintf(&result, ", %d measured", measured)
+	}
+	if filtered > 0 {
+		fmt.Fprintf(&result, ", %d filtered out", filtered)
+	}
+	fmt.Fprintf(&result, " across %d test harnesses (%.1fs)", len(matches), duration.Seconds())
+
+	// Successful quiet runs need only the trustworthy aggregate. On failure,
+	// retain bounded head+tail diagnostics for the model to act on.
+	if execErr != nil || failed > 0 {
+		result.WriteString("\n\n")
+		result.WriteString(truncateTestOutput(output))
+	}
+	return result.String()
 }
 
 // parseGoTestResults parses Go's JSON test output.
@@ -427,15 +593,17 @@ func parseGenericTestResults(output string, execErr error, duration time.Duratio
 		fmt.Fprintf(&result, "PASS (%.1fs)\n\n", duration.Seconds())
 	}
 
-	// Truncate long output
-	if runes := []rune(output); len(runes) > 5000 {
-		// Show first 2000 and last 2000 chars
-		result.WriteString(string(runes[:2000]))
-		result.WriteString("\n\n... (output truncated) ...\n\n")
-		result.WriteString(string(runes[len(runes)-2000:]))
-	} else {
-		result.WriteString(output)
-	}
+	result.WriteString(truncateTestOutput(output))
 
 	return result.String()
+}
+
+func truncateTestOutput(output string) string {
+	runes := []rune(output)
+	if len(runes) <= 5000 {
+		return output
+	}
+	return string(runes[:2000]) +
+		"\n\n... (output truncated) ...\n\n" +
+		string(runes[len(runes)-2000:])
 }

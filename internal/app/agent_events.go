@@ -128,7 +128,7 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 					if stepID > 0 {
 						a.captureStepRollbackFromToolArgs(p, stepID, name, args)
 						p.RecordStepEffect(stepID, name, args)
-						_ = a.planManager.SaveCurrentPlan()
+						_ = a.saveCurrentPlanWithVisibility("foreground tool start")
 					}
 				}
 			}
@@ -564,7 +564,7 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 				if stepID > 0 {
 					a.captureStepRollbackFromToolArgs(p, stepID, toolName, args)
 					p.RecordStepEffect(stepID, toolName, args)
-					_ = a.planManager.SaveCurrentPlan()
+					_ = a.saveCurrentPlanWithVisibility("delegated tool start")
 				}
 			}
 		}

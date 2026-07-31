@@ -112,21 +112,26 @@ func TestBashToolMidFlightCancellationIsNotReportedAsTimeout(t *testing.T) {
 	tool := NewBashTool(t.TempDir())
 	tool.SetTimeout(time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
-	started := time.Now()
+	cancelledAt := make(chan time.Time, 1)
 	go func() {
 		time.Sleep(25 * time.Millisecond)
+		at := time.Now()
 		cancel()
+		cancelledAt <- at
 	}()
 
-	result, err := tool.Execute(ctx, map[string]any{"command": "sleep 5"})
+	result, err := tool.Execute(ctx, map[string]any{"command": "sleep 30"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Success || !strings.Contains(result.Error, "cancelled") || strings.Contains(result.Error, "timed out") {
 		t.Fatalf("cancelled command result = success %v error %q", result.Success, result.Error)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("cancellation took %v", elapsed)
+	// Measure from the actual cancel call, not from test start. Under a full
+	// workspace -race run the scheduler may delay the helper goroutine itself;
+	// charging that pre-cancel delay to BashTool produced a false 5s failure.
+	if latency := time.Since(<-cancelledAt); latency > time.Second {
+		t.Fatalf("return after cancellation took %v", latency)
 	}
 }
 

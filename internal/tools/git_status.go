@@ -90,7 +90,7 @@ func (t *GitStatusTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	// `git status` subprocess (full human output appended after the
 	// summary) only duplicated content and doubled the cost per call.
 	cmdArgs := []string{"status", "--porcelain", "-b"}
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = absPath
 
 	output, err := cmd.Output()

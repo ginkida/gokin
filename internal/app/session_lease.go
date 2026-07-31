@@ -236,6 +236,9 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 	if a.agentRunner != nil {
 		a.agentRunner.SetSharedScratchpad(scratchpad)
 	}
+	if a.executor != nil {
+		a.executor.SetSessionID(targetID)
+	}
 	a.restoreToolCheckpoints()
 	a.safeSendToProgram(ui.ScratchpadMsg(scratchpad))
 	a.mu.Lock()

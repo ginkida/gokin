@@ -11,6 +11,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"gokin/internal/permission"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,6 +52,8 @@ type Skill struct {
 	WhenToUse              string
 	ArgumentHint           string
 	Arguments              []string
+	AllowedTools           []string
+	DisallowedTools        []string
 	Body                   string
 	Source                 string
 	Path                   string
@@ -90,8 +94,6 @@ func (fm skillFrontmatter) unsupportedExecutionField() string {
 		name string
 		node yaml.Node
 	}{
-		{"allowed-tools", fm.AllowedTools},
-		{"disallowed-tools", fm.DisallowedTools},
 		{"model", fm.Model},
 		{"effort", fm.Effort},
 		{"context", fm.Context},
@@ -349,6 +351,14 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 	if err != nil {
 		return Skill{}, err
 	}
+	allowedTools, err := parseSkillAllowedTools(fm.AllowedTools)
+	if err != nil {
+		return Skill{}, err
+	}
+	disallowedTools, err := parseSkillDisallowedTools(fm.DisallowedTools)
+	if err != nil {
+		return Skill{}, err
+	}
 
 	userInvocable := true
 	if fm.UserInvocable != nil {
@@ -361,12 +371,72 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 		WhenToUse:              whenToUse,
 		ArgumentHint:           argumentHint,
 		Arguments:              arguments,
+		AllowedTools:           allowedTools,
+		DisallowedTools:        disallowedTools,
 		Body:                   body,
 		Source:                 source,
 		Path:                   displayPath,
 		DisableModelInvocation: fm.DisableModelInvocation,
 		UserInvocable:          userInvocable,
 	}, nil
+}
+
+func parseSkillDisallowedTools(node yaml.Node) ([]string, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	var raw []string
+	switch node.Kind {
+	case yaml.ScalarNode:
+		return permission.ParseTemporaryToolDenyList(node.Value)
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+				return nil, fmt.Errorf("frontmatter disallowed-tools must contain only strings")
+			}
+			parsed, err := permission.ParseTemporaryToolDenyList(item.Value)
+			if err != nil {
+				return nil, fmt.Errorf("frontmatter disallowed-tools: %w", err)
+			}
+			raw = append(raw, parsed...)
+		}
+	default:
+		return nil, fmt.Errorf("frontmatter disallowed-tools must be a space-separated string or a list of strings")
+	}
+	canonical, err := permission.CanonicalizeTemporaryToolDenies(raw)
+	if err != nil {
+		return nil, fmt.Errorf("frontmatter disallowed-tools: %w", err)
+	}
+	return canonical, nil
+}
+
+func parseSkillAllowedTools(node yaml.Node) ([]string, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	var raw []string
+	switch node.Kind {
+	case yaml.ScalarNode:
+		return permission.ParseTemporaryToolGrantList(node.Value)
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
+				return nil, fmt.Errorf("frontmatter allowed-tools must contain only strings")
+			}
+			parsed, err := permission.ParseTemporaryToolGrantList(item.Value)
+			if err != nil {
+				return nil, fmt.Errorf("frontmatter allowed-tools: %w", err)
+			}
+			raw = append(raw, parsed...)
+		}
+	default:
+		return nil, fmt.Errorf("frontmatter allowed-tools must be a space-separated string or a list of strings")
+	}
+	canonical, err := permission.CanonicalizeTemporaryToolGrants(raw)
+	if err != nil {
+		return nil, fmt.Errorf("frontmatter allowed-tools: %w", err)
+	}
+	return canonical, nil
 }
 
 func containsDynamicContextFence(body string) bool {
@@ -531,6 +601,12 @@ func catalogSkillBytes(skill Skill) int {
 	for _, argument := range skill.Arguments {
 		total += len(argument)
 	}
+	for _, tool := range skill.AllowedTools {
+		total += len(tool)
+	}
+	for _, tool := range skill.DisallowedTools {
+		total += len(tool)
+	}
 	return total
 }
 
@@ -597,6 +673,8 @@ func (c *Catalog) List() []Skill {
 
 func cloneSkill(skill Skill) Skill {
 	skill.Arguments = append([]string(nil), skill.Arguments...)
+	skill.AllowedTools = append([]string(nil), skill.AllowedTools...)
+	skill.DisallowedTools = append([]string(nil), skill.DisallowedTools...)
 	return skill
 }
 

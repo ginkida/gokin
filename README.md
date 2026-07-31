@@ -77,6 +77,9 @@ go build -o gokin ./cmd/gokin
 
 - **Go 1.25+** (build from source)
 - **One AI provider** (see [Providers](#providers) below)
+- **Optional:** a recent `gopls` with MCP support for managed Go symbol
+  search, references, and immediate post-edit diagnostics. Gokin detects it
+  automatically and falls back to bounded AST/text search when unavailable.
 
 ---
 
@@ -107,14 +110,305 @@ gokin
 > Create a PR for these changes
 ```
 
+### Automation and CI
+
+Run one request without the TUI with `-p` (`--print`) or `--headless`.
+The prompt may be positional, passed with `--prompt`, or read from stdin:
+
+```bash
+gokin -p "summarize the current repository"
+gokin --headless --prompt "run the targeted tests and fix failures"
+git diff | gokin -p "review this patch"
+printf 'explain this panic\n' | gokin --headless
+
+# Start the interactive TUI and immediately submit the first task.
+gokin "inspect the failing tests and propose a fix"
+```
+
+For scripts, `json` emits one terminal result. `stream-json` emits newline
+delimited progress records while the agent works (tool start/result, progress,
+answer deltas), followed by exactly one terminal `result` record:
+
+```bash
+gokin -p "run the test suite" --output-format json
+gokin -p "one-off review" --no-session-persistence
+gokin -p "run the test suite" --max-turns 40 --timeout 45m \
+  --max-budget-usd 2.50 \
+  --output-format stream-json |
+  jq --unbuffered -c .
+
+# Fast, isolated CI startup: expose only Read, Edit, and Bash and skip
+# project instructions, skills, hooks, plugins, MCP, memory, custom commands,
+# agent discovery, file watching, auto-resume, and update checks.
+gokin -p --bare "apply the focused fix and run the targeted test" \
+  --permission-mode dontAsk \
+  --allowedTools "Read,Edit,Bash(go test *)"
+
+# Capture diagnostics without contaminating stdout. An explicit file also
+# implicitly enables debug mode.
+gokin -p "reproduce the failure" --output-format json \
+  --debug-file /tmp/gokin-debug.jsonl
+
+# Optional category filters support positive and negative terms.
+gokin --debug "api,mcp,!health"
+
+# Validate the agent's final value locally and expose it as structured_output.
+gokin -p "summarize test health" --output-format json \
+  --json-schema '{"type":"object","properties":{"passing":{"type":"boolean"},"failures":{"type":"array","items":{"type":"string"}}},"required":["passing","failures"],"additionalProperties":false}'
+
+# Read-only unattended review: omitted tools are hidden and runtime-blocked.
+git diff | gokin -p "review this patch" \
+  --tools read,grep,git_diff,review_changes
+
+# Keep the normal toolkit except selected capabilities.
+gokin -p "inspect the repository" \
+  --disallowed-tools write,edit,delete,bash,git_commit
+
+# Pre-approve only matching calls, without exposing tools hidden by --tools.
+gokin -p "inspect status and summarize it" \
+  --allowedTools "Read,Bash(git status *)"
+
+# Keep Bash available but block outward-facing pushes at runtime.
+gokin -p "prepare the release locally" \
+  --disallowedTools "Bash(git push *)"
+
+# Allow ordinary file edits without prompts, while bash/SSH/commits remain
+# subject to their configured permission rules.
+gokin -p "apply the requested refactor" --permission-mode acceptEdits
+
+# Locked-down CI: explicit pre-approvals run; anything that would prompt is
+# denied immediately instead of waiting for an unavailable operator.
+gokin -p "verify the repository" \
+  --permission-mode dontAsk \
+  --allowedTools "Read,Grep,Bash(go test *)"
+
+# Fully unattended permission prompts. This does not disable Gokin's sandbox,
+# workspace boundary, command safety checks, hooks, or --tools ceiling.
+gokin -p "run the approved migration" \
+  --permission-mode bypassPermissions
+
+# Start read-only planning; leaving plan mode still requires approval.
+gokin -p "design the migration without applying it" --permission-mode plan
+
+# Add a CI-specific contract without replacing Gokin's generated project,
+# safety, tool, and model guidance.
+gokin -p "review and verify this change" \
+  --append-system-prompt "Report findings as SARIF-compatible JSON."
+
+# Replace the generated prompt and then append a second instruction. Text and
+# file variants may be combined across replace/append, but not within one role.
+gokin -p "perform the requested audit" \
+  --system-prompt-file ./ci/reviewer-system.md \
+  --append-system-prompt-file ./ci/output-contract.md
+
+# Give a fresh automation run a deterministic identity. The ID must be a
+# canonical UUID and is refused if any persisted entry already owns it.
+gokin -p "continue the CI task" \
+  --session-id 67c220a6-5ba6-4d36-95bd-2df9a9f49d94 \
+  --output-format json
+
+# Detach a complete agent session. The launcher returns immediately while a
+# private worker owns the session, model calls, tools, and durable logs.
+gokin --bg "investigate the flaky integration test and fix it"
+gokin agents
+gokin agents --json --all
+gokin logs 67c220a6 --follow
+gokin send 67c220a6 "also verify the cancellation path"
+gokin attach 67c220a6
+gokin stop 67c220a6
+
+# Branch from an existing conversation without modifying its source snapshot.
+# The fork receives a fresh UUID and never inherits pending automatic retries.
+gokin -p "try the alternate implementation" \
+  --resume 20260730-120000-a1b2c3 --fork-session
+
+# Long-lived JSONL session: each user record runs after the previous one.
+printf '%s\n' \
+  '{"type":"user","prompt":"inspect the failing tests"}' \
+  '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"apply the fix and verify it"}]}}' |
+  gokin -p --input-format stream-json --output-format stream-json
+```
+
+Redirected stdin is bounded to 16 MiB; a live terminal is never read by
+headless text mode. Stream input accepts one user JSON object per line, bounds
+each record to 16 MiB, applies backpressure by completing one turn before
+reading the next, and keeps event sequence numbers monotonic across the
+connection. A failed, cancelled, timed-out, policy-blocked, malformed-input,
+or unpersisted turn exits non-zero and is represented in a terminal JSON
+record.
+`--bare` is a runtime-only, Claude-compatible isolation mode intended for CI
+and one-off scripts. It constructs a physical three-tool registry (`read`,
+`edit`, `bash`) and a minimal system prompt rather than constructing the full
+registry and hiding it afterward, so skill/plugin constructors and project
+instruction discovery never run. It also ignores saved full prompts when
+resuming and sets `CLAUDE_CODE_SIMPLE=1` for Bash child processes. Provider
+credentials, the sandbox, permission rules, workspace boundaries, explicit
+`--add-dir`, system-prompt flags, budgets, output formats, and session saving
+still work. `--tools` and deny rules may further narrow the three tools but
+cannot widen them. In headless mode detached Bash remains disabled because the
+process exits after the result; interactive `--bare` retains durable background
+Bash task output.
+`--debug [filter]` and `--debug-file <path>` write JSONL diagnostics to a file,
+never to stdout. Without an explicit path, logs go to
+`~/.config/gokin/debug/gokin-<timestamp>-<pid>.jsonl` (under
+`XDG_CONFIG_HOME` when set). `--debug-file` takes precedence over
+`GOKIN_DEBUG_LOG_FILE`, then the Claude-compatible
+`CLAUDE_CODE_DEBUG_LOGS_DIR`. `GOKIN_DEBUG_LOG_FILE` names the log file itself;
+`CLAUDE_CODE_DEBUG_LOGS_DIR` names a directory that receives a generated
+`gokin-<timestamp>-<pid>.jsonl` file, and an explicit `--debug-file` that points
+at an existing directory is treated the same way. The environment variables
+select a destination but do not enable debug on their own. `GOKIN_DEBUG_LOG_LEVEL` and
+`CLAUDE_CODE_DEBUG_LOG_LEVEL` accept `verbose`, `debug`, `info`, `warn`, or
+`error`. Files are created with mode `0600`, rotate after 10 MiB, and pass
+through centralized secret redaction even when callers use the raw logger.
+Positive filter terms retain matching messages, attribute keys, or explicit
+`category`/`component`/`subsystem` values; `!term` excludes matches. Headless
+JSON/stream-JSON output remains machine-clean,
+while early configuration failures and final lifecycle status are still
+recorded.
+`--json-schema '<schema>'` works with `json` and `stream-json` output. Gokin
+compiles the self-contained Draft 2020-12 schema before contacting a provider,
+adds the contract only to the invocation's live system prompt, and validates
+the exact final JSON value locally. The terminal envelope exposes that value
+as `structured_output`. Invalid output gets up to two tool-free format
+corrections under the same timeout and cost ledger, then fails closed with
+`error.kind: "structured_output"`. Schemas are limited to 64 KiB; external
+file/network `$ref` values are rejected (use local `$defs`). The schema is
+never written into the persisted session system prompt.
+`--session-id <uuid>` replaces the generated identity only for a fresh
+session. It cannot be combined with `--resume`, `--continue`, or
+`--fork-session`, and it never overwrites an existing, corrupt, or unreadable
+session entry. `--fork-session` requires `--resume` or `--continue`, briefly
+locks the source while taking a consistent snapshot, atomically saves the
+conversation under a fresh UUID, and then releases the source. Conversation
+history, scratchpad, branches, and named checkpoints are copied; pending
+retries and executor tool-checkpoint journals are deliberately cleared so the
+fork cannot repeat a source session's interrupted side effect.
+`--no-session-persistence` makes the process ephemeral and cannot be combined
+with `--resume`, `--continue`, or `--fork-session`; a deterministic
+`--session-id` remains available for ephemeral JSON automation.
+`--background` (`--bg`) starts a detached headless session and returns its
+durable job ID immediately. The worker runs in a separate process group,
+forces stream-JSON output into private `0600` logs, persists non-secret control
+metadata atomically, and holds an OS file lease for its entire lifetime.
+`gokin agents [--json] [--all] [--cwd <dir>]` works from another process;
+`gokin logs <id> --follow` streams stdout/stderr; and `gokin stop <id>` signals
+only a PID whose matching worker lease is still held, preventing stale PID
+metadata from killing an unrelated process. UUID prefixes are accepted when
+unambiguous. Crashed or externally killed workers are reconciled to
+`interrupted`, while an explicitly stopped worker becomes `stopped`.
+`gokin send <id> <message>` writes a bounded private control record. The worker
+atomically claims it and steers it into the active model/tool loop; if the
+steering window has already closed, it becomes the next synchronous turn with
+the same App and session. `gokin attach <id>` combines live JSONL/stderr
+following with line-oriented input (`/detach` leaves the worker running).
+`gokin respawn <id> <prompt>` continues a completed job's exact persisted
+session from its original working directory as a new detached job. The new job
+records only the parent job ID, not either prompt or launch arguments. It
+inherits explicitly supplied runtime flags, restores the session's provider
+when no override was supplied, and supports `--fork-session` when the caller
+wants a new history identity. Live jobs, busy session leases, provider
+mismatches, and jobs with unresolved pending/ambiguous input fail closed.
+Inbox admission and worker completion share one metadata lock, so a message
+cannot be accepted after the worker's final empty-inbox proof. Claimed input is
+removed only after its turn commits. A crash in the claim/delivery gap is
+reported by `agents` as `ambiguous_input` and is never replayed automatically;
+pending-but-unclaimed messages are reported separately.
+Detached sessions require persistence and an explicit text prompt; they cannot
+be combined with `--print`, `--headless`, piped stream input, or the setup
+wizard.
+`gokin doctor` checks the selected provider's authentication contract, config
+path, git/GitHub CLI availability, repository state, instruction discovery,
+and data directory without constructing a provider client or starting the TUI.
+This makes malformed configuration and pre-startup failures diagnosable;
+`--provider`, `--model`, `--base-url`, and `--config` remain runtime-only
+overrides for the check. Ollama is correctly reported as key-optional, while a
+key belonging only to a different provider no longer masks missing active
+credentials. The in-session `/doctor` command uses the same renderer.
+`--system-prompt` / `--system-prompt-file` replace the generated instruction
+for this invocation; `--append-system-prompt` /
+`--append-system-prompt-file` extend it. A replacement and an appendix can be
+used together, with the appendix applied last. The text/file variants for the
+same role are mutually exclusive, files must be valid UTF-8 without NUL bytes,
+and all custom prompt input is bounded to 64 KiB combined. These instructions
+survive plan-mode changes, provider failover, session resume, headless
+multi-record input, and delegated work. They are deliberately never written
+to resumable session state; the session retains only Gokin's canonical prompt.
+`--max-turns 0` adds no turn cap, `--timeout 0` adds no overall deadline, and
+`--max-budget-usd 0` disables the cost ceiling. A positive cost ceiling uses
+the accumulated price of every provider round, stops pending tools before
+they can produce side effects, and fails closed before the first request when
+the selected model has no explicitly maintained tariff. Foreground execution,
+delegated `task` agents, retries, planning, summarization, and semantic
+reflection share one atomic ledger; budgeted provider rounds are serialized so
+parallel agents cannot independently race past the same remaining allowance.
+Hitting an explicit turn cap is a typed `max_turns` failure rather than a
+successful-but-incomplete response. Interactive turns retain Gokin's adaptive
+safety budget.
+
+`--tools` is an exact capability allowlist. `--allowedTools` (also
+`--allowed-tools`) pre-approves matching calls but never widens that allowlist.
+`--disallowedTools` (also `--disallowed-tools`) installs run-wide deny rules:
+bare names and name wildcards are also hidden from the model, while
+argument-scoped rules such as `Bash(git push *)` leave the tool visible and
+block only matching calls. Scoped rules also support gitignore-style
+`Read(/src/**)` and `Edit(/generated/**)` paths,
+`WebFetch(domain:example.com)`, and `Agent(Explore)`.
+Path rules use the exact foreground or isolated-agent worktree and check both
+symlink and resolved targets. Explicit denies win over pre-approvals and
+`bypassPermissions`, and all rules are inherited by delegated agents. Unknown
+bare names fail startup so a typo cannot silently weaken an unattended run.
+MCP tools are registered under Gokin's own `<server>_<tool>` naming, so a deny
+rule targets them as `github_*` (or the exact tool name) — a Claude-style
+`mcp__*` rule matches nothing here and is accepted as a silent no-op.
+
+A scoped `Bash(...)` pre-approval covers only the command it names: its
+wildcards never expand across `|`, `&`, `;`, a newline, a redirect, or a
+command substitution, so `Bash(git status *)` cannot carry
+`&& curl … | sh` in behind it. A scoped Bash **deny** is matched against the
+whole command line *and* every individual segment of it, so prefixing or
+chaining (`cd . && git push`) cannot walk past it.
+`--permission-mode` is a run-only override with `default`, `acceptEdits`,
+`dontAsk`, `bypassPermissions`, and `plan` modes. `dontAsk` executes explicit
+configuration/CLI/skill pre-approvals and conservative read-only Bash calls,
+but immediately denies anything that would otherwise open a prompt. This makes
+locked-down CI deterministic without granting the broad authority of
+`bypassPermissions`. The Claude-compatible
+`--dangerously-skip-permissions` flag aliases `bypassPermissions`; despite its
+name, Gokin continues enforcing sandbox, path-boundary, hard command-safety,
+hook, and tool-capability controls. When the flag is omitted, the configured
+permission and plan modes are preserved.
+
 ---
 
 ## Key Features <a id="features"></a>
 
 ### Code Understanding
 - **Multi-file analysis** — grep + glob + read across the whole codebase
+- **Managed Go intelligence** — automatically uses `gopls mcp` for workspace
+  symbols, references, and post-edit diagnostics when installed
 - **Session memory** — auto-summarizes files, tools, errors, decisions; survives compaction
 - **Context-aware execution** — read-only tools run in parallel, write tools serialized
+
+### Reusable Skills
+
+Gokin discovers `SKILL.md` workflows from `.gokin/skills/`,
+`.claude/skills/`, `~/.config/gokin/skills/`, and `~/.claude/skills/`.
+Skill bodies load on demand and their exact rendered instructions survive
+context compaction. Claude-compatible `allowed-tools` and `disallowed-tools`
+metadata accept a space-separated string or YAML list, including scoped rules
+such as `Bash(git status *)`, `Read(/src/**)`,
+`WebFetch(domain:example.com)`, and `Agent(Explore)`.
+
+Allowed entries pre-approve matching tools only for the request in which the
+skill is invoked; denied entries block matching calls for that request and win
+over pre-approvals and permission-bypass mode. Neither form persists into the
+next request, exposes hidden tools, bypasses hooks/path boundaries, or
+suppresses the confirmation floor for elevated shell commands. User-level
+skills are trusted. Repository-owned skills activate authority-expanding
+`allowed-tools` only when the exact workspace is listed in the user config
+under `hooks.trusted_workspaces`, the same trust boundary used for project
+executable hooks. Restrictive `disallowed-tools` rules do not require trust.
 
 ### Project Instructions
 ```
@@ -173,6 +467,9 @@ Physical tool restriction — plan mode limits the model to read-only tools (rea
 - **Sandbox mode** for bash commands
 - **Inline diff preview** — 3-line preview cards before applying changes
 - **Undo/Redo** for all file operations (`/undo N` up to 20 steps)
+- **Plan-scoped undo/redo** — `undo_plan` and `redo_plan` target only the exact
+  tracked changes from the latest executed plan and refuse conflicting or
+  incomplete history instead of touching unrelated work
 - **Proactive compaction** — predicts token growth and compacts before hitting limits
 
 ---
@@ -301,6 +598,10 @@ history under the new model.
 
 `~/.config/gokin/config.yaml`
 
+Use `--config /path/to/config.yaml` to load an explicit file. An explicit
+file must already exist; runtime configuration saves are written back to that
+same file rather than the default location.
+
 ### Minimal
 
 ```yaml
@@ -343,8 +644,8 @@ model:
   thinking_budget: 0              # 0 = adaptive/provider default
 
 ui:
-  stream_output: true
-  markdown_rendering: true
+  stream_output: true              # compatibility field; responses always stream
+  markdown_rendering: true         # /set markdown off
   show_tool_calls: true            # /set toolcalls off hides transcript rows
   show_token_usage: true           # /set tokens off
   theme: "dark"                    # Graphite + violet (only active theme)
@@ -381,8 +682,8 @@ mcp:
 
 Open the interactive settings screen with `Ctrl+S` or `/settings`. Interface
 toggles such as `hints`, `toolcalls`, `tokens`, `compactui`, and
-`reducedmotion`, `bell`, and `nativealerts` apply immediately; `/set` marks
-restart-only settings explicitly.
+`reducedmotion`, `markdown`, `bell`, and `nativealerts` apply immediately;
+`/set` marks restart-only settings explicitly.
 
 ---
 

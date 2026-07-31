@@ -12,19 +12,33 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/security"
+
 	"google.golang.org/genai"
 )
 
+const DefaultVerifyCodeTimeout = 3 * time.Minute
+
 // VerifyCodeTool automatically checks code correctness.
 type VerifyCodeTool struct {
-	workDir string
+	workDir       string
+	pathValidator *security.PathValidator
 }
 
 // NewVerifyCodeTool creates a new VerifyCodeTool instance.
 func NewVerifyCodeTool(workDir string) *VerifyCodeTool {
+	workDir = canonicalToolWorkDir(workDir)
 	return &VerifyCodeTool{
-		workDir: workDir,
+		workDir:       workDir,
+		pathValidator: newWorkspacePathValidator(workDir, nil),
 	}
+}
+
+// SetAllowedDirs adds explicitly granted directories to the execution scope.
+// Verification runs compilers and package-manager scripts, so accepting an
+// unchecked ../ path would be both a workspace escape and code execution.
+func (t *VerifyCodeTool) SetAllowedDirs(dirs []string) {
+	t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
 }
 
 func (t *VerifyCodeTool) Name() string {
@@ -54,22 +68,44 @@ func (t *VerifyCodeTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *VerifyCodeTool) Validate(args map[string]any) error {
+	if value, present := args["path"]; present {
+		if _, ok := value.(string); !ok {
+			return NewValidationError("path", "must be a string")
+		}
+	}
 	return nil
 }
 
 func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
-	path, _ := GetString(args, "path")
-	if path == "" {
-		path = t.workDir
+	// Executor validates production calls; repeat the cheap type check so
+	// direct/internal callers cannot silently turn a malformed path into ".".
+	if err := t.Validate(args); err != nil {
+		return NewErrorResult(fmt.Sprintf("verify_code invalid arguments: %v", err)), nil
 	}
 
-	const verifyTimeout = 3 * time.Minute
+	path, _ := GetString(args, "path")
+	if path == "" {
+		path = "."
+	}
+	validatedPath, err := validateWorkspacePath(t.workDir, path, t.pathValidator)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("verify_code rejected path: %v", err)), nil
+	}
+	info, err := os.Stat(validatedPath)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("verify_code cannot access path: %v", err)), nil
+	}
+	if !info.IsDir() {
+		return NewErrorResult("verify_code path must be a directory"), nil
+	}
+	path = validatedPath
+
 	// Cap raw compiler/linter output so a failing build over a large module
 	// can't flood the model's context. The failure path puts output in the
 	// Error field, which (unlike Content) escapes ToMap/ResponseCompressor
 	// caps — so bound it at the source, like the sibling delta_check.
 	const verifyOutputMaxChars = 12000
-	verifyCtx, cancel := context.WithTimeout(ctx, verifyTimeout)
+	verifyCtx, cancel := context.WithTimeout(ctx, DefaultVerifyCodeTimeout)
 	defer cancel()
 
 	// 1. Detect project type and the best target directory for verification.
@@ -119,7 +155,7 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 		// compile-style "Verification failed" would send the model chasing a
 		// phantom build error. Match evals/runner.go's direct ctx.Err() check.
 		if verifyCtx.Err() == context.DeadlineExceeded {
-			return NewErrorResult(fmt.Sprintf("Verification timed out after %v (%s) — code may still be fine; the check ran out of its time budget", verifyTimeout, checkName)), nil
+			return NewErrorResult(fmt.Sprintf("Verification timed out after %v (%s) — code may still be fine; the check ran out of its time budget", DefaultVerifyCodeTimeout, checkName)), nil
 		}
 		if verifyCtx.Err() == context.Canceled {
 			return NewErrorResult(fmt.Sprintf("Verification cancelled before completion (%s)", checkName)), nil

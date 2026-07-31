@@ -27,12 +27,16 @@ func TestCloneToolForWorkDir_SkillToolUsesAgentWorkspace(t *testing.T) {
 		"---\nname: worktree-clone-proof\ndescription: Worktree-only workflow\n---\nWORKTREE_WORKFLOW")
 
 	original := NewSkillTool(foreground)
+	original.SetWorkspaceTrusted(true)
 	cloned, ok := CloneToolForWorkDir(original, worktree).(*SkillTool)
 	if !ok {
 		t.Fatalf("skill clone has type %T, want *SkillTool", CloneToolForWorkDir(original, worktree))
 	}
 	if cloned == original {
 		t.Fatal("skill clone must be a distinct tool instance")
+	}
+	if !cloned.WorkspaceTrusted() {
+		t.Fatal("skill clone lost the parent workspace trust boundary")
 	}
 
 	loaded, err := cloned.Execute(context.Background(), map[string]any{"name": "worktree-clone-proof"})
@@ -190,6 +194,17 @@ func TestCloneToolForWorkDir_SemanticToolsIsolated(t *testing.T) {
 	inherited := CloneToolForWorkDir(NewGoToDefinitionTool("/foreground"), "").(*GoToDefinitionTool)
 	if inherited.workDir != "/foreground" {
 		t.Fatalf("empty override should inherit source workDir, got %q", inherited.workDir)
+	}
+
+	provider := &stubSemanticProvider{}
+	origDef.SetSemanticProvider(provider)
+	nonIsolated := CloneToolForWorkDir(origDef, "").(*GoToDefinitionTool)
+	if nonIsolated.semanticProvider() != provider {
+		t.Fatal("non-isolated semantic clone lost the shared workspace provider")
+	}
+	isolated := CloneToolForWorkDir(origDef, "/worktree").(*GoToDefinitionTool)
+	if isolated.semanticProvider() != nil {
+		t.Fatal("worktree clone retained the foreground semantic provider")
 	}
 
 	// Concurrent SetAllowedDirs on independent clones must be race-free (-race).

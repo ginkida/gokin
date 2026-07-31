@@ -73,7 +73,10 @@ type AnthropicClient struct {
 	// turnContext is the per-turn ephemeral context (working memory) delivered
 	// OUTSIDE the cached prefix — see SetTurnContext. Guarded by mu.
 	turnContext string
-	mu          sync.RWMutex
+	// directHealthTracking is disabled when this client is owned by a
+	// FallbackClient, which scores each candidate centrally.
+	directHealthTracking bool
+	mu                   sync.RWMutex
 }
 
 // NewAnthropicClient creates a new Anthropic-compatible client.
@@ -132,9 +135,10 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 	}
 
 	return &AnthropicClient{
-		config:     config,
-		httpClient: httpClient,
-		tools:      make([]*genai.Tool, 0),
+		config:               config,
+		httpClient:           httpClient,
+		tools:                make([]*genai.Tool, 0),
+		directHealthTracking: true,
 	}, nil
 }
 
@@ -784,6 +788,7 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 	sc := c.statusCallback
 	si := c.systemInstruction
 	tc := c.turnContext
+	trackHealth := c.directHealthTracking
 	c.mu.RUnlock()
 
 	newConfig.Model = modelName
@@ -805,6 +810,7 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 	if tc != "" {
 		newClient.SetTurnContext(tc)
 	}
+	newClient.setDirectHealthTracking(trackHealth)
 	return newClient
 }
 
@@ -813,13 +819,14 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 func (c *AnthropicClient) cloneForSession() Client {
 	c.mu.RLock()
 	clone := &AnthropicClient{
-		config:            c.config,
-		httpClient:        c.httpClient,
-		tools:             append([]*genai.Tool(nil), c.tools...),
-		rateLimiter:       c.rateLimiter,
-		statusCallback:    c.statusCallback,
-		systemInstruction: c.systemInstruction,
-		turnContext:       c.turnContext,
+		config:               c.config,
+		httpClient:           c.httpClient,
+		tools:                append([]*genai.Tool(nil), c.tools...),
+		rateLimiter:          c.rateLimiter,
+		statusCallback:       c.statusCallback,
+		systemInstruction:    c.systemInstruction,
+		turnContext:          c.turnContext,
+		directHealthTracking: c.directHealthTracking,
 	}
 	c.mu.RUnlock()
 	return clone
@@ -1184,6 +1191,7 @@ func calculateBackoffWithJitter(baseDelay time.Duration, attempt int, maxDelay t
 func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[string]any) (*StreamingResponse, error) {
 	var lastErr error
 	var lastStatusCode int
+	providerAttempted := false
 	maxDelay := 30 * time.Second // Cap maximum delay at 30 seconds
 	// Cap how long a server-supplied Retry-After can park us. A buggy provider
 	// or proxy sending an absurd value (e.g. a unix timestamp mistakenly placed
@@ -1261,9 +1269,10 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 		// - ResponseHeaderTimeout (HTTPTimeout) for waiting for first header
 		// Each http.Client.Do() gets fresh transport timeouts automatically.
 		// The parent ctx governs the overall lifetime including SSE streaming.
+		providerAttempted = true
 		response, err := c.doStreamRequest(ctx, requestBody)
 		if err == nil {
-			return response, nil
+			return c.observeDirectHealth(ctx, response), nil
 		}
 
 		// Don't retry if parent context is cancelled (user abort, agent timeout)
@@ -1288,13 +1297,46 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 
 		// Check if error is retryable
 		if !c.isRetryableError(err, lastStatusCode) {
+			c.recordDirectHealthFailure(providerAttempted, err)
 			return nil, err
 		}
 
 		logging.Warn("request failed, will retry", "attempt", attempt, "error", err, "status", lastStatusCode)
 	}
 
-	return nil, fmt.Errorf("max retries (%d) exceeded: %w", c.config.MaxRetries, lastErr)
+	err := fmt.Errorf("max retries (%d) exceeded: %w", c.config.MaxRetries, lastErr)
+	c.recordDirectHealthFailure(providerAttempted, err)
+	return nil, err
+}
+
+func (c *AnthropicClient) setDirectHealthTracking(enabled bool) {
+	c.mu.Lock()
+	c.directHealthTracking = enabled
+	c.mu.Unlock()
+}
+
+func (c *AnthropicClient) directHealthState() (provider string, enabled bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.config.Provider, c.directHealthTracking
+}
+
+func (c *AnthropicClient) observeDirectHealth(ctx context.Context, stream *StreamingResponse) *StreamingResponse {
+	provider, enabled := c.directHealthState()
+	if !enabled {
+		return stream
+	}
+	return observeProviderStream(ctx, provider, stream)
+}
+
+func (c *AnthropicClient) recordDirectHealthFailure(attempted bool, err error) {
+	if !attempted || !shouldFallbackToNextProvider(err) {
+		return
+	}
+	provider, enabled := c.directHealthState()
+	if enabled {
+		recordProviderFailure(provider, IsRetryableError(err))
+	}
 }
 
 // doStreamRequest performs a single streaming request attempt.

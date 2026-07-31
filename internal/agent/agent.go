@@ -45,13 +45,16 @@ const (
 
 // Agent represents an isolated executor for subtasks.
 type Agent struct {
-	ID             string
-	Type           AgentType
-	Model          string
-	client         client.Client
-	registry       *tools.Registry
-	baseRegistry   tools.ToolRegistry
-	workDir        string
+	ID           string
+	Type         AgentType
+	Model        string
+	client       client.Client
+	registry     *tools.Registry
+	baseRegistry tools.ToolRegistry
+	workDir      string
+	// outputBaseDir remains anchored to the durable runner workspace even when
+	// workDir is later replaced by a temporary isolated worktree.
+	outputBaseDir  string
 	originalPrompt string // Preserved for continuation after compaction
 	messenger      tools.Messenger
 	permissions    *permission.Manager
@@ -108,12 +111,13 @@ type Agent struct {
 	compactionAPITimeout time.Duration
 
 	// Project context injection for sub-agents
-	projectContext string            // Injected project guidelines/instructions
-	onText         func(text string) // Streaming callback for real-time output
-	onTextMu       sync.Mutex        // Protects onText from interleaving
-	onThinking     func(text string) // Streaming callback for thinking/reasoning output
-	onThinkingMu   sync.Mutex        // Protects onThinking from interleaving
-	Thought        string            // Accumulated reasoning/thought for the current turn
+	projectContext string             // Injected project guidelines/instructions
+	onText         func(text string)  // Streaming callback for real-time output
+	onTextMu       sync.Mutex         // Protects onText from interleaving
+	outputWriter   *AgentOutputWriter // Current invocation's live transcript
+	onThinking     func(text string)  // Streaming callback for thinking/reasoning output
+	onThinkingMu   sync.Mutex         // Protects onThinking from interleaving
+	Thought        string             // Accumulated reasoning/thought for the current turn
 	onRateLimit    func(rl *client.RateLimitMetadata)
 	onInput        func(prompt string) (string, error)
 
@@ -358,6 +362,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		registry:           filteredRegistry,
 		baseRegistry:       baseRegistry,
 		workDir:            workDir,
+		outputBaseDir:      workDir,
 		permissions:        permManager,
 		timeout:            config.DefaultAgentTimeout,
 		history:            make([]*genai.Content, 0),
@@ -513,6 +518,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		registry:           filteredRegistry,
 		baseRegistry:       baseRegistry,
 		workDir:            workDir,
+		outputBaseDir:      workDir,
 		permissions:        permManager,
 		timeout:            2 * time.Minute,
 		history:            make([]*genai.Content, 0),
@@ -736,6 +742,10 @@ func (a *Agent) applyAgentTypeDefaults() {
 		a.pruneProtectChars = 30000
 		a.summarizeProtect = 2
 		a.pruneMinOutputSize = 400
+		// Verification agents often spend most of their wall time compiling.
+		// Keep enough headroom for run_tests' 10-minute default plus a final
+		// model round that can summarize the evidence.
+		a.timeout = 15 * time.Minute
 	case AgentTypePlan:
 		a.maxHistorySize = 100
 		a.pruneProtectChars = 150000
@@ -780,12 +790,12 @@ func (a *Agent) ApplyThoroughness(t tools.Thoroughness, defaultMaxTurns int) {
 			if canOverrideMaxTurns {
 				a.maxTurns = 5
 			}
-			a.timeout = 1 * time.Minute
+			a.timeout = 3 * time.Minute
 		case tools.ThoroughnessThorough:
 			if canOverrideMaxTurns {
 				a.maxTurns = 20
 			}
-			a.timeout = 3 * time.Minute
+			a.timeout = 35 * time.Minute
 		}
 	case AgentTypeGeneral:
 		switch t {
@@ -1437,6 +1447,10 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 
 // Run executes the agent with the given prompt and returns the result.
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
+	// A reusable/resumed Agent gets fresh skill permission rules for every run.
+	// Skill instructions may persist in history; grants and denies do not.
+	tools.BeginSkillPermissionTurn(a.registry)
+
 	invocationScope := InvocationScopeFromContext(ctx)
 	a.stateMu.Lock()
 	a.status = AgentStatusRunning
@@ -1469,8 +1483,18 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// Initialize progress
 	a.SetProgress(0, a.maxTurns, "Starting agent execution")
 
-	// Create file-backed output writer for streaming to disk
-	outputWriter := NewAgentOutputWriter(a.workDir, a.ID)
+	// Keep the live transcript in the durable base workspace, not inside an
+	// isolated worktree that apply-back cleanup removes after completion.
+	// Publish it before the first model chunk so GetResult/task_output can read
+	// incremental output while the invocation is still running.
+	outputWriter := NewAgentOutputWriter(a.outputBaseDir, a.ID)
+	a.stateMu.Lock()
+	previousOutputWriter := a.outputWriter
+	a.outputWriter = outputWriter
+	a.stateMu.Unlock()
+	if previousOutputWriter != nil {
+		previousOutputWriter.Close()
+	}
 	defer outputWriter.Close()
 
 	result := &AgentResult{
@@ -1504,8 +1528,11 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	// request attributes the whole run to the failed primary provider.
 	a.populateResultIdentity(result)
 
-	// Stream output to file-backed writer
-	outputWriter.WriteString(output)
+	// safeOnText has already written streamed chunks and lifecycle markers as
+	// they happened. Preserve output from an internal/non-streaming path too.
+	if outputWriter.TotalBytes() == 0 && output != "" {
+		outputWriter.WriteString(output)
+	}
 
 	if err != nil {
 		terminalStatus := AgentStatusFailed
@@ -1534,7 +1561,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 
 		result.Status = terminalStatus
 		result.Error = err.Error()
-		result.Output = outputWriter.String() // Use writer's in-memory portion
+		result.Output = boundedAgentResultOutput(output, outputWriter.FilePath())
 		result.OutputFile = outputWriter.FilePath()
 		result.Duration = endTime.Sub(startTime)
 		result.Completed = true
@@ -1565,7 +1592,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.clearCallHistory()
 
 	result.Status = AgentStatusCompleted
-	result.Output = outputWriter.String() // Use writer's in-memory portion
+	result.Output = boundedAgentResultOutput(output, outputWriter.FilePath())
 	result.OutputFile = outputWriter.FilePath()
 	result.Duration = endTime.Sub(startTime)
 	result.Completed = true
@@ -1797,6 +1824,16 @@ func (a *Agent) buildSystemPrompt() string {
 	toolNames := a.registry.Names()
 	sb.WriteString(strings.Join(toolNames, ", "))
 	sb.WriteString("\n")
+	availableTools := make(map[string]bool, len(toolNames))
+	for _, name := range toolNames {
+		availableTools[name] = true
+	}
+	backgroundAvailable := false
+	if bash, ok := a.registry.Get("bash"); ok {
+		if declaration := bash.Declaration(); declaration != nil && declaration.Parameters != nil {
+			_, backgroundAvailable = declaration.Parameters.Properties["run_in_background"]
+		}
+	}
 	if workDir != "" {
 		fmt.Fprintf(&sb, "Working directory: %s\n", workDir)
 	}
@@ -1835,6 +1872,16 @@ func (a *Agent) buildSystemPrompt() string {
 		// Compact rules for short-lived sub-agents
 		sb.WriteString("RULES: Use tools to complete the task. Summarize findings clearly with file:line refs.\n")
 		sb.WriteString("If a tool fails, try an alternative approach. Never retry the same call.\n\n")
+		if a.Type == AgentTypeBash {
+			if availableTools["run_tests"] {
+				sb.WriteString("For project test suites, prefer run_tests; it supports timeout_seconds and preserves parsed totals.\n")
+			}
+			if backgroundAvailable && availableTools["task_output"] {
+				sb.WriteString("For other long commands, bash may use run_in_background=true; inspect completion with task_output.\n\n")
+			} else {
+				sb.WriteString("Background execution is unavailable in this workspace. Do not request or retry run_in_background; use run_tests or foreground bash with timeout_seconds.\n\n")
+			}
+		}
 	} else {
 		// Universal instructions for all agents
 		sb.WriteString("═══════════════════════════════════════════════════════════════════════\n")
@@ -1865,8 +1912,11 @@ func (a *Agent) buildSystemPrompt() string {
 		sb.WriteString("- Find then read: glob to locate, then read specific files.\n")
 		sb.WriteString("- Search then edit: grep to find occurrences, then edit with context.\n")
 		sb.WriteString("- Verify after change: after write/edit, read to confirm.\n")
-		sb.WriteString("- For long-running operations (builds, tests), use run_in_background=true.\n")
-		sb.WriteString("- Check background task output periodically with task_output.\n\n")
+		if backgroundAvailable && availableTools["task_output"] {
+			sb.WriteString("- For long-running operations, bash may use run_in_background=true; inspect completion with task_output.\n\n")
+		} else if availableTools["run_tests"] {
+			sb.WriteString("- For long tests use run_tests with timeout_seconds. Background execution is unavailable; do not retry it.\n\n")
+		}
 	}
 
 	switch a.Type {
@@ -2869,6 +2919,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				a.safeOnText("\n" + a.treePlanner.GenerateVisualTree(tree) + "\n")
 			}
 		}
+		if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
+			return a.finishInvocationBudgetFailure(nil, output, budgetErr)
+		}
 	}
 
 	loopRecoveryTurns := 0
@@ -2932,6 +2985,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			return a.history, output.String(), ctx.Err()
 		default:
 		}
+		if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
+			return a.finishInvocationBudgetFailure(nil, output, budgetErr)
+		}
 
 		// Inject any queued steering messages (MetaAgent stuck-interventions)
 		// before this turn so the model actually acts on the nudge.
@@ -2946,6 +3002,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			if err := a.checkAndSummarize(ctx); err != nil {
 				logging.Warn("auto-summarization failed", "agent_id", a.ID, "error", err)
 				a.safeOnText("\n[Warning: context optimization failed — conversation may hit length limits]\n")
+			}
+			if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
+				return a.finishInvocationBudgetFailure(nil, output, budgetErr)
 			}
 		}
 
@@ -3140,6 +3199,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.stateMu.Lock()
 			a.recordResponseUsageLocked(resp)
 			a.stateMu.Unlock()
+
+			if errors.Is(apiErr, tools.ErrBudgetExceeded) ||
+				errors.Is(apiErr, tools.ErrCostUnavailable) {
+				return a.finishInvocationBudgetFailure(resp, output, apiErr)
+			}
 
 			// Context cancelled (Esc pressed) — return immediately
 			if ctx.Err() != nil {
@@ -3548,6 +3612,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Executing tools: %v", toolsList))
 
+			if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
+				return a.finishInvocationBudgetFailure(resp, output, budgetErr)
+			}
 			results := a.executeTools(ctx, resp.FunctionCalls)
 
 			successCount, newFailureSignals, repeatedFailureSignals := summarizeToolProgress(resp.FunctionCalls, results, seenFailureFingerprints)
@@ -3575,14 +3642,15 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				}
 			}
 
-			// Check cancellation after tool execution (Esc may have been pressed during tools)
-			select {
-			case <-ctx.Done():
-				return a.history, output.String(), ctx.Err()
-			default:
-			}
-
 			// Add function response to history (with multimodal parts if present)
+			// BEFORE honoring cancellation. The model's FunctionCall turn is
+			// already durable at this point and tools may have crossed side-effect
+			// boundaries. Returning first leaves an orphaned tool call in the
+			// saved AgentState; a later resume then either loses the completed
+			// outcome or gets a strict-provider 400 for the unpaired call.
+			// Cancelled/abandoned reads already carry explicit placeholder
+			// responses, while stateful tools are joined before executeTools
+			// returns, so committing this complete response turn is safe.
 			var funcParts []*genai.Part
 			for _, result := range results {
 				// Defense-in-depth: executeToolsParallel pre-populates every
@@ -3607,6 +3675,15 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.stateMu.Lock()
 			a.history = append(a.history, funcContent)
 			a.stateMu.Unlock()
+
+			// Esc may have been pressed during tool execution. Stop only after
+			// the pair-complete history commit above so persistence/resume has an
+			// exact record of what did (or did not) execute.
+			select {
+			case <-ctx.Done():
+				return a.history, output.String(), ctx.Err()
+			default:
+			}
 
 			// Detect permission denials and inject recovery guidance
 			if permDeniedTools := detectPermissionDenials(results); len(permDeniedTools) > 0 {
@@ -4900,6 +4977,12 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 	groups := classifier.ClassifyDependencies(calls)
 
 	for _, group := range groups {
+		if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
+			for _, call := range group.Calls {
+				results[callIndex[call]] = budgetSkippedToolCallResult(call, budgetErr)
+			}
+			continue
+		}
 		if group.Parallel && len(group.Calls) > 1 {
 			// Execute read-only tools in parallel
 			a.executeToolsParallel(ctx, group.Calls, results, callIndex)
@@ -4907,6 +4990,10 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 			// Execute sequentially (write tools or single tool)
 			for _, call := range group.Calls {
 				idx := callIndex[call]
+				if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
+					results[idx] = budgetSkippedToolCallResult(call, budgetErr)
+					continue
+				}
 				results[idx] = a.executeToolCancellable(ctx, call)
 			}
 		}
@@ -5399,7 +5486,17 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	// Bash must still execute only under the exact scope observed here.
 	authorizedPermissionArgs := tools.PermissionArgsForTool(tool, call.Args)
 	if a.permissions != nil {
-		resp, err := a.permissions.Check(ctx, call.Name, tools.ClonePermissionArgs(authorizedPermissionArgs))
+		a.stateMu.RLock()
+		permissionWorkDir := a.workDir
+		a.stateMu.RUnlock()
+		permissionCtx := permission.ContextWithWorkDir(ctx, permissionWorkDir)
+		resp, err := a.permissions.CheckWithTemporaryToolRules(
+			permissionCtx,
+			call.Name,
+			tools.ClonePermissionArgs(authorizedPermissionArgs),
+			tools.SkillPermissionGrants(a.registry),
+			tools.SkillPermissionDenies(a.registry),
+		)
 		if err != nil {
 			return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, fmt.Sprintf("permission error: %s", err))
 		}
@@ -5684,12 +5781,19 @@ func (a *Agent) RunContext() context.Context {
 func (a *Agent) safeOnText(text string) {
 	a.stateMu.RLock()
 	fn := a.onText
+	outputWriter := a.outputWriter
 	a.stateMu.RUnlock()
-	if fn == nil {
+	if fn == nil && outputWriter == nil {
 		return
 	}
 	a.onTextMu.Lock()
 	defer a.onTextMu.Unlock()
+	if outputWriter != nil {
+		outputWriter.WriteString(text)
+	}
+	if fn == nil {
+		return
+	}
 	func() {
 		defer recoverAgentLifecycleCallback("text", a.ID)
 		fn(text)
@@ -5923,6 +6027,19 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 
 		resp, err := a.getModelResponse(ctx)
 		if err != nil {
+			if errors.Is(err, tools.ErrBudgetExceeded) ||
+				errors.Is(err, tools.ErrCostUnavailable) {
+				_, terminalOutput, _ := a.finishInvocationBudgetFailure(resp, &output, err)
+				return &AgentResult{
+					AgentID:   a.ID,
+					Type:      a.Type,
+					Status:    AgentStatusFailed,
+					Error:     err.Error(),
+					Output:    terminalOutput,
+					Duration:  time.Since(startTime),
+					Completed: true,
+				}
+			}
 			return &AgentResult{
 				AgentID:   a.ID,
 				Type:      a.Type,

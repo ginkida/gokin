@@ -206,19 +206,26 @@ type ToolRegistry interface {
 
 // Executor handles the function calling loop with enhanced safety and user awareness.
 type Executor struct {
-	registry          ToolRegistry
-	client            client.Client
-	workDir           string
-	timeout           time.Duration
-	modelRoundTimeout time.Duration
-	handler           *ExecutionHandler
-	compactor         ResultCompactor
-	permissions       *permission.Manager
-	hooks             *hooks.Manager
-	auditLogger       *audit.Logger
-	sessionID         string
-	fallback          FallbackConfig
-	clientMu          sync.RWMutex // Protects client field
+	registry  ToolRegistry
+	client    client.Client
+	workDir   string
+	timeout   time.Duration
+	timeoutMu sync.RWMutex
+	// toolWaitBudgetResolver overrides the outer executor deadline for tools
+	// whose dominant work is an app-owned interactive wait. A resolved
+	// non-positive budget means no executor deadline; the parent context still
+	// cancels immediately on Esc/shutdown.
+	toolWaitBudgetResolver func(tool string, args map[string]any) (time.Duration, bool)
+	modelRoundTimeout      time.Duration
+	handler                *ExecutionHandler
+	compactor              ResultCompactor
+	permissions            *permission.Manager
+	hooks                  *hooks.Manager
+	auditLogger            *audit.Logger
+	sessionID              string
+	sessionIDMu            sync.RWMutex
+	fallback               FallbackConfig
+	clientMu               sync.RWMutex // Protects client field
 
 	// Enhanced safety features
 	safetyValidator  SafetyValidator
@@ -354,6 +361,7 @@ type Executor struct {
 	userSteerActive   bool
 	userSteerSuppress int
 	userSteerMu       sync.Mutex
+	inlineFinalSteers atomic.Bool
 	// userSteerCallbackMu serializes cancellation with extraction of the final
 	// leftover batch. It is deliberately released before the external callback:
 	// that callback may synchronously send to the UI whose Esc handler is the
@@ -649,6 +657,35 @@ func (e *Executor) HasUserSteers() bool {
 	return len(e.userSteers) > 0
 }
 
+// SetInlineFinalUserSteers controls whether an accepted final-window steer
+// receives another model iteration inside this Execute call. Interactive mode
+// keeps the historical behavior of redispatching it as the next App turn;
+// detached headless workers enable this so they can acknowledge delivery
+// before their one synchronous turn returns.
+func (e *Executor) SetInlineFinalUserSteers(enabled bool) (restore func()) {
+	previous := e.inlineFinalSteers.Swap(enabled)
+	return func() { e.inlineFinalSteers.Store(previous) }
+}
+
+// takeFinalUserSteersOrClose closes the acceptance window atomically with the
+// final empty check. Messages accepted before this boundary are returned for
+// one more model iteration; messages arriving afterward get false from
+// TryQueueUserSteer and remain owned by the caller as a next-turn request.
+// This removes the accepted-after-final-drain gap for headless/live attach.
+func (e *Executor) takeFinalUserSteersOrClose() []string {
+	e.userSteerCallbackMu.Lock()
+	defer e.userSteerCallbackMu.Unlock()
+	e.userSteerMu.Lock()
+	defer e.userSteerMu.Unlock()
+	if len(e.userSteers) == 0 {
+		e.userSteerActive = false
+		return nil
+	}
+	steers := e.userSteers
+	e.userSteers = nil
+	return steers
+}
+
 // CancelUserSteering closes the current turn's acceptance window and discards
 // messages not yet injected into model history. It serializes with extraction
 // of the final leftover batch but never waits for an external callback, which
@@ -779,6 +816,59 @@ func (e *Executor) getClient() client.Client {
 	c := e.client
 	e.clientMu.RUnlock()
 	return c
+}
+
+// SetToolTimeout updates the generic per-call timeout for future executions.
+// In-flight calls keep their already-derived context.
+func (e *Executor) SetToolTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = defaultToolExecTimeout
+	}
+	e.timeoutMu.Lock()
+	e.timeout = timeout
+	e.timeoutMu.Unlock()
+}
+
+// SetToolWaitBudgetResolver wires dynamic interactive wait budgets. The
+// returned duration is the inner prompt's own budget; the executor adds its
+// completion grace. Returning (0, true) means the prompt intentionally waits
+// indefinitely while still respecting parent cancellation.
+func (e *Executor) SetToolWaitBudgetResolver(
+	resolver func(tool string, args map[string]any) (time.Duration, bool),
+) {
+	e.timeoutMu.Lock()
+	e.toolWaitBudgetResolver = resolver
+	e.timeoutMu.Unlock()
+}
+
+func (e *Executor) toolTimeout() time.Duration {
+	e.timeoutMu.RLock()
+	timeout := e.timeout
+	e.timeoutMu.RUnlock()
+	if timeout <= 0 {
+		return defaultToolExecTimeout
+	}
+	return timeout
+}
+
+func (e *Executor) resolveToolExecutionTimeout(
+	base, p95 time.Duration,
+	haveStats bool,
+	toolName string,
+	args map[string]any,
+) (time.Duration, bool) {
+	e.timeoutMu.RLock()
+	resolver := e.toolWaitBudgetResolver
+	e.timeoutMu.RUnlock()
+	if resolver != nil {
+		if waitBudget, ok := resolver(toolName, args); ok {
+			if waitBudget <= 0 {
+				return 0, false
+			}
+			return waitBudget + toolTimeoutCompletionGrace, true
+		}
+	}
+	return toolExecutionTimeout(base, p95, haveStats, toolName, args), true
 }
 
 // SetModelRoundTimeout sets timeout for a single model round.
@@ -998,7 +1088,9 @@ func (e *Executor) SetAuditLogger(logger *audit.Logger) {
 
 // SetSessionID sets the session ID for audit logging.
 func (e *Executor) SetSessionID(id string) {
+	e.sessionIDMu.Lock()
 	e.sessionID = id
+	e.sessionIDMu.Unlock()
 }
 
 // SetToolCache sets the tool result cache for caching read-only tool results.
@@ -1135,6 +1227,11 @@ func (e *Executor) GetCacheTracker() *client.CacheTracker {
 
 // Execute processes a user message through the function calling loop.
 func (e *Executor) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
+	// Skill tool rules are scoped to this user request. Durable instructions
+	// remain in the invocation ledger, but grants and denies must be
+	// re-established by an explicit/model skill load every turn.
+	BeginSkillPermissionTurn(e.registry)
+
 	// Add user message to history
 	userContent := genai.NewContentFromText(message, genai.RoleUser)
 	history = append(history, userContent)
@@ -1174,8 +1271,107 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 	// === IMPROVEMENT 3: Dynamic max iterations based on context complexity ===
 	maxIterations := e.calculateMaxIterations(history)
+	turnLimitEnabled := true
+	// invocationTurnCap is true only when a caller (the --max-turns CLI flag)
+	// asked for an EXACT provider-round budget. The adaptive interactive cap
+	// below is a different thing: it bounds OUTER iterations, one of which may
+	// legitimately contain dozens of chained SendFunctionResponse rounds, and
+	// reaching it has always ended the turn with a soft "may be INCOMPLETE"
+	// marker rather than a hard failure. Counting inner rounds against it — or
+	// turning it into a typed error — would make a normal 20-tool interactive
+	// turn die and discard a partial answer the user can still use.
+	invocationTurnCap := false
+	if invocationLimit, ok := MaxTurnsFromContext(ctx); ok {
+		if invocationLimit == 0 {
+			turnLimitEnabled = false
+		} else {
+			maxIterations = invocationLimit
+			invocationTurnCap = true
+		}
+	}
+	// A "turn" is a provider model round, including chained responses after
+	// tool results. The outer loop alone cannot enforce this: one outer
+	// iteration may contain dozens of SendFunctionResponse rounds.
+	maxModelTurns := maxIterations
+	modelTurns := 0
 
 	var finalText string
+	maxBudgetUSD, budgetEnabled := MaxBudgetUSDFromContext(ctx)
+	budgetLedger, _ := InvocationBudgetLedgerFromContext(ctx)
+	maxTurnsFailure := func() ([]*genai.Content, string, error) {
+		marker := "\n\n⚠ Reached the model/tool turn limit — this work is INCOMPLETE. Re-run with a higher --max-turns value or ask me to continue."
+		finalText += marker
+		if e.handler != nil && e.handler.OnText != nil {
+			e.handler.OnText(marker)
+		}
+		// Keep history protocol-valid when the limit is reached immediately
+		// after tool results: the prior model tool_use and user tool_result stay
+		// paired, and this local terminal model message closes the turn.
+		history = append(history, genai.NewContentFromText(
+			strings.TrimSpace(marker), genai.RoleModel))
+		return history, finalText, &MaxTurnsExceededError{Limit: maxModelTurns}
+	}
+	appendUnexecutedResults := func(calls []*genai.FunctionCall, reason string) {
+		if len(calls) == 0 {
+			return
+		}
+		parts := make([]*genai.Part, 0, len(calls))
+		for _, call := range calls {
+			if call == nil {
+				continue
+			}
+			result := genai.NewPartFromFunctionResponse(
+				call.Name,
+				NewErrorResult(reason).ToMap(),
+			)
+			result.FunctionResponse.ID = call.ID
+			parts = append(parts, result)
+		}
+		if len(parts) > 0 {
+			history = append(history, &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: parts,
+			})
+		}
+	}
+	budgetFailure := func(calls []*genai.FunctionCall, spent float64) ([]*genai.Content, string, error) {
+		appendUnexecutedResults(calls,
+			"not executed: the invocation cost budget was reached before this tool call could run")
+		marker := fmt.Sprintf(
+			"\n\n⚠ Reached the invocation cost budget ($%.6f limit; $%.6f recorded) — this work is INCOMPLETE.",
+			maxBudgetUSD, spent)
+		finalText += marker
+		if e.handler != nil && e.handler.OnText != nil {
+			e.handler.OnText(marker)
+		}
+		history = append(history, genai.NewContentFromText(
+			strings.TrimSpace(marker), genai.RoleModel))
+		return history, finalText, &BudgetExceededError{
+			LimitUSD: maxBudgetUSD,
+			SpentUSD: spent,
+		}
+	}
+	costUnavailableFailure := func(calls []*genai.FunctionCall, provider, model string) ([]*genai.Content, string, error) {
+		appendUnexecutedResults(calls,
+			"not executed: pricing is unavailable, so the invocation cost budget cannot be enforced safely")
+		failure := &CostUnavailableError{Provider: provider, Model: model}
+		if budgetLedger != nil {
+			if latched := budgetLedger.MarkCostUnavailable(provider, model); latched != nil {
+				var typed *CostUnavailableError
+				if errors.As(latched, &typed) {
+					failure = typed
+				}
+			}
+		}
+		marker := "\n\n⚠ " + failure.Error() + " — no further model or tool work was performed."
+		finalText += marker
+		if e.handler != nil && e.handler.OnText != nil {
+			e.handler.OnText(marker)
+		}
+		history = append(history, genai.NewContentFromText(
+			strings.TrimSpace(marker), genai.RoleModel))
+		return history, finalText, failure
+	}
 	// carriedText accumulates text across max_tokens auto-continuations so the
 	// final answer is the WHOLE response, not just the last continued chunk.
 	var carriedText string
@@ -1228,9 +1424,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// Retries are orchestrated at App/message processor level to avoid retry multiplication.
 	retryPolicy.MaxRetries = 0
 	retryPolicy.MaxPartialRetries = 0
-	recordResponseAccounting := func(resp *client.Response) {
+	accountedResponses := 0
+	allResponseCostsTracked := true
+	recordResponseAccounting := func(resp *client.Response) (costTracked bool, spent float64) {
 		if resp == nil {
-			return
+			e.tokenMu.Lock()
+			spent = e.lastEstimatedCost
+			e.tokenMu.Unlock()
+			return true, spent
 		}
 		// Capture token usage metadata from this API round. Provider usage values
 		// are cumulative within one response, not across requests; a tool loop's
@@ -1243,13 +1444,16 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		e.tokenMu.Lock()
 		calculator := e.costCalculator
 		e.tokenMu.Unlock()
-		cost, costTracked := 0.0, false
+		cost := 0.0
+		costTracked = false
 		promptInput := resp.TotalInputTokens()
 		if calculator != nil {
 			cost, costTracked = calculator(provider, model, promptInput, resp.OutputTokens, resp.CacheReadInputTokens)
 		}
 
 		e.tokenMu.Lock()
+		accountedResponses++
+		allResponseCostsTracked = allResponseCostsTracked && costTracked
 		e.lastProvider = provider
 		e.lastModel = model
 		if promptInput > 0 {
@@ -1266,18 +1470,40 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 		if costTracked {
 			e.lastEstimatedCost += max(cost, 0)
-			e.lastCostTracked = true
 		}
+		e.lastCostTracked = accountedResponses > 0 && allResponseCostsTracked
+		spent = e.lastEstimatedCost
 		e.tokenMu.Unlock()
+		if budgetEnabled && costTracked {
+			_, spent = budgetLedger.AddSpend(max(cost, 0))
+		}
 
 		// Track prompt cache usage for cache break detection.
 		if e.cacheTracker != nil && (resp.CacheCreationInputTokens > 0 || resp.CacheReadInputTokens > 0) {
 			e.cacheTracker.RecordUsage(resp.CacheCreationInputTokens, resp.CacheReadInputTokens)
 		}
+		return costTracked, spent
+	}
+
+	provider := ""
+	if identified, ok := cl.(client.ProviderIdentity); ok {
+		provider = identified.GetProvider()
+	}
+	modelName := cl.GetModel()
+	if budgetEnabled {
+		e.tokenMu.Lock()
+		calculator := e.costCalculator
+		e.tokenMu.Unlock()
+		if calculator == nil {
+			return costUnavailableFailure(nil, provider, modelName)
+		}
+		if _, tracked := calculator(provider, modelName, 0, 0, 0); !tracked {
+			return costUnavailableFailure(nil, provider, modelName)
+		}
 	}
 
 	i := 0
-	for ; i < maxIterations; i++ {
+	for ; !turnLimitEnabled || i < maxIterations; i++ {
 		if e.readTracker != nil {
 			e.readTracker.IncrementTurn()
 		}
@@ -1309,11 +1535,40 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 
 		// Get response from model
+		if budgetEnabled {
+			_, spent := budgetLedger.Snapshot()
+			if spent >= maxBudgetUSD {
+				return budgetFailure(nil, spent)
+			}
+		}
+		if invocationTurnCap && modelTurns >= maxModelTurns {
+			return maxTurnsFailure()
+		}
+		if budgetEnabled {
+			if err := budgetLedger.BeginRound(ctx); err != nil {
+				if errors.Is(err, ErrBudgetExceeded) {
+					_, spent := budgetLedger.Snapshot()
+					return budgetFailure(nil, spent)
+				}
+				var unavailable *CostUnavailableError
+				if errors.As(err, &unavailable) {
+					return costUnavailableFailure(nil, unavailable.Provider, unavailable.Model)
+				}
+				return history, finalText, err
+			}
+		}
+		modelTurns++
 		resp, err := e.getModelResponse(ctx, cl, history)
+		// Usage delivered before a terminal stream error is still billable.
+		// Publish it to the shared ledger before releasing the round lease so a
+		// waiting child/foreground request observes the updated spend.
+		responseCostTracked, responseSpent := recordResponseAccounting(resp)
+		if budgetEnabled {
+			budgetLedger.EndRound()
+		}
 		if err != nil {
 			// ProcessStream returns the accumulated partial Response alongside an
 			// error. Usage metadata received before the failure is still billable.
-			recordResponseAccounting(resp)
 			ft := client.DetectFailureTelemetry(err)
 			logging.Warn("model round failed",
 				"reason", ft.Reason,
@@ -1362,11 +1617,18 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					})
 				}
 			}
+			if budgetEnabled && resp != nil {
+				if !responseCostTracked {
+					return costUnavailableFailure(resp.FunctionCalls, provider, modelName)
+				}
+				if responseSpent > maxBudgetUSD {
+					return budgetFailure(resp.FunctionCalls, responseSpent)
+				}
+			}
 			return history, "", fmt.Errorf("model response error (%s): %w", ft.Reason, err)
 		}
 		streamRetries = 0        // reset on success
 		partialStreamRetries = 0 // reset on success
-		recordResponseAccounting(resp)
 
 		// Text-based tool call fallback for models without native function calling
 		// (shared with the sub-agent loop via client.ApplyTextToolCallFallback).
@@ -1381,6 +1643,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 
 		history = append(history, modelContent)
+		if budgetEnabled {
+			if !responseCostTracked {
+				return costUnavailableFailure(resp.FunctionCalls, provider, modelName)
+			}
+			if responseSpent > maxBudgetUSD ||
+				(responseSpent >= maxBudgetUSD && len(resp.FunctionCalls) > 0) {
+				return budgetFailure(resp.FunctionCalls, responseSpent)
+			}
+		}
 
 		// Intent announcement nudge: if the very first assistant-turn of
 		// this request jumped straight into tool calls with no preceding
@@ -1733,21 +2004,59 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// Pass history without the just-appended tool results since
 			// all client implementations append results themselves.
 			for {
+				if budgetEnabled {
+					_, spent := budgetLedger.Snapshot()
+					if spent >= maxBudgetUSD {
+						return budgetFailure(nil, spent)
+					}
+				}
+				if invocationTurnCap && modelTurns >= maxModelTurns {
+					return maxTurnsFailure()
+				}
+				if budgetEnabled {
+					if err := budgetLedger.BeginRound(ctx); err != nil {
+						if errors.Is(err, ErrBudgetExceeded) {
+							_, spent := budgetLedger.Snapshot()
+							return budgetFailure(nil, spent)
+						}
+						var unavailable *CostUnavailableError
+						if errors.As(err, &unavailable) {
+							return costUnavailableFailure(nil, unavailable.Provider, unavailable.Model)
+						}
+						return history, finalText, err
+					}
+				}
+				modelTurns++
 				roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
 				stream, err := cl.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
 				if err != nil {
 					roundCancel()
+					if budgetEnabled {
+						budgetLedger.EndRound()
+					}
 					return history, "", fmt.Errorf("function response error: %w", err)
 				}
 
 				// Collect the response
 				resp, err = e.collectStreamWithHandler(roundCtx, stream)
 				roundCancel()
+				// Account every response exactly once, including partial failed
+				// streams, before another invocation may acquire the lease.
+				responseCostTracked, responseSpent = recordResponseAccounting(resp)
+				if budgetEnabled {
+					budgetLedger.EndRound()
+				}
 				if err == nil {
 					// Every successful function-response request is separately
 					// billed. Record it before resp is replaced by the next tool
 					// round (and before an empty-response retry).
-					recordResponseAccounting(resp)
+					if budgetEnabled && !responseCostTracked {
+						return costUnavailableFailure(nil, provider, modelName)
+					}
+					if budgetEnabled && responseSpent > maxBudgetUSD &&
+						(resp == nil || (resp.Text == "" && len(resp.FunctionCalls) == 0)) {
+						return budgetFailure(nil, responseSpent)
+					}
 					if resp != nil && resp.Text == "" && len(resp.FunctionCalls) == 0 {
 						logging.Warn("model returned empty response after tool results",
 							"retry_count", streamRetries,
@@ -1777,7 +2086,6 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 				// The failed stream may already have delivered cumulative usage.
 				// Account it once before deciding whether to retry this request.
-				recordResponseAccounting(resp)
 
 				ft := client.DetectFailureTelemetry(err)
 				logging.Warn("function response round failed",
@@ -1806,6 +2114,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 								Role:  genai.RoleModel,
 								Parts: parts,
 							})
+						}
+					}
+					if budgetEnabled && resp != nil {
+						if !responseCostTracked {
+							return costUnavailableFailure(resp.FunctionCalls, provider, modelName)
+						}
+						if responseSpent > maxBudgetUSD {
+							return budgetFailure(resp.FunctionCalls, responseSpent)
 						}
 					}
 					return history, "", fmt.Errorf("function response error (%s): %w", ft.Reason, err)
@@ -1848,6 +2164,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 
 			history = append(history, modelContent)
+			if budgetEnabled {
+				if !responseCostTracked {
+					return costUnavailableFailure(resp.FunctionCalls, provider, modelName)
+				}
+				if responseSpent > maxBudgetUSD ||
+					(responseSpent >= maxBudgetUSD && len(resp.FunctionCalls) > 0) {
+					return budgetFailure(resp.FunctionCalls, responseSpent)
+				}
+			}
 		}
 
 		// No more function calls, we have the final response
@@ -1932,6 +2257,27 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				"incomplete", incDec.Count)
 		}
 
+		// A follow-up accepted after this iteration's top-of-loop drain still
+		// belongs to the active request. Atomically close admission only when
+		// none exists; otherwise append every accepted message and give the
+		// model another iteration. The prior final response remains in history,
+		// while the terminal result becomes the response to the latest steer.
+		if e.inlineFinalSteers.Load() {
+			steers := e.takeFinalUserSteersOrClose()
+			if len(steers) == 0 {
+				// Admission was atomically closed; fall through to completion.
+			} else {
+				for _, steer := range steers {
+					history = append(history, genai.NewContentFromText(
+						"[user follow-up] "+steer, genai.RoleUser))
+					logging.Info("injected final-window user steer into turn", "msg", steer)
+				}
+				finalText = ""
+				carriedText = ""
+				continue
+			}
+		}
+
 		// Detect empty response — model returned no text and no function calls, and
 		// the incomplete-work gate above did NOT continue (no unfinished todos, or
 		// the continuation budget is exhausted). Break; the fallback below provides
@@ -1976,9 +2322,17 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// model finished), the work is almost certainly incomplete — the model was
 	// still calling tools when we cut it off. Mark it so partial output isn't
 	// silently handed back as a finished answer (and so the done-gate can react).
-	if i >= maxIterations {
+	if turnLimitEnabled && i >= maxIterations {
 		logging.Warn("executor hit iteration cap with model still active",
 			"maxIterations", maxIterations, "toolsUsed", len(toolsUsed))
+		if invocationTurnCap {
+			// An explicit --max-turns budget is a contract: report it as the
+			// typed max_turns failure the automation caller can branch on.
+			return maxTurnsFailure()
+		}
+		// The adaptive interactive cap is advisory. Keep the historical soft
+		// ending so the partial answer reaches the user instead of an error
+		// card, and so the done-gate can still see the work as unfinished.
 		marker := "\n\n⚠ Reached the tool-iteration limit for this turn — this work may be INCOMPLETE. Re-run or ask me to continue to finish the remaining steps."
 		finalText += marker
 	}
@@ -2418,6 +2772,18 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}()
 
+	// Invocation capability ceiling (CLI --tools/--disallowed-tools and
+	// delegated-agent inheritance). This is a runtime gate in addition to
+	// schema filtering: a hallucinated/pretrained tool call must not recover
+	// authority merely because it was omitted from the advertised schema.
+	if ceiling, restricted := ToolCapabilityCeilingFromContext(ctx); restricted &&
+		!toolCapabilityAllows(ceiling, call.Name) {
+		return NewPolicyBlockedResult(
+			PolicyBlockPermission,
+			fmt.Sprintf("tool %q is outside this invocation's capability ceiling", call.Name),
+		)
+	}
+
 	// Step 1: Basic tool lookup and validation
 	tool, ok := e.registry.Get(call.Name)
 	if !ok {
@@ -2615,7 +2981,14 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// validated above.
 	authorizedPermissionArgs := PermissionArgsForTool(tool, call.Args)
 	if e.permissions != nil {
-		resp, err := e.permissions.Check(ctx, call.Name, ClonePermissionArgs(authorizedPermissionArgs))
+		permissionCtx := permission.ContextWithWorkDir(ctx, e.workDir)
+		resp, err := e.permissions.CheckWithTemporaryToolRules(
+			permissionCtx,
+			call.Name,
+			ClonePermissionArgs(authorizedPermissionArgs),
+			SkillPermissionGrants(e.registry),
+			SkillPermissionDenies(e.registry),
+		)
 		if err != nil {
 			if e.handler != nil && e.handler.OnToolDenied != nil {
 				e.handler.OnToolDenied(call.Name, err.Error())
@@ -2776,8 +3149,17 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		observedP95 = p95
 		haveStats = ok
 	}
-	toolTimeout := adaptiveToolTimeout(e.timeout, observedP95, haveStats)
-	execCtx, cancel := context.WithTimeout(ctx, toolTimeout)
+	baseToolTimeout := e.toolTimeout()
+	toolTimeout, hasToolDeadline := e.resolveToolExecutionTimeout(
+		baseToolTimeout, observedP95, haveStats, call.Name, call.Args,
+	)
+	var execCtx context.Context
+	var cancel context.CancelFunc
+	if hasToolDeadline {
+		execCtx, cancel = context.WithTimeout(ctx, toolTimeout)
+	} else {
+		execCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	// Inject streaming callback so tools (e.g. task/agent) can stream output to UI
@@ -2890,7 +3272,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			logging.Error("tool execution timed out",
 				"tool", call.Name,
 				"duration", duration,
-				"timeout", e.timeout)
+				"timeout", baseToolTimeout)
 			result = NewErrorResult(errMsg)
 		} else {
 			logging.Error("tool execution failed",
@@ -3189,7 +3571,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// both captures diagnostic failures and prevents the audit sink from seeing
 	// raw secrets that Step 11 has already removed from the model/UI result.
 	if e.auditLogger != nil {
-		entry := audit.NewEntry(e.sessionID, call.Name, call.Args)
+		e.sessionIDMu.RLock()
+		sessionID := e.sessionID
+		e.sessionIDMu.RUnlock()
+		entry := audit.NewEntry(sessionID, call.Name, call.Args)
 		entry.Complete(result.Content, result.Success, result.Error, duration)
 
 		if preFlight != nil {
@@ -3642,7 +4027,7 @@ var errorSuggestions = []struct {
 	{"no such file", "Use glob to find the correct path."},
 	{"command not found", "Check if the tool is installed: which <command>."},
 	{"connection refused", "Check if the service is running."},
-	{"timed out", "Try a simpler operation or use run_in_background=true."},
+	{"timed out", "Increase the timeout when the tool supports it, use run_tests for test suites, or choose another long-running mechanism advertised by the available tool schema."},
 }
 
 // getErrorSuggestion returns a suggestion for a given error message.
@@ -4581,6 +4966,61 @@ func adaptiveToolTimeout(base, p95 time.Duration, ok bool) time.Duration {
 	}
 	if ceiling := base * 2; timeout > ceiling {
 		timeout = ceiling
+	}
+	return timeout
+}
+
+const toolTimeoutCompletionGrace = 5 * time.Second
+
+// toolExecutionTimeout layers an explicit long-operation budget over the
+// adaptive generic timeout. Verification tools own longer workload budgets
+// because workspace compilation routinely exceeds the generic tool budget.
+// Bash recognizes verification commands and gives them run_tests-sized
+// headroom unless timeout_seconds is explicitly requested. The small common
+// grace lets each inner tool deadline classify partial output before the
+// executor cancels the call from outside.
+func toolExecutionTimeout(base, p95 time.Duration, haveStats bool, toolName string, args map[string]any) time.Duration {
+	timeout := adaptiveToolTimeout(base, p95, haveStats)
+
+	var requested time.Duration
+	switch toolName {
+	case "run_tests":
+		requested = DefaultRunTestsTimeout
+		if seconds, ok := GetInt(args, "timeout_seconds"); ok {
+			requested = time.Duration(seconds) * time.Second
+		}
+	case "verify_code":
+		requested = DefaultVerifyCodeTimeout
+	case "coordinate":
+		// Coordinate performs bounded teardown after its own wait expires.
+		// Reserve that cleanup inside the executor budget, then the common
+		// completion grace below keeps the two deadlines from racing.
+		requested = coordinateTimeout(args) + coordinateCleanupTimeout
+	case "task":
+		requested = taskForegroundTimeout(args)
+	case "task_output":
+		if GetBoolDefault(args, "block", false) {
+			requested = taskOutputWaitTimeout(args)
+		}
+	case "ssh":
+		requested = sshExecutionTimeout(args)
+	case "ask_user":
+		requested = 10 * time.Minute
+	case "enter_plan_mode":
+		requested = 10 * time.Minute
+	case "write", "edit":
+		requested = 5 * time.Minute
+	case "bash":
+		requested = base
+		if seconds, ok := GetInt(args, "timeout_seconds"); ok {
+			requested = time.Duration(seconds) * time.Second
+		} else if commandLooksLikeValidation(GetStringDefault(args, "command", "")) &&
+			requested < DefaultRunTestsTimeout {
+			requested = DefaultRunTestsTimeout
+		}
+	}
+	if requested > 0 && requested+toolTimeoutCompletionGrace > timeout {
+		return requested + toolTimeoutCompletionGrace
 	}
 	return timeout
 }

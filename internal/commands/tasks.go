@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -63,6 +65,9 @@ const (
 	// tasksOutputTailRunes caps the detail view's output. Tail, not head:
 	// an agent's conclusion is at the END of its output.
 	tasksOutputTailRunes = 3000
+	// Enough bytes for tasksOutputTailRunes even with multi-byte UTF-8, plus
+	// context, without loading an unbounded background transcript.
+	tasksOutputTailBytes int64 = 64 * 1024
 )
 
 func (c *TasksCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
@@ -170,7 +175,7 @@ func (c *TasksCommand) renderList(runner AgentTaskRunner, shells BackgroundShell
 		}
 	}
 
-	sb.WriteString("\nUse /tasks <id> for full output, /tasks stop <id> to cancel a running one.")
+	sb.WriteString("\nUse /tasks <id> for the completion summary and recent output, /tasks stop <id> to cancel a running one.")
 	return sb.String()
 }
 
@@ -205,7 +210,6 @@ func (c *TasksCommand) renderAgentDetail(runner AgentTaskRunner, match agent.Tas
 	if match.Error != "" {
 		fmt.Fprintf(&sb, "Error: %s\n", match.Error)
 	}
-
 	output := match.Output
 	outputFile := ""
 	if res, ok := runner.GetResult(match.ID); ok && res != nil {
@@ -213,6 +217,11 @@ func (c *TasksCommand) renderAgentDetail(runner AgentTaskRunner, match agent.Tas
 			output = res.Output
 		}
 		outputFile = res.OutputFile
+	}
+	if strings.TrimSpace(output) == "" && outputFile != "" {
+		if liveOutput, err := readTaskOutputTail(outputFile); err == nil {
+			output = liveOutput
+		}
 	}
 	if strings.TrimSpace(output) == "" {
 		if match.Status == agent.AgentStatusRunning {
@@ -231,6 +240,33 @@ func (c *TasksCommand) renderAgentDetail(runner AgentTaskRunner, match agent.Tas
 	return sb.String()
 }
 
+func readTaskOutputTail(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	offset := info.Size() - tasksOutputTailBytes
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, tasksOutputTailBytes))
+	if err != nil {
+		return "", err
+	}
+	// A tail seek can land inside a multi-byte rune. Replace only that damaged
+	// boundary fragment; tailRunes below performs the final display cap.
+	return strings.ToValidUTF8(string(data), ""), nil
+}
+
 func renderShellDetail(match tasks.Info) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s %s · %s · %s\n", shellStatusIcon(match.Status), match.ID, match.Status, formatTaskDuration(match.Duration))
@@ -240,6 +276,9 @@ func renderShellDetail(match tasks.Info) string {
 	}
 	if match.Error != "" {
 		fmt.Fprintf(&sb, "Error: %s\n", match.Error)
+	}
+	if match.Summary != "" {
+		fmt.Fprintf(&sb, "Verification: %s\n", match.Summary)
 	}
 	if strings.TrimSpace(match.Output) == "" {
 		if match.Status == "running" {
@@ -251,6 +290,9 @@ func renderShellDetail(match tasks.Info) string {
 	}
 	sb.WriteString("\nOutput:\n")
 	sb.WriteString(tailRunes(match.Output, tasksOutputTailRunes))
+	if match.OutputFile != "" {
+		fmt.Fprintf(&sb, "\n\nFull output: %s", match.OutputFile)
+	}
 	return sb.String()
 }
 

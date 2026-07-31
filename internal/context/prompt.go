@@ -377,6 +377,7 @@ type PromptBuilder struct {
 	provider             string // Active provider family ("kimi", "glm", ...) for addenda
 	pinnedContent        string // User-pinned focus block, injected near the end of the prompt
 	planMode             bool   // Claude Code-style plan mode: read-only phase until plan approved
+	bareMode             bool   // Minimal prompt; skips project/provider/memory auto-discovery.
 
 	// Prompt caching: avoids rebuilding when inputs haven't changed
 	cachedPrompt string
@@ -483,6 +484,16 @@ func (b *PromptBuilder) SetPlanAutoDetect(enabled bool) {
 	defer b.mu.Unlock()
 	if b.planAutoDetect != enabled {
 		b.planAutoDetect = enabled
+		b.promptDirty = true
+	}
+}
+
+// SetBareMode selects the minimal, deterministic prompt used by --bare.
+func (b *PromptBuilder) SetBareMode(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.bareMode != enabled {
+		b.bareMode = enabled
 		b.promptDirty = true
 	}
 }
@@ -679,6 +690,17 @@ func (b *PromptBuilder) Build() string {
 	if b.planMode {
 		builder.WriteString(planModeBanner)
 		builder.WriteString("\n\n")
+	}
+
+	if b.bareMode {
+		builder.WriteString("You are Gokin, a coding assistant. Use only the available Read, Edit, and Bash tools. Read an existing file before editing it, keep changes scoped to the user's request, and report the result concisely. Do not assume project-specific instructions or capabilities that are not present in this prompt.")
+		fmt.Fprintf(&builder, "\n\nThe user's working directory is: %s", b.workDir)
+		result := applyPromptBudget(builder.String(), maxSystemPromptChars)
+		b.cachedPrompt = result
+		b.promptDirty = false
+		b.lastContractCtx = ""
+		b.lastMemoryStateKnown = false
+		return result
 	}
 
 	// Base prompt

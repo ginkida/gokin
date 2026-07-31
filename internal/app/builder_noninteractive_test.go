@@ -1,12 +1,16 @@
 package app
 
 import (
+	"errors"
 	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"gokin/internal/config"
+	"gokin/internal/testkit"
+	"gokin/internal/tools"
 )
 
 func TestBuilderNonInteractiveSkipsAllowedDirsPrompt(t *testing.T) {
@@ -49,6 +53,97 @@ func TestBuilderNonInteractiveMissingOllamaModelDoesNotPromptOrPull(t *testing.T
 	}
 	if got := gotErr.Error(); !strings.Contains(got, "ollama pull glm-5.2") {
 		t.Fatalf("error is not actionable: %q", got)
+	}
+}
+
+func TestBuilderWiresDontAskIntoSharedPermissionManager(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Permission.DontAsk = true
+	builder := NewBuilderWithOptions(cfg, t.TempDir(), BuildOptions{NonInteractive: true})
+	builder.executor = tools.NewExecutor(tools.NewRegistry(), nil, time.Second)
+	builder.configDirErr = errors.New("disable persistence in unit test")
+
+	if err := builder.initManagers(); err != nil {
+		t.Fatal(err)
+	}
+	if builder.permManager == nil || !builder.permManager.IsDontAsk() {
+		t.Fatalf("permission manager = %#v, want dontAsk enabled", builder.permManager)
+	}
+}
+
+func TestBareBuilderSkipsProjectAndMemoryDiscovery(t *testing.T) {
+	workDir := t.TempDir()
+	for _, name := range []string{"CLAUDE.md", "GOKIN.md"} {
+		if err := os.WriteFile(workDir+"/"+name, []byte("DISCOVERY_MARKER"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Bare = true
+	cfg.Session.Enabled = false
+	builder := NewBuilderWithOptions(cfg, workDir, BuildOptions{
+		NonInteractive: true,
+		Bare:           true,
+	})
+	builder.mainClient = testkit.NewMockClient()
+	builder.configDir = t.TempDir()
+	t.Cleanup(builder.cancel)
+
+	if err := builder.initSession(); err != nil {
+		t.Fatal(err)
+	}
+	if builder.projectMemory != nil || builder.sessionMemory != nil ||
+		builder.workingMemory != nil || builder.contextPredictor != nil {
+		t.Fatalf(
+			"bare discovery initialized optional state: project=%v session=%v working=%v predictor=%v",
+			builder.projectMemory, builder.sessionMemory, builder.workingMemory, builder.contextPredictor,
+		)
+	}
+	if got := builder.promptBuilder.Build(); strings.Contains(got, "DISCOVERY_MARKER") {
+		t.Fatalf("bare prompt loaded a project instruction file:\n%s", got)
+	}
+}
+
+func TestBareBuilderManagersStayMinimal(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Bare = true
+	cfg.Session.Enabled = false
+	builder := NewBuilderWithOptions(cfg, t.TempDir(), BuildOptions{
+		NonInteractive: true,
+		Bare:           true,
+	})
+	builder.mainClient = testkit.NewMockClient()
+	builder.configDirErr = errors.New("disable persistence in unit test")
+	t.Cleanup(builder.cancel)
+
+	if err := builder.initTools(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(builder.registry.Names(), ","); got != "bash,edit,read" {
+		t.Fatalf("bare builder registry = %q, want bash,edit,read", got)
+	}
+	if err := builder.initManagers(); err != nil {
+		t.Fatal(err)
+	}
+	if builder.permManager == nil || builder.planManager == nil ||
+		builder.taskManager == nil || builder.commandHandler == nil || builder.agentRunner == nil {
+		t.Fatal("bare builder did not initialize required compatibility managers")
+	}
+	if builder.taskRouter != nil || builder.taskOrchestrator != nil ||
+		builder.coordinator != nil || builder.metaAgent != nil ||
+		builder.agentTypeRegistry != nil || builder.loopManager != nil {
+		t.Fatal("bare builder initialized routing, discovery, or background agent managers")
+	}
+}
+
+func TestBuilderDerivesBareOptionFromRuntimeConfig(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Bare = true
+	builder := NewBuilderWithOptions(cfg, t.TempDir(), BuildOptions{})
+	t.Cleanup(builder.cancel)
+	if !builder.options.Bare {
+		t.Fatal("config Bare marker did not select bare builder path")
 	}
 }
 

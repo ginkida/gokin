@@ -510,9 +510,10 @@ func TestRouter_TrackOperation_ResetsAfter20(t *testing.T) {
 
 func TestRouter_GetConversationMode_Default(t *testing.T) {
 	r := &Router{}
-	// No operations yet → default "exploring".
-	if mode := r.GetConversationMode(); mode != "exploring" {
-		t.Errorf("default mode = %q, want 'exploring'", mode)
+	// No operations yet is distinct from a real read-only exploration. The
+	// discuss classifier uses empty mode to let fresh ambiguous tasks act.
+	if mode := r.GetConversationMode(); mode != "" {
+		t.Errorf("default mode = %q, want empty", mode)
 	}
 }
 

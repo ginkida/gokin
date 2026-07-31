@@ -40,29 +40,43 @@ func dialProcess(ctx context.Context, spec ProcessSpec) (Connection, error) {
 		return nil, err
 	}
 	cmd := exec.Command(spec.Command, spec.Args...)
+	configureProcessGroup(cmd)
 	cmd.Dir = spec.Dir
 	cmd.Env = append([]string(nil), spec.Env...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open gopls stdin: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	// Use caller-owned OS pipes instead of Cmd.StdoutPipe/StderrPipe. The
+	// latter are closed by Cmd.Wait, and this connection intentionally waits
+	// in parallel with its protocol reader/stderr drainer. That violates the
+	// os/exec pipe contract and can discard the child's final response.
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("open gopls stdout: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	cmd.Stdout = stdoutWriter
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		return nil, fmt.Errorf("open gopls stderr: %w", err)
 	}
+	cmd.Stderr = stderrWriter
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		_ = stderr.Close()
+		_ = stderrWriter.Close()
 		return nil, fmt.Errorf("start %s: %w", spec.Command, err)
 	}
+	// Drop the parent's duplicate write ends. The readers now reach EOF only
+	// after the child exits/closes its descriptors, independently of Cmd.Wait.
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
 
 	connection := &processConnection{
 		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
@@ -136,7 +150,7 @@ func (c *processConnection) Close(ctx context.Context) error {
 	case <-ctx.Done():
 		forced = true
 		if c.cmd.Process != nil {
-			_ = c.cmd.Process.Kill()
+			_ = killProcessTree(c.cmd)
 		}
 		killTimer := time.NewTimer(time.Second)
 		select {

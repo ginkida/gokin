@@ -36,7 +36,7 @@ func (t *RedoPlanTool) Name() string {
 }
 
 func (t *RedoPlanTool) Description() string {
-	return "Redo a previously undone plan by re-executing it"
+	return "Safely re-apply only the tracked file changes from the latest undone plan"
 }
 
 func (t *RedoPlanTool) Declaration() *genai.FunctionDeclaration {
@@ -64,29 +64,50 @@ func (t *RedoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	if t.manager == nil {
 		return NewErrorResult("plan manager not configured"), nil
 	}
+	if t.undoManager == nil {
+		return NewErrorResult("file undo manager not configured"), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
 
 	if t.manager.IsExecuting() {
 		return NewErrorResult("cannot redo plan during orchestrated execution — wait for the current plan to finish"), nil
 	}
 
-	// Redo file changes through the undo manager
-	var redoneFiles []string
-	if t.undoManager != nil {
-		// Redo all undone file changes
-		for {
-			change, err := t.undoManager.Redo()
-			if err != nil {
-				// No more changes to redo or error occurred
-				break
-			}
-			if change != nil {
-				redoneFiles = append(redoneFiles, change.FilePath)
-			}
+	undoExt := t.manager.GetUndoExtension()
+	if undoExt == nil {
+		return NewErrorResult("undo support is not enabled for this plan"), nil
+	}
+	if !undoExt.CanRedo() {
+		return NewErrorResult("no plan execution history to redo"), nil
+	}
+	checkpoint := undoExt.GetLastCheckpoint()
+	if checkpoint == nil {
+		return NewErrorResult("no plan execution history to redo"), nil
+	}
+	if requestedPlanID, ok := GetString(args, "plan_id"); ok && requestedPlanID != "" {
+		if requestedPlanID != checkpoint.PlanID {
+			return NewErrorResult(fmt.Sprintf(
+				"plan %s is not the latest safely redoable plan",
+				requestedPlanID,
+			)), nil
 		}
 	}
 
-	if len(redoneFiles) == 0 {
-		return NewErrorResult("no changes to redo - no plans have been undone"), nil
+	changes, err := t.undoManager.RedoChanges(checkpoint.ChangeIDs)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("plan redo refused: %v", err)), nil
+	}
+	redoneFiles := make([]string, 0, len(changes))
+	for _, change := range changes {
+		redoneFiles = append(redoneFiles, change.FilePath)
+	}
+	if err := undoExt.MarkRedone(checkpoint.PlanID); err != nil {
+		return NewErrorResult(fmt.Sprintf(
+			"plan file changes were redone, but undo bookkeeping failed: %v",
+			err,
+		)), nil
 	}
 
 	// Build result message
@@ -102,7 +123,12 @@ func (t *RedoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		resultMsg,
 		map[string]any{
 			"redone":       true,
+			"plan_id":      checkpoint.PlanID,
+			"plan_title":   checkpoint.PlanTitle,
 			"redone_files": redoneFiles,
+			// Mutates files outside the executor's write dispatch — declare the
+			// paths so read-dedup and the result caches drop the stale content.
+			"written_paths": redoneFiles,
 		},
 	), nil
 }

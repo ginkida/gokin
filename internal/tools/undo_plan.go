@@ -36,7 +36,7 @@ func (t *UndoPlanTool) Name() string {
 }
 
 func (t *UndoPlanTool) Description() string {
-	return "Undo the last executed plan and restore the state before execution"
+	return "Safely undo only the tracked file changes made by the latest executed plan"
 }
 
 func (t *UndoPlanTool) Declaration() *genai.FunctionDeclaration {
@@ -56,10 +56,9 @@ func (t *UndoPlanTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *UndoPlanTool) Validate(args map[string]any) error {
-	if confirm, ok := GetString(args, "confirm"); ok {
-		if confirm != "yes" && confirm != "true" {
-			return NewValidationError("confirm", "confirmation must be 'yes' or 'true'")
-		}
+	confirm, ok := GetString(args, "confirm")
+	if !ok || (confirm != "yes" && confirm != "true") {
+		return NewValidationError("confirm", "confirmation must be 'yes' or 'true'")
 	}
 	return nil
 }
@@ -67,6 +66,12 @@ func (t *UndoPlanTool) Validate(args map[string]any) error {
 func (t *UndoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	if t.manager == nil {
 		return NewErrorResult("plan manager not configured"), nil
+	}
+	if t.undoManager == nil {
+		return NewErrorResult("file undo manager not configured"), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
 	}
 
 	if t.manager.IsExecuting() {
@@ -78,36 +83,43 @@ func (t *UndoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult("undo support is not enabled for this plan"), nil
 	}
 
+	checkpoint := undoExt.GetLastCheckpoint()
+	if checkpoint == nil {
+		return NewErrorResult("no plan execution history to undo"), nil
+	}
+	if !checkpoint.CaptureOK {
+		reason := checkpoint.CaptureErr
+		if reason == "" {
+			reason = "the plan file-change boundary is incomplete"
+		}
+		return NewErrorResult(fmt.Sprintf("plan undo unavailable: %s", reason)), nil
+	}
 	if !undoExt.CanUndo() {
 		return NewErrorResult("no plan execution history to undo"), nil
 	}
-
-	checkpoint := undoExt.GetLastCheckpoint()
-
-	// Undo file changes through the undo manager
-	var undoneFiles []string
-	if t.undoManager != nil {
-		// Undo all file changes made during plan execution
-		for {
-			change, err := t.undoManager.Undo()
-			if err != nil {
-				// No more changes to undo or error occurred
-				break
-			}
-			if change != nil {
-				undoneFiles = append(undoneFiles, change.FilePath)
-			}
-		}
+	if len(checkpoint.ChangeIDs) == 0 {
+		return NewErrorResult("the latest plan has no tracked file changes to undo"), nil
 	}
 
-	// Clear the current plan
-	t.manager.ClearPlan()
-
-	// Remove checkpoint from history
-	undoExt.ClearHistory()
+	changes, err := t.undoManager.UndoChanges(checkpoint.ChangeIDs)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("plan undo refused: %v", err)), nil
+	}
+	undoneFiles := make([]string, 0, len(changes))
+	for _, change := range changes {
+		undoneFiles = append(undoneFiles, change.FilePath)
+	}
+	if err := undoExt.MarkUndone(checkpoint.PlanID); err != nil {
+		// The filesystem transaction succeeded, so expose the bookkeeping error
+		// instead of falsely claiming a fully redoable plan undo.
+		return NewErrorResult(fmt.Sprintf(
+			"plan file changes were undone, but redo bookkeeping failed: %v",
+			err,
+		)), nil
+	}
 
 	// Build result message
-	resultMsg := fmt.Sprintf("Plan undone successfully: %s\n", checkpoint.PlanTitle)
+	resultMsg := fmt.Sprintf("Plan file changes undone safely: %s\n", checkpoint.PlanTitle)
 	if len(undoneFiles) > 0 {
 		resultMsg += fmt.Sprintf("\nReverted %d file changes:\n", len(undoneFiles))
 		for _, file := range undoneFiles {
@@ -126,6 +138,11 @@ func (t *UndoPlanTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 			"plan_title":     checkpoint.PlanTitle,
 			"executed_steps": checkpoint.Executed,
 			"undone_files":   undoneFiles,
+			// This tool rewrites files through the undo manager, outside the
+			// executor's write dispatch, so it must declare the paths itself —
+			// otherwise the read-dedup tracker and the result caches keep
+			// serving the pre-undo content.
+			"written_paths": undoneFiles,
 		},
 	), nil
 }

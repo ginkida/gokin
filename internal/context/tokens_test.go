@@ -492,6 +492,24 @@ func TestCalculateCostWithCache_GLM(t *testing.T) {
 	}
 }
 
+func TestHasKnownPricingDistinguishesFallbackEstimate(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "glm-5.2", want: true},
+		{model: "vendor/glm-5.2-latest", want: true},
+		{model: "MiniMax-M2.7-highspeed", want: true},
+		{model: "totally-unknown-model", want: false},
+		{model: "", want: false},
+	}
+	for _, tt := range tests {
+		if got := HasKnownPricing(tt.model); got != tt.want {
+			t.Errorf("HasKnownPricing(%q) = %v, want %v", tt.model, got, tt.want)
+		}
+	}
+}
+
 func TestCalculateCostWithCache_KimiUsesPublishedCacheRate(t *testing.T) {
 	tc := NewTokenCounter(nil, "kimi-for-coding", nil)
 	withoutCache := tc.CalculateCostWithCache(1_000_000, 0, 0)

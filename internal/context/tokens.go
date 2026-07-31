@@ -507,6 +507,24 @@ func getPricing(model string) ModelPricing {
 	return ModelPricing{}
 }
 
+// HasKnownPricing reports whether model resolves to an explicitly maintained
+// tariff rather than getPricing's conservative display-only fallback.
+// Hard budget enforcement uses this to avoid presenting an estimate as a
+// guaranteed spending ceiling.
+func HasKnownPricing(model string) bool {
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	if modelLower == "" {
+		return false
+	}
+	for key := range DefaultPricing {
+		keyLower := strings.ToLower(key)
+		if modelLower == keyLower || strings.Contains(modelLower, keyLower) {
+			return true
+		}
+	}
+	return false
+}
+
 // FormatCost returns a human-readable string for USD cost.
 func FormatCost(cost float64) string {
 	if cost == 0 {

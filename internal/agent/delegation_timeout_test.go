@@ -2,74 +2,87 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestExecuteDelegation_TimeoutRespectsParentDeadline pins that the delegation
-// round-trip timeout clamps to a stricter parent deadline — so a sub-agent
-// spawned with a short remaining budget can't burn the full 3-minute default.
-func TestExecuteDelegation_TimeoutRespectsParentDeadline(t *testing.T) {
-	// Build a strategy with a fake messenger that never responds
-	// (ReceiveResponse blocks until ctx is cancelled).
-	messenger := &AgentMessenger{
-		// We can't easily build a real messenger without a coordinator,
-		// so we test the timeout clamping logic via the context that
-		// ExecuteDelegation would create internally. Instead we verify
-		// the const relationship: the delegation timeout (3m) must be
-		// shorter than the agent timeout (10m) so the outer guard fires
-		// first.
-	}
+func TestInterAgentResponseContextPreservesParentDeadline(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer parentCancel()
 
-	_ = messenger // messenger is nil-safe in ExecuteDelegation (returns "", nil)
-
-	d := &DelegationStrategy{
-		messenger:          nil, // nil → returns "", nil immediately
-		agentType:          AgentTypeGeneral,
-		currentDepth:       0,
-		maxDelegationTurns: 15,
-	}
-
-	// With a nil messenger, ExecuteDelegation returns immediately.
-	// Verify the timeout clamp logic by checking that a tight parent
-	// deadline produces a context that expires before the 3-minute default.
-	parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	waitCtx, cancel := interAgentResponseContext(parent)
 	defer cancel()
-
-	_, _ = d.ExecuteDelegation(parent, &DelegationDecision{
-		ShouldDelegate: true,
-		TargetType:     "explore",
-		Reason:         "test",
-		Query:          "test query",
-	})
-
-	// The parent deadline should still be intact (ExecuteDelegation didn't
-	// extend it).
-	deadline, ok := parent.Deadline()
+	deadline, ok := waitCtx.Deadline()
 	if !ok {
-		t.Fatal("parent should have a deadline")
+		t.Fatal("wait context lost parent deadline")
 	}
 	if remaining := time.Until(deadline); remaining > 200*time.Millisecond {
-		t.Errorf("parent deadline was extended: remaining=%v, want <200ms", remaining)
+		t.Fatalf("wait context extended parent deadline: %v", remaining)
 	}
 }
 
-// TestDelegationTimeoutConstRelationship verifies the architectural invariant:
-// the delegation round-trip timeout (3m) must be SHORTER than the per-agent
-// timeout (10m). This ensures the outer delegation guard fires BEFORE the
-// agent's own timeout — the caller gets a clean "delegation timed out" error
-// instead of waiting the full agent budget.
-func TestDelegationTimeoutConstRelationship(t *testing.T) {
-	delegationTimeout := 3 * time.Minute  // ExecuteDelegation line 493
-	agentTimeout := 10 * time.Minute      // config.DefaultAgentTimeout
-	modelRoundTimeout := 14 * time.Minute // client.DefaultModelRoundTimeout
-
-	if delegationTimeout >= agentTimeout {
-		t.Errorf("delegation timeout (%v) must be < agent timeout (%v)",
-			delegationTimeout, agentTimeout)
+func TestInterAgentResponseContextAddsOnlyUndeadlinedSafetyCap(t *testing.T) {
+	waitCtx, cancel := interAgentResponseContext(context.Background())
+	defer cancel()
+	deadline, ok := waitCtx.Deadline()
+	if !ok {
+		t.Fatal("undeadlined inter-agent wait has no safety cap")
 	}
-	if agentTimeout >= modelRoundTimeout {
-		t.Errorf("agent timeout (%v) must be < model round timeout (%v)",
-			agentTimeout, modelRoundTimeout)
+	remaining := time.Until(deadline)
+	if remaining < maxInterAgentResponseWait-time.Minute ||
+		remaining > maxInterAgentResponseWait+time.Minute {
+		t.Fatalf("fallback wait = %v, want ~%v", remaining, maxInterAgentResponseWait)
+	}
+}
+
+func TestReceiveResponseUsesCallerCancellationAndCleansPending(t *testing.T) {
+	messenger := NewAgentMessenger(context.Background(), nil, "parent")
+	messenger.pending["message"] = make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := messenger.ReceiveResponse(ctx, "message")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReceiveResponse error = %v, want context.Canceled", err)
+	}
+	messenger.mu.RLock()
+	_, leaked := messenger.pending["message"]
+	messenger.mu.RUnlock()
+	if leaked {
+		t.Fatal("cancelled response waiter leaked pending entry")
+	}
+}
+
+func TestSendMessageRejectsUnknownTypeWithoutLeakingPending(t *testing.T) {
+	messenger := NewAgentMessenger(context.Background(), nil, "parent")
+	if _, err := messenger.SendMessage("unknown", "bash", "work", nil); err == nil {
+		t.Fatal("unknown message type was accepted")
+	}
+	messenger.mu.RLock()
+	pending := len(messenger.pending)
+	messenger.mu.RUnlock()
+	if pending != 0 {
+		t.Fatalf("unknown message type leaked %d pending response(s)", pending)
+	}
+}
+
+func TestInterAgentHandlerPanicBecomesResponseInsteadOfCrashingProcess(t *testing.T) {
+	// A nil runner makes handleHelpRequest panic at runner.Spawn. The handler
+	// boundary must recover and turn that into a response for the requester.
+	messenger := NewAgentMessenger(context.Background(), nil, "parent")
+	messageID, err := messenger.SendMessage("help_request", "bash", "work", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	response, err := messenger.ReceiveResponse(ctx, messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response, "internal panic") {
+		t.Fatalf("panic response = %q", response)
 	}
 }

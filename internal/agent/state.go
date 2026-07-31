@@ -113,6 +113,12 @@ func (a *Agent) RestoreHistory(state *AgentState) error {
 	if historyErr != nil {
 		return historyErr
 	}
+	// Older states (and runs saved by versions that returned immediately on
+	// cancellation) may end with a FunctionCall whose tool-result turn was
+	// never committed. Strict providers reject that history on resume. Remove
+	// only genuinely orphaned call/response parts while preserving any sibling
+	// text and every complete pair.
+	history = ensureToolPairConsistency(history)
 
 	a.stateMu.Lock()
 	if a.invokedSkills == nil {

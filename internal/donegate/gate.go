@@ -1268,6 +1268,10 @@ func runCommandWithTimeout(timeout time.Duration, name string, args ...string) (
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	// Even local git probes can invoke helpers. Ensure a timeout cannot leave
+	// descendants holding locks or inherited pipes after the completion gate
+	// has already moved on.
+	tools.KillProcessGroupOnCancel(cmd)
 	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", ctx.Err()

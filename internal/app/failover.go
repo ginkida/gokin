@@ -87,7 +87,7 @@ func (a *App) activateEmergencyFailoverClient() (string, error) {
 	// thinking budget to the new client
 	if a.session != nil {
 		if si := a.session.GetSystemInstruction(); si != "" {
-			newClient.SetSystemInstruction(si)
+			a.applySystemInstruction(newClient, si, false)
 		}
 	}
 	if tc := a.turnContextContent(); tc != "" {

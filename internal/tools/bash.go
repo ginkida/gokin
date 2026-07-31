@@ -61,10 +61,19 @@ var SafeEnvVars = []string{
 const (
 	// DefaultBashTimeout is the default timeout for bash commands
 	DefaultBashTimeout = 30 * time.Second
+	// MaxBashTimeout is the largest model-requested foreground command budget.
+	// Long commands remain bounded, but isolated apply-back agents can finish
+	// builds/tests without relying on unsafe detached processes.
+	MaxBashTimeout = 30 * time.Minute
 	// ProgressInterval is the interval for sending progress updates during long-running commands
 	ProgressInterval = 5 * time.Second
 	// StreamingFlushInterval is the interval for flushing partial output during foreground execution
 	StreamingFlushInterval = 100 * time.Millisecond
+	// BashCancelGracePeriod gives cooperative processes a brief chance to
+	// handle SIGTERM before the whole process group receives SIGKILL. Five
+	// seconds made Esc feel broken for TERM-ignoring commands; 250ms preserves
+	// cleanup hooks without making interactive cancellation visibly stall.
+	BashCancelGracePeriod = 250 * time.Millisecond
 )
 
 // dangerousEnvVars is a blocklist of environment variables that can be used
@@ -314,10 +323,14 @@ func (t *BashTool) setWorkspaceBoundaryLocked(root string) {
 func (t *BashTool) EnableManagedWorkspaceApplyBackMode(root string) {
 	t.policyMu.Lock()
 	defer t.policyMu.Unlock()
-	if !t.managedWorkspaceApplyBack {
+	if !t.managedWorkspaceApplyBack || t.backgroundAllowed {
 		t.policyRevision++
 	}
 	t.managedWorkspaceApplyBack = true
+	// A detached child can keep mutating the temporary worktree after the agent
+	// has reviewed/applied it and after cleanup begins. Disable background at
+	// the policy source so Declaration, Validate and Execute all agree.
+	t.backgroundAllowed = false
 	t.setWorkspaceBoundaryLocked(root)
 }
 
@@ -336,17 +349,19 @@ func (t *BashTool) Name() string {
 func (t *BashTool) Description() string {
 	t.policyMu.RLock()
 	backgroundAllowed := t.backgroundAllowed
+	timeout := t.timeout
 	t.policyMu.RUnlock()
-	description := `Executes a bash command and returns the output. Use for system operations, git commands, running tests, etc.
+	description := fmt.Sprintf(`Executes a bash command and returns the output. Use for system operations, git commands, running tests, etc.
 
 PARAMETERS:
 - command (required): The bash command to execute
 - description (optional): Brief description of what the command does
 - stdin (optional): Content to pipe as stdin to the command
+- timeout_seconds (optional): Foreground timeout in seconds (1-1800)
 - run_in_background (optional): If true, run in background and return task ID
 
 TIMEOUT:
-- Default: 30 seconds
+- Default: %v
 - Long commands: Use run_in_background=true
 - Check background tasks: Use task_output tool with task_id
 
@@ -373,14 +388,14 @@ AFTER RUNNING - YOU MUST:
 2. Summarize the output (don't just dump it)
 3. Highlight errors or warnings
 4. Suggest fixes if command failed
-5. Recommend next steps`
+5. Recommend next steps`, timeout)
 	if !backgroundAllowed {
 		description = strings.Replace(description,
 			"- run_in_background (optional): If true, run in background and return task ID",
 			"- Background execution is disabled; every command must finish within this turn", 1)
 		description = strings.Replace(description,
 			"- Long commands: Use run_in_background=true\n- Check background tasks: Use task_output tool with task_id",
-			"- Long commands must run in the foreground and honor the configured timeout", 1)
+			"- Long tests: prefer run_tests with timeout_seconds\n- Other long commands: set timeout_seconds and run in the foreground; do not retry background mode", 1)
 	}
 	return description
 }
@@ -401,6 +416,10 @@ func (t *BashTool) Declaration() *genai.FunctionDeclaration {
 		"stdin": {
 			Type:        genai.TypeString,
 			Description: "Content to pipe as stdin to the command",
+		},
+		"timeout_seconds": {
+			Type:        genai.TypeInteger,
+			Description: "Foreground command timeout in seconds (1-1800). Defaults to the configured bash timeout.",
 		},
 	}
 	if backgroundAllowed {
@@ -439,7 +458,16 @@ func (t *BashTool) validateLocked(args map[string]any) error {
 		return NewValidationError("command", fmt.Sprintf("blocked: %s", result.Reason))
 	}
 	if GetBoolDefault(args, "run_in_background", false) && !t.backgroundAllowed {
-		return NewValidationError("run_in_background", "is disabled for this execution mode; run the command in the foreground")
+		return NewValidationError("run_in_background", "is disabled for this execution mode; use run_tests for test suites, or set timeout_seconds and run the command in the foreground")
+	}
+	if _, present := args["timeout_seconds"]; present {
+		seconds, ok := GetInt(args, "timeout_seconds")
+		if !ok {
+			return NewValidationError("timeout_seconds", "must be an integer")
+		}
+		if seconds < 1 || seconds > int(MaxBashTimeout/time.Second) {
+			return NewValidationError("timeout_seconds", fmt.Sprintf("must be between 1 and %d", int(MaxBashTimeout/time.Second)))
+		}
 	}
 
 	// Skip permission-level validation in unrestricted mode (sandbox=off + permissions=off)
@@ -496,7 +524,23 @@ func (t *BashTool) executeLocked(ctx context.Context, args map[string]any) (Tool
 		return t.executeBackground(ctx, command)
 	}
 
-	return t.executeForeground(ctx, command, stdinContent)
+	commandTimeout := t.foregroundCommandTimeout(command, args)
+	return t.executeForeground(ctx, command, stdinContent, commandTimeout)
+}
+
+func (t *BashTool) foregroundCommandTimeout(command string, args map[string]any) time.Duration {
+	commandTimeout := t.timeout
+	if seconds, ok := GetInt(args, "timeout_seconds"); ok {
+		commandTimeout = time.Duration(seconds) * time.Second
+	} else if commandLooksLikeValidation(command) && commandTimeout < DefaultRunTestsTimeout {
+		// Full builds/test suites commonly exceed the generic 30-second bash
+		// default. Give recognized verification commands the same safe budget
+		// as run_tests even if the model used bash directly and omitted
+		// timeout_seconds. This is essential in isolated mode (which cannot
+		// detach), and prevents needless timeout/retry loops everywhere else.
+		commandTimeout = DefaultRunTestsTimeout
+	}
+	return commandTimeout
 }
 
 // executeBackground starts a command in background and returns task ID.
@@ -718,27 +762,28 @@ func startCommandErrorResult(execCtx context.Context, err error) ToolResult {
 	}
 }
 
-func interruptedCommandResult(execCtx context.Context, configuredTimeout time.Duration) ToolResult {
+func interruptedCommandResult(execCtx context.Context, configuredTimeout time.Duration, backgroundAllowed bool) ToolResult {
 	switch {
 	case errors.Is(execCtx.Err(), context.Canceled):
 		return NewErrorResult("command cancelled")
 	case configuredTimeout > 0:
-		return NewErrorResult(fmt.Sprintf(
-			"command timed out after %v. For long-running commands, use run_in_background=true",
-			configuredTimeout,
-		))
+		hint := "For long-running commands, use run_in_background=true"
+		if !backgroundAllowed {
+			hint = "Background execution is unavailable in this isolated workspace; use run_tests for test suites or retry once with a larger timeout_seconds"
+		}
+		return NewErrorResult(fmt.Sprintf("command timed out after %v. %s", configuredTimeout, hint))
 	default:
 		return NewErrorResult("command deadline exceeded")
 	}
 }
 
 // executeForeground runs a command and waits for completion.
-func (t *BashTool) executeForeground(ctx context.Context, command string, stdinContent string) (ToolResult, error) {
+func (t *BashTool) executeForeground(ctx context.Context, command string, stdinContent string, commandTimeout time.Duration) (ToolResult, error) {
 	// Create context with explicit timeout to prevent indefinite hangs
 	execCtx := ctx
-	if t.timeout > 0 {
+	if commandTimeout > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(ctx, t.timeout)
+		execCtx, cancel = context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
 	}
 
@@ -748,7 +793,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			return NewErrorResult("stdin is not supported in sandbox mode"), nil
 		}
 		// Use sandbox wrapper for command execution
-		return t.executeSandboxed(execCtx, command)
+		return t.executeSandboxed(execCtx, command, commandTimeout)
 	}
 
 	// Use session working directory
@@ -919,7 +964,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			// cancellation and clean any descendants that outlived the shell.
 			if execCtx.Err() != nil {
 				timedOut = true
-				killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+				killBashProcessGroup(cmd, BashCancelGracePeriod, cmdDone)
 			} else {
 				// Normal exit: sweep group survivors a backgrounded child
 				// (`x &`) left behind — they'd be orphaned forever otherwise.
@@ -927,7 +972,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 			}
 		case <-execCtx.Done():
 			timedOut = true
-			killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+			killBashProcessGroup(cmd, BashCancelGracePeriod, cmdDone)
 		}
 		if timedOut {
 			<-cmdDone // Always reap the shell leader before returning.
@@ -940,7 +985,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		<-streamDone
 
 		if timedOut {
-			return interruptedCommandResult(execCtx, t.timeout), nil
+			return interruptedCommandResult(execCtx, commandTimeout, t.backgroundAllowed), nil
 		}
 
 		// Extract real pwd from output and update session
@@ -1007,7 +1052,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		// cancellation and clean any descendants that outlived the shell.
 		if execCtx.Err() != nil {
 			timedOut = true
-			killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+			killBashProcessGroup(cmd, BashCancelGracePeriod, cmdDone)
 		} else {
 			// Normal exit: sweep group survivors a backgrounded child
 			// (`x &`) left behind — they'd be orphaned forever otherwise.
@@ -1016,8 +1061,8 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 	case <-execCtx.Done():
 		// Context was cancelled or timed out
 		timedOut = true
-		// Kill the process group with graceful shutdown (5 second grace period)
-		killBashProcessGroup(cmd, 5*time.Second, cmdDone)
+		// Kill the process group after a short cooperative TERM grace.
+		killBashProcessGroup(cmd, BashCancelGracePeriod, cmdDone)
 	}
 	// Always reap the shell leader. On cancellation this also guarantees the
 	// Wait goroutine cannot leak after the tool returns.
@@ -1031,7 +1076,7 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 
 	// Handle timeout case
 	if timedOut {
-		return interruptedCommandResult(execCtx, t.timeout), nil
+		return interruptedCommandResult(execCtx, commandTimeout, t.backgroundAllowed), nil
 	}
 
 	// Extract real pwd from output and update session
@@ -1070,6 +1115,17 @@ func (t *BashTool) buildExitResult(command, stdout, stderr string, exitCode int)
 			res.Content = benignEmptyLabel(command)
 		}
 		return res
+	}
+	if exitCode == 98 && strings.Contains(stderr, "workspace boundary violation:") {
+		return ToolResult{
+			Content: "Actionable summary:\n" +
+				"- The command was stopped because it changed the working directory outside the isolated apply-back workspace.\n" +
+				"- Exit code 98 is the workspace-boundary sentinel, not a timeout.\n" +
+				"- Run the operation inside the assigned workspace or request explicit access to an external directory.\n\n" +
+				"STDERR:\n" + stderr,
+			Error:   "workspace boundary violation (exit code 98; not a timeout)",
+			Success: false,
+		}
 	}
 	content := bashFailureSummary(command, exitCode, stdout, stderr)
 	if stdout != "" {
@@ -1224,7 +1280,7 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 }
 
 // executeSandboxed executes the command with sandbox isolation
-func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolResult, error) {
+func (t *BashTool) executeSandboxed(ctx context.Context, command string, commandTimeout time.Duration) (ToolResult, error) {
 	// Create sandbox configuration
 	sandboxConfig := security.DefaultSandboxConfig()
 	sandboxConfig.Enabled = true
@@ -1237,7 +1293,7 @@ func (t *BashTool) executeSandboxed(ctx context.Context, command string) (ToolRe
 	}
 
 	// Run the sandboxed command
-	result := sandboxed.Run(t.timeout)
+	result := sandboxed.Run(commandTimeout)
 
 	// Handle errors
 	if result.Error != nil {

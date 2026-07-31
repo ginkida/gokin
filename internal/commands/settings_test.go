@@ -76,6 +76,7 @@ func TestSetCommand_UIOnlyToggleUsesFastApplyPath(t *testing.T) {
 		{"compactui", "on", func(c *config.Config) bool { return c.UI.CompactMode }},
 		{"hints", "off", func(c *config.Config) bool { return !c.UI.HintsEnabled }},
 		{"toolcalls", "off", func(c *config.Config) bool { return !c.UI.ShowToolCalls }},
+		{"markdown", "off", func(c *config.Config) bool { return !c.UI.MarkdownRendering }},
 		{"bell", "off", func(c *config.Config) bool { return !c.UI.Bell }},
 		{"nativealerts", "on", func(c *config.Config) bool { return c.UI.NativeNotifications }},
 	}
@@ -163,7 +164,7 @@ func TestSettableToggles_NewInAppSettings(t *testing.T) {
 	cfg := config.DefaultConfig()
 
 	// Every new key is now a known, configurable toggle.
-	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher", "glmsearch", "hints", "toolcalls", "bell", "nativealerts"} {
+	for _, key := range []string{"session", "searchcache", "sessionmemory", "watcher", "glmsearch", "hints", "toolcalls", "markdown", "bell", "nativealerts"} {
 		if _, ok := findToggle(key); !ok {
 			t.Errorf("%q should be a settable toggle (configurable in-app, not just YAML)", key)
 		}
@@ -181,6 +182,7 @@ func TestSettableToggles_NewInAppSettings(t *testing.T) {
 		"glmsearch":     false, // boot-wired MCP server
 		"hints":         true,  // applied live via ConfigUpdateMsg
 		"toolcalls":     true,  // applied live via ConfigUpdateMsg
+		"markdown":      true,  // applied live to OutputModel
 		"bell":          true,  // applied live via the complete Settings snapshot
 		"nativealerts":  true,  // applied live to NotificationManager
 	}

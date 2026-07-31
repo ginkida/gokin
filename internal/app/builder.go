@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"gokin/internal/cache"
 	"gokin/internal/chat"
 	"gokin/internal/client"
+	"gokin/internal/codeintel"
 	"gokin/internal/commands"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
@@ -104,6 +106,7 @@ type Builder struct {
 	mcpManager        *mcp.Manager
 	mcpConnectSummary string // Deferred UI summary of initial MCP connect results
 	contextAgent      *appcontext.ContextAgent
+	codeIntelProvider codeintel.ReadOnlyProvider
 
 	// Loops (autonomous recurring tasks, v0.81+). Initialized late in
 	// the build pipeline so the home-dir lookup happens once.
@@ -145,6 +148,9 @@ type BuildOptions struct {
 	// stdin, writes human-oriented messages to stdout, or starts an implicit
 	// download. It is intended for headless/automation callers.
 	NonInteractive bool
+	// Bare constructs the minimal Read/Edit/Bash runtime without automatic
+	// project instructions, skills, hooks, MCP, memory, or agent discovery.
+	Bare bool
 }
 
 // NewBuilder creates a new Builder with the given config and work directory.
@@ -155,6 +161,12 @@ func NewBuilder(cfg *config.Config, workDir string) *Builder {
 // NewBuilderWithOptions creates a Builder with explicit startup behavior.
 func NewBuilderWithOptions(cfg *config.Config, workDir string, options BuildOptions) *Builder {
 	ctx, cancel := context.WithCancel(context.Background())
+	if cfg != nil {
+		options.Bare = options.Bare || cfg.Bare
+		if options.Bare {
+			cfg.Bare = true
+		}
+	}
 
 	return &Builder{
 		cfg:         cfg,
@@ -323,7 +335,10 @@ func (b *Builder) validateOllamaModel() error {
 				fmt.Fprintf(os.Stderr, "  Start it with: ollama serve\n")
 				fmt.Fprintf(os.Stderr, "  Then restart gokin.\n\n")
 			}
-			baseURL := b.cfg.API.OllamaBaseURL
+			baseURL := strings.TrimSpace(b.cfg.Model.CustomBaseURL)
+			if baseURL == "" {
+				baseURL = strings.TrimSpace(b.cfg.API.OllamaBaseURL)
+			}
 			if baseURL == "" {
 				baseURL = config.DefaultOllamaBaseURL
 			}
@@ -407,7 +422,19 @@ func (b *Builder) initClient() error {
 
 // initTools creates the tool registry and executor.
 func (b *Builder) initTools() error {
-	b.registry = tools.DefaultRegistry(b.workDir)
+	if b.options.Bare {
+		b.registry = tools.BareRegistry(b.workDir)
+	} else {
+		b.registry = tools.DefaultRegistry(b.workDir)
+	}
+	// Keep bash's inner foreground deadline aligned with the configured tool
+	// budget. Previously the executor allowed two minutes while Bash killed the
+	// command at its hard-coded 30-second default.
+	if registered, ok := b.registry.Get("bash"); ok {
+		if bash, ok := registered.(*tools.BashTool); ok {
+			bash.SetTimeout(b.cfg.Tools.Timeout)
+		}
+	}
 
 	// Dynamic tool filtering: select tool sets based on context
 	mainTools := b.selectToolSets()
@@ -418,7 +445,7 @@ func (b *Builder) initTools() error {
 		if strings.EqualFold(strings.TrimSpace(provider), "ollama") {
 			return 0, true
 		}
-		if strings.TrimSpace(model) == "" {
+		if !appcontext.HasKnownPricing(model) {
 			return 0, false
 		}
 		tc := appcontext.NewTokenCounter(nil, model, nil)
@@ -430,13 +457,13 @@ func (b *Builder) initTools() error {
 	b.executor.SetWorkDir(b.workDir)
 	b.executor.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.executor.SetDeltaCheckConfig(
-		b.cfg.Tools.DeltaCheck.Enabled,
+		b.cfg.Tools.DeltaCheck.Enabled && !b.options.Bare,
 		b.cfg.Tools.DeltaCheck.Timeout,
 		b.cfg.Tools.DeltaCheck.WarnOnly,
 		b.cfg.Tools.DeltaCheck.MaxModules,
 	)
 	// Smart validation: semantic validators + context enrichment + self-review
-	if b.cfg.Tools.SmartValidation.Enabled {
+	if b.cfg.Tools.SmartValidation.Enabled && !b.options.Bare {
 		registry := tools.NewSemanticValidatorRegistry()
 		registry.Register(&tools.TestQualityValidator{})
 		registry.Register(&tools.CIWorkflowValidator{})
@@ -452,12 +479,13 @@ func (b *Builder) initTools() error {
 		// Predictor wiring deferred to wireDependencies when contextPredictor is available
 		b.executor.SetContextEnricher(enricher)
 	}
-	if threshold := b.cfg.Tools.SmartValidation.SelfReviewThreshold; threshold > 0 {
+	if threshold := b.cfg.Tools.SmartValidation.SelfReviewThreshold; threshold > 0 && !b.options.Bare {
 		b.executor.SetSelfReviewThreshold(threshold)
 	}
 	// Per-turn hosted-model tool budget. The config field retains its legacy
 	// Kimi name; 0 disables and clamp-up happens in the setter.
 	b.executor.SetKimiToolBudget(b.cfg.Tools.KimiToolBudget)
+	b.initCodeIntelligence()
 
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)
 	b.executor.SetCompactor(compactor)
@@ -492,6 +520,44 @@ func (b *Builder) initTools() error {
 	return nil
 }
 
+// initCodeIntelligence activates the existing managed-gopls subsystem when
+// gopls is installed. Construction is cheap and does not start a process;
+// startup remains lazy until the first semantic query or Go mutation.
+func (b *Builder) initCodeIntelligence() {
+	if b.options.Bare || b.registry == nil || b.executor == nil {
+		return
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		logging.Debug("managed Go intelligence unavailable", "error", err)
+		return
+	}
+	provider, err := codeintel.NewGoplsProvider(b.workDir, codeintel.Options{})
+	if err != nil {
+		logging.Warn("managed Go intelligence disabled", "error", err)
+		return
+	}
+	b.wireCodeIntelligence(provider)
+}
+
+func (b *Builder) wireCodeIntelligence(provider codeintel.ReadOnlyProvider) {
+	if provider == nil || b.registry == nil || b.executor == nil {
+		return
+	}
+	adapter := &codeIntelligenceAdapter{provider: provider}
+	for _, name := range []string{"go_to_definition", "find_references", "go_search"} {
+		tool, ok := b.registry.Get(name)
+		if !ok {
+			continue
+		}
+		if aware, ok := tool.(tools.SemanticProviderAware); ok {
+			aware.SetSemanticProvider(adapter)
+		}
+	}
+	b.executor.SetGoDiagnosticsProvider(adapter)
+	b.codeIntelProvider = provider
+	logging.Debug("managed Go intelligence wired", "workspace", b.workDir)
+}
+
 // effectiveMaxInputTokens resolves the context window used by runtime guards.
 // An explicit context.max_input_tokens override wins over model metadata; this
 // matters for compatible proxies that expose GLM-5.2 with a smaller window.
@@ -507,6 +573,9 @@ func effectiveMaxInputTokens(cfg *config.Config) int {
 
 // selectToolSets determines which tool sets to include based on the current context.
 func (b *Builder) selectToolSets() []*genai.Tool {
+	if b.options.Bare {
+		return b.registry.GeminiTools()
+	}
 	// For Ollama models, use a reduced tool set
 	if b.cfg.API.Backend == "ollama" {
 		sets := []tools.ToolSet{tools.ToolSetOllamaCore}
@@ -570,18 +639,26 @@ func (b *Builder) initSession() error {
 	// for the history-incompatibility problem this guards against.
 	b.session.SetProvider(runtimeProviderForConfig(b.cfg))
 
-	b.projectInfo = appcontext.DetectProject(b.workDir)
-
-	b.projectMemory = appcontext.NewProjectMemory(b.workDir)
-	if err := b.projectMemory.Load(); err != nil {
-		logging.Debug("project memory not loaded", "error", err)
-	}
-	// Start watching for instruction file changes (GOKIN.md, CLAUDE.md, etc.)
-	if err := b.projectMemory.StartWatching(b.ctx, 500); err != nil {
-		logging.Debug("project memory file watching not started", "error", err)
+	if b.options.Bare {
+		b.projectInfo = &appcontext.ProjectInfo{}
+	} else {
+		b.projectInfo = appcontext.DetectProject(b.workDir)
 	}
 
 	b.promptBuilder = appcontext.NewPromptBuilder(b.workDir, b.projectInfo)
+	b.promptBuilder.SetBareMode(b.options.Bare)
+	if b.options.Bare {
+		b.promptBuilder.SetPlanAutoDetect(false)
+	} else {
+		b.projectMemory = appcontext.NewProjectMemory(b.workDir)
+		if err := b.projectMemory.Load(); err != nil {
+			logging.Debug("project memory not loaded", "error", err)
+		}
+		// Start watching for instruction file changes (GOKIN.md, CLAUDE.md, etc.)
+		if err := b.projectMemory.StartWatching(b.ctx, 500); err != nil {
+			logging.Debug("project memory file watching not started", "error", err)
+		}
+	}
 	b.promptBuilder.SetProjectMemory(b.projectMemory)
 	b.promptBuilder.SetGlobalMemoryEnabled(b.cfg.Memory.AllowGlobal)
 	if b.memStore != nil && b.cfg.Memory.AutoInject {
@@ -590,39 +667,45 @@ func (b *Builder) initSession() error {
 	if b.projectLearning != nil {
 		b.promptBuilder.SetProjectLearning(b.projectLearning)
 	}
-	b.projectMemory.OnReload(func() {
-		b.promptBuilder.Invalidate()
-	})
-	b.promptBuilder.SetPlanAutoDetect(b.cfg.Plan.AutoDetect)
+	if b.projectMemory != nil {
+		b.projectMemory.OnReload(func() {
+			b.promptBuilder.Invalidate()
+		})
+	}
+	if !b.options.Bare {
+		b.promptBuilder.SetPlanAutoDetect(b.cfg.Plan.AutoDetect)
+	}
 
 	// Initialize session memory for automatic context extraction
-	smConfig := appcontext.SessionMemoryConfig{
-		Enabled:                 b.cfg.SessionMemory.Enabled,
-		MinTokensToInit:         b.cfg.SessionMemory.MinTokensToInit,
-		MinTokensBetweenUpdates: b.cfg.SessionMemory.MinTokensBetweenUpdates,
-		ToolCallsBetweenUpdates: b.cfg.SessionMemory.ToolCallsBetweenUpdates,
-	}
-	// Fill sane thresholds when enabled-but-unconfigured (thresholds 0), WITHOUT
-	// flipping Enabled — the old `MinTokensToInit==0 → full default` overrode an
-	// explicit `enabled:false`, so a user who turned session memory off in the
-	// YAML still got it. Respect the enable flag; only repair zero thresholds.
-	if smConfig.Enabled && smConfig.MinTokensToInit == 0 {
-		d := appcontext.DefaultSessionMemoryConfig()
-		smConfig.MinTokensToInit = d.MinTokensToInit
-		smConfig.MinTokensBetweenUpdates = d.MinTokensBetweenUpdates
-		smConfig.ToolCallsBetweenUpdates = d.ToolCallsBetweenUpdates
-	}
-	b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
-	b.sessionMemory.LoadFromDisk()
-	b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.mainClient))
-	if b.projectLearning != nil {
-		b.sessionMemory.SetProjectLearning(b.projectLearning)
-	}
-	b.promptBuilder.SetSessionMemory(b.sessionMemory)
+	if !b.options.Bare {
+		smConfig := appcontext.SessionMemoryConfig{
+			Enabled:                 b.cfg.SessionMemory.Enabled,
+			MinTokensToInit:         b.cfg.SessionMemory.MinTokensToInit,
+			MinTokensBetweenUpdates: b.cfg.SessionMemory.MinTokensBetweenUpdates,
+			ToolCallsBetweenUpdates: b.cfg.SessionMemory.ToolCallsBetweenUpdates,
+		}
+		// Fill sane thresholds when enabled-but-unconfigured (thresholds 0), WITHOUT
+		// flipping Enabled — the old `MinTokensToInit==0 → full default` overrode an
+		// explicit `enabled:false`, so a user who turned session memory off in the
+		// YAML still got it. Respect the enable flag; only repair zero thresholds.
+		if smConfig.Enabled && smConfig.MinTokensToInit == 0 {
+			d := appcontext.DefaultSessionMemoryConfig()
+			smConfig.MinTokensToInit = d.MinTokensToInit
+			smConfig.MinTokensBetweenUpdates = d.MinTokensBetweenUpdates
+			smConfig.ToolCallsBetweenUpdates = d.ToolCallsBetweenUpdates
+		}
+		b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
+		b.sessionMemory.LoadFromDisk()
+		b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.mainClient))
+		if b.projectLearning != nil {
+			b.sessionMemory.SetProjectLearning(b.projectLearning)
+		}
+		b.promptBuilder.SetSessionMemory(b.sessionMemory)
 
-	b.workingMemory = appcontext.NewWorkingMemoryManager(b.workDir)
-	b.workingMemory.LoadFromDisk()
-	b.promptBuilder.SetWorkingMemory(b.workingMemory)
+		b.workingMemory = appcontext.NewWorkingMemoryManager(b.workDir)
+		b.workingMemory.LoadFromDisk()
+		b.promptBuilder.SetWorkingMemory(b.workingMemory)
+	}
 
 	// Provider-specific prompt addendum (Kimi/DeepSeek operating rules, etc.)
 	// + prefix-caching capability (gates the question-only prompt trimming).
@@ -631,22 +714,28 @@ func (b *Builder) initSession() error {
 	b.promptBuilder.SetPrefixCachingEnabled(appcontext.ProviderSupportsPrefixCaching(provider))
 
 	// Ensure .gokin working files are in .gitignore
-	appcontext.EnsureGokinGitignore(b.workDir)
+	if !b.options.Bare {
+		appcontext.EnsureGokinGitignore(b.workDir)
+	}
 
 	// Detect git worktree for session isolation awareness
-	if wt := git.DetectWorktree(b.workDir); wt != nil && !wt.IsMainWorktree {
-		logging.Info("running inside git worktree",
-			"branch", wt.Branch,
-			"head", wt.Head,
-			"main_root", git.GetMainWorktreeRoot(b.workDir))
+	if !b.options.Bare {
+		if wt := git.DetectWorktree(b.workDir); wt != nil && !wt.IsMainWorktree {
+			logging.Info("running inside git worktree",
+				"branch", wt.Branch,
+				"head", wt.Head,
+				"main_root", git.GetMainWorktreeRoot(b.workDir))
+		}
 	}
 
 	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.mainClient, &b.cfg.Context)
 	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
 
 	// Initialize context predictor for predictive file loading
-	b.contextPredictor = appcontext.NewContextPredictor(b.workDir)
-	logging.Debug("context predictor initialized")
+	if !b.options.Bare {
+		b.contextPredictor = appcontext.NewContextPredictor(b.workDir)
+		logging.Debug("context predictor initialized")
+	}
 
 	// Start session watcher for auto-updating token counts
 	b.contextManager.StartSessionWatcher()
@@ -669,8 +758,76 @@ func (b *Builder) initSession() error {
 	return nil
 }
 
+// initBareManagers wires only the infrastructure required by Read, Edit, and
+// Bash. A lightweight runner is retained as an internal compatibility object
+// because shared shutdown/UI wiring expects one, but no model-visible task or
+// coordination tool can reach it and no agent stores are loaded.
+func (b *Builder) initBareManagers() error {
+	if b.cfg.Permission.Enabled {
+		rules := permission.NewRulesFromConfig(b.cfg.Permission.DefaultPolicy, b.cfg.Permission.Rules)
+		b.permManager = permission.NewManager(rules, true)
+	} else {
+		b.permManager = permission.NewManager(nil, false)
+	}
+	b.permManager.SetDontAsk(b.cfg.Permission.DontAsk)
+	b.executor.SetPermissions(b.permManager)
+
+	sandboxOff := !b.cfg.Tools.Bash.Sandbox
+	permissionOff := !b.cfg.Permission.Enabled
+	b.executor.SetUnrestrictedMode(sandboxOff && permissionOff)
+
+	b.planManager = plan.NewManager(b.cfg.Plan.Enabled, b.cfg.Plan.RequireApproval)
+	b.planManager.SetWorkDir(b.workDir)
+	b.planManager.EnableUndo(10)
+	if b.promptBuilder != nil {
+		b.promptBuilder.SetPlanManager(b.planManager)
+	}
+	if b.contextManager != nil {
+		b.contextManager.SetPlanManager(b.planManager)
+	}
+
+	b.hooksManager = hooks.NewManager(false, b.workDir)
+	b.executor.SetHooks(b.hooksManager)
+	b.taskManager = tasks.NewManager(b.workDir)
+	b.undoManager = undo.NewManager()
+
+	b.agentRunner = agent.NewRunner(b.ctx, b.mainClient, b.registry, b.workDir)
+	b.agentRunner.SetPermissions(b.permManager)
+	b.agentRunner.SetHooks(b.hooksManager)
+	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode)
+	b.agentRunner.SetContextConfig(&b.cfg.Context)
+	b.agentRunner.SetWorkspaceIsolationEnabled(false)
+	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)
+
+	// Built-ins remain available to an interactive human, but aliases and
+	// project/global command files are not inspected.
+	b.commandHandler = commands.NewHandler()
+	b.commandHandler.SealBootPhase()
+
+	if readTool, ok := b.registry.Get("read"); ok {
+		if rt, ok := readTool.(*tools.ReadTool); ok {
+			rt.SetWorkDir(b.workDir)
+		}
+	}
+	if editTool, ok := b.registry.Get("edit"); ok {
+		if et, ok := editTool.(*tools.EditTool); ok {
+			et.SetWorkDir(b.workDir)
+			et.SetReadTracker(b.readTracker)
+			et.SetRequireReadBeforeEdit(b.cfg.Tools.RequireReadBeforeEdit)
+			et.SetUndoManager(b.undoManager)
+		}
+	}
+	if len(b.cfg.Tools.AllowedDirs) > 0 {
+		tools.SetAllowedDirsOnRegistry(b.registry, b.cfg.Tools.AllowedDirs)
+	}
+	return nil
+}
+
 // initManagers creates various manager components.
 func (b *Builder) initManagers() error {
+	if b.options.Bare {
+		return b.initBareManagers()
+	}
 	// Permission manager
 	if b.cfg.Permission.Enabled {
 		rules := permission.NewRulesFromConfig(b.cfg.Permission.DefaultPolicy, b.cfg.Permission.Rules)
@@ -678,6 +835,7 @@ func (b *Builder) initManagers() error {
 	} else {
 		b.permManager = permission.NewManager(nil, false)
 	}
+	b.permManager.SetDontAsk(b.cfg.Permission.DontAsk)
 	b.executor.SetPermissions(b.permManager)
 
 	// Set unrestricted mode when both sandbox and permissions are off
@@ -692,6 +850,7 @@ func (b *Builder) initManagers() error {
 	// Plan manager
 	b.planManager = plan.NewManager(b.cfg.Plan.Enabled, b.cfg.Plan.RequireApproval)
 	b.planManager.SetWorkDir(b.workDir)
+	b.planManager.EnableUndo(10)
 	if b.promptBuilder != nil {
 		b.promptBuilder.SetPlanManager(b.planManager)
 	}
@@ -786,6 +945,17 @@ func (b *Builder) initManagers() error {
 
 	// Hooks manager: hooks from the main config first, then project-level
 	// <workDir>/.gokin/hooks.yaml (same schema; runs after config hooks).
+	workspaceTrusted := hooks.IsWorkspaceTrusted(b.workDir, b.cfg.Hooks.TrustedWorkspaces)
+	if b.registry != nil {
+		if registered, ok := b.registry.Get("skill"); ok {
+			if skillTool, ok := registered.(*tools.SkillTool); ok {
+				// Repository-owned skill allowed-tools grants are executable
+				// configuration. Reuse the exact, user-owned workspace trust
+				// boundary already required for more-powerful project hooks.
+				skillTool.SetWorkspaceTrusted(workspaceTrusted)
+			}
+		}
+	}
 	b.hooksManager = hooks.NewManager(b.cfg.Hooks.Enabled, b.workDir)
 	for _, hookCfg := range b.cfg.Hooks.Hooks {
 		b.hooksManager.AddHook(&hooks.Hook{
@@ -801,7 +971,7 @@ func (b *Builder) initManagers() error {
 		})
 	}
 	projectHooksPath := filepath.Join(b.workDir, ".gokin", "hooks.yaml")
-	if hooks.IsWorkspaceTrusted(b.workDir, b.cfg.Hooks.TrustedWorkspaces) {
+	if workspaceTrusted {
 		if projectHooks, err := hooks.LoadFile(projectHooksPath); err != nil {
 			// Boot must survive a typo'd trusted project file, but the user has to
 			// see the problem — same warn-and-continue convention as aliases.
@@ -1139,7 +1309,7 @@ func (b *Builder) initIntegrations() error {
 			// Wire proactive context provider (Claude-Code-style package
 			// sibling + paired test auto-read). Disabled if user opted
 			// out in config.
-			if pc := b.cfg.Tools.ProactiveContext; pc.Enabled {
+			if pc := b.cfg.Tools.ProactiveContext; pc.Enabled && !b.options.Bare {
 				rt.SetProactiveContext(appcontext.NewProactiveReader(
 					b.workDir, pc.MaxFiles, pc.MaxLinesPerFile,
 				))
@@ -1230,6 +1400,11 @@ func (b *Builder) initIntegrations() error {
 		if mt, ok := mkdirTool.(*tools.MkdirTool); ok {
 			mt.SetUndoManager(b.undoManager)
 		}
+	}
+
+	if b.options.Bare {
+		b.executor.SetSessionID(b.session.ID)
+		return nil
 	}
 
 	// Wire up agent runner to task tool
@@ -1429,27 +1604,7 @@ func (b *Builder) initIntegrations() error {
 		}
 	}
 
-	// Wire up plan mode tools
-	if enterPlanTool, ok := b.registry.Get("enter_plan_mode"); ok {
-		if ept, ok := enterPlanTool.(*tools.EnterPlanModeTool); ok {
-			ept.SetManager(b.planManager)
-		}
-	}
-	if updateProgressTool, ok := b.registry.Get("update_plan_progress"); ok {
-		if upt, ok := updateProgressTool.(*tools.UpdatePlanProgressTool); ok {
-			upt.SetManager(b.planManager)
-		}
-	}
-	if getPlanStatusTool, ok := b.registry.Get("get_plan_status"); ok {
-		if gpst, ok := getPlanStatusTool.(*tools.GetPlanStatusTool); ok {
-			gpst.SetManager(b.planManager)
-		}
-	}
-	if exitPlanTool, ok := b.registry.Get("exit_plan_mode"); ok {
-		if ept, ok := exitPlanTool.(*tools.ExitPlanModeTool); ok {
-			ept.SetManager(b.planManager)
-		}
-	}
+	b.wirePlanTools()
 
 	// Wire up shared_memory tool (Phase 2)
 	if smt, ok := b.registry.Get("shared_memory"); ok {
@@ -1472,6 +1627,43 @@ func (b *Builder) initIntegrations() error {
 	}
 
 	return nil
+}
+
+// wirePlanTools keeps every plan-management tool on the same live manager and
+// shared exact-change undo history.
+func (b *Builder) wirePlanTools() {
+	if enterPlanTool, ok := b.registry.Get("enter_plan_mode"); ok {
+		if ept, ok := enterPlanTool.(*tools.EnterPlanModeTool); ok {
+			ept.SetManager(b.planManager)
+		}
+	}
+	if updateProgressTool, ok := b.registry.Get("update_plan_progress"); ok {
+		if upt, ok := updateProgressTool.(*tools.UpdatePlanProgressTool); ok {
+			upt.SetManager(b.planManager)
+		}
+	}
+	if getPlanStatusTool, ok := b.registry.Get("get_plan_status"); ok {
+		if gpst, ok := getPlanStatusTool.(*tools.GetPlanStatusTool); ok {
+			gpst.SetManager(b.planManager)
+		}
+	}
+	if exitPlanTool, ok := b.registry.Get("exit_plan_mode"); ok {
+		if ept, ok := exitPlanTool.(*tools.ExitPlanModeTool); ok {
+			ept.SetManager(b.planManager)
+		}
+	}
+	if undoPlanTool, ok := b.registry.Get("undo_plan"); ok {
+		if upt, ok := undoPlanTool.(*tools.UndoPlanTool); ok {
+			upt.SetManager(b.planManager)
+			upt.SetUndoManager(b.undoManager)
+		}
+	}
+	if redoPlanTool, ok := b.registry.Get("redo_plan"); ok {
+		if rpt, ok := redoPlanTool.(*tools.RedoPlanTool); ok {
+			rpt.SetManager(b.planManager)
+			rpt.SetUndoManager(b.undoManager)
+		}
+	}
 }
 
 // glmWebSearchServer returns the MCP server config for the GLM Coding Plan web
@@ -1520,6 +1712,9 @@ func resolveGLMKey(cfg *config.Config) *security.LoadedKey {
 // When `mcp.enabled: false` (the default) this is a no-op and `b.mcpManager`
 // stays nil; `commands/mcp.go` checks for that and surfaces the disabled hint.
 func (b *Builder) initMCP() error {
+	if b.options.Bare {
+		return nil
+	}
 	servers := b.cfg.MCP.Servers
 	glmAdded := false
 	// web.glm_search: one-flag enable for the GLM Coding Plan web search MCP
@@ -1816,6 +2011,7 @@ func (b *Builder) initUI() error {
 	b.tuiModel.SetReducedMotion(b.cfg.UI.ReducedMotion)
 
 	b.tuiModel.SetBellEnabled(b.cfg.UI.Bell)
+	b.tuiModel.SetMarkdownRendering(b.cfg.UI.MarkdownRendering)
 
 	// Filter models by the same provider that drives runtime behavior.
 	provider := runtimeProviderForConfig(b.cfg)
@@ -1844,8 +2040,10 @@ func (b *Builder) initUI() error {
 	}
 
 	// Set git branch for status bar display
-	if branch := git.GetCurrentBranch(b.workDir); branch != "" {
-		b.tuiModel.SetGitBranch(branch)
+	if !b.options.Bare {
+		if branch := git.GetCurrentBranch(b.workDir); branch != "" {
+			b.tuiModel.SetGitBranch(branch)
+		}
 	}
 
 	return nil
@@ -2222,20 +2420,19 @@ func (b *Builder) wireDependencies() error {
 	b.taskManager.SetCompletionHandler(func(task *tasks.Task) {
 		info := task.GetInfo()
 		var msg string
+		evidence := info.Summary
+		if evidence == "" {
+			evidence = info.Output
+			if runes := []rune(evidence); len(runes) > 500 {
+				evidence = string(runes[:250]) + "... [middle omitted] ..." + string(runes[len(runes)-250:])
+			}
+		}
 		if info.Status == "completed" {
-			output := info.Output
-			if runes := []rune(output); len(runes) > 500 {
-				output = string(runes[:500]) + "..."
-			}
-			msg = fmt.Sprintf("Background shell task %s completed (exit %d). Output: %s",
-				info.ID, info.ExitCode, output)
+			msg = fmt.Sprintf("Background shell task %s completed (exit %d). Evidence: %s",
+				info.ID, info.ExitCode, evidence)
 		} else if info.Status == "failed" {
-			output := info.Output
-			if runes := []rune(output); len(runes) > 500 {
-				output = string(runes[:500]) + "..."
-			}
-			msg = fmt.Sprintf("Background shell task %s failed (exit %d). Output: %s",
-				info.ID, info.ExitCode, output)
+			msg = fmt.Sprintf("Background shell task %s failed (exit %d). Evidence: %s",
+				info.ID, info.ExitCode, evidence)
 		}
 		if msg != "" {
 			app.executor.AddPendingNotification(msg)
@@ -2435,6 +2632,7 @@ func (b *Builder) assembleApp() *App {
 		rateLimiter:           b.rateLimiter,
 		auditLogger:           b.auditLogger,
 		fileWatcher:           b.fileWatcher,
+		codeIntelProvider:     b.codeIntelProvider,
 		taskRouter:            b.taskRouter,
 		orchestrator:          b.taskOrchestrator,
 		reliability:           NewReliabilityManager(),
@@ -2483,10 +2681,12 @@ func (b *Builder) assembleApp() *App {
 		})
 	}
 
-	if j, err := NewExecutionJournal(b.workDir); err == nil {
-		b.cachedApp.journal = j
-	} else {
-		logging.Warn("failed to initialize execution journal", "error", err)
+	if !b.cfg.Bare {
+		if j, err := NewExecutionJournal(b.workDir); err == nil {
+			b.cachedApp.journal = j
+		} else {
+			logging.Warn("failed to initialize execution journal", "error", err)
+		}
 	}
 
 	// Wire up user input callback for agents
@@ -2504,16 +2704,13 @@ func (b *Builder) assembleApp() *App {
 	if b.executor != nil && b.cachedApp != nil {
 		app := b.cachedApp
 		b.executor.SetPhaseObserver(func(tool string, d time.Duration, success bool) {
-			if app.phaseMetrics != nil {
-				app.phaseMetrics.Record(PhaseTool, d)
+			app.recordToolPhaseOutcome(tool, d, success)
+		})
+		b.executor.SetToolWaitBudgetResolver(func(tool string, _ map[string]any) (time.Duration, bool) {
+			if tool == "ask_user" {
+				return app.questionPromptTimeout(), true
 			}
-			if app.toolMetrics != nil {
-				kind := ""
-				if !success {
-					kind = "other"
-				}
-				app.toolMetrics.Record(tool, d, success, kind)
-			}
+			return 0, false
 		})
 		// Adaptive parallelism: executor consults ToolMetrics to decide
 		// whether a group of reads should run serialized (when any tool

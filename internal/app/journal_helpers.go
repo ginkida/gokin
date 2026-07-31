@@ -19,12 +19,17 @@ func (a *App) journalEvent(event string, details map[string]any) {
 	if a == nil || a.journal == nil {
 		return
 	}
-	a.journal.Append(event, details)
+	err := a.journal.Append(event, details)
+	a.surfacePersistenceResult(
+		"execution_journal",
+		"Execution journal is failing — crash diagnostics may be incomplete",
+		err,
+	)
 }
 
-func (a *App) saveRecoverySnapshot() {
+func (a *App) saveRecoverySnapshot() error {
 	if a == nil || a.journal == nil || a.session == nil {
-		return
+		return nil
 	}
 
 	pending := a.pendingSnapshot()
@@ -49,7 +54,15 @@ func (a *App) saveRecoverySnapshot() {
 		}
 		snap.CurrentStepID = a.planManager.GetCurrentStepID()
 	}
-	a.journal.SaveRecovery(snap)
+	if err := a.journal.SaveRecovery(snap); err != nil {
+		message := "Crash-recovery snapshots are failing — interrupted work may require manual inspection"
+		a.recordHeadlessTerminalOutcome("persistence_failed",
+			fmt.Sprintf("%s: %v", message, err))
+		a.surfacePersistenceResult("recovery_snapshot", message, err)
+		return err
+	}
+	a.surfacePersistenceResult("recovery_snapshot", "", nil)
+	return nil
 }
 
 func (a *App) journalSessionArchive(archived int, reason string) {

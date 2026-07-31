@@ -30,7 +30,10 @@ func TestDebouncedSaveUsesOwnedImmutableSnapshot(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(proceed) }) }
 	t.Cleanup(release)
 	saveTestSeamMu.Lock()
-	saveIOHookForTest = func() {
+	saveIOHookForTest = func(owner *Store) {
+		if owner != store {
+			return
+		}
 		hookOnce.Do(func() { close(hookEntered) })
 		<-proceed
 	}

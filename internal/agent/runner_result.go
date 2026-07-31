@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/logging"
 )
 
@@ -18,12 +19,39 @@ import (
 // waiter. Callers can use errors.Is to distinguish this from cancellation.
 var ErrAgentResultUnavailable = errors.New("agent result unavailable")
 
-// Wait waits for an agent to complete and returns its result.
-// Uses a default 10-minute timeout. For context-aware waiting, use WaitWithContext.
+const agentResultWaitGrace = 5 * time.Minute
+
+// Wait waits for an agent to complete and returns its result. Its fallback
+// budget is derived from the live agent/run context rather than a hard-coded
+// 10 minutes, so a legitimate thorough Bash agent cannot be reported as timed
+// out while it is still inside its advertised 35-minute budget.
+// For caller-owned cancellation, use WaitWithContext.
 func (r *Runner) Wait(agentID string) (*AgentResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), r.agentResultWaitTimeout(agentID))
 	defer cancel()
 	return r.WaitWithContext(ctx, agentID)
+}
+
+func (r *Runner) agentResultWaitTimeout(agentID string) time.Duration {
+	timeout := config.DefaultAgentTimeout
+
+	r.mu.RLock()
+	agent := r.agents[agentID]
+	r.mu.RUnlock()
+	if agent == nil {
+		return timeout + agentResultWaitGrace
+	}
+	if configured := agent.GetTimeout(); configured > timeout {
+		timeout = configured
+	}
+	if runCtx := agent.RunContext(); runCtx != nil {
+		if deadline, ok := runCtx.Deadline(); ok {
+			if remaining := time.Until(deadline); remaining > timeout {
+				timeout = remaining
+			}
+		}
+	}
+	return timeout + agentResultWaitGrace
 }
 
 // resultWaitState is shared by every current waiter for one agent. Completion
@@ -318,13 +346,43 @@ func (r *Runner) WaitAll(agentIDs []string) ([]*AgentResult, error) {
 // none of that should race with or modify the runner's internal ledger.
 func (r *Runner) GetResult(agentID string) (*AgentResult, bool) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	result, ok := r.results[agentID]
+	agent := r.agents[agentID]
 	if !ok {
+		r.mu.RUnlock()
 		return nil, false
 	}
-	return cloneAgentResult(result), true
+	snapshot := cloneAgentResult(result)
+	r.mu.RUnlock()
+
+	// The ledger is finalized only at completion. Enrich this caller-owned
+	// snapshot from the live agent so task_output exposes the actual running
+	// status and its incremental transcript before the final publish.
+	if agent != nil && snapshot != nil {
+		if !snapshot.Completed {
+			// A restored agent may still carry its previous terminal status for
+			// the few microseconds before the resume goroutine enters Run. Do
+			// not overwrite the newly published Pending state with that stale
+			// value; Running/Cancelled are live transitions for this attempt.
+			if liveStatus := agent.GetStatus(); liveStatus == AgentStatusRunning ||
+				liveStatus == AgentStatusCancelled {
+				snapshot.Status = liveStatus
+			}
+		}
+		if snapshot.OutputFile == "" {
+			agent.stateMu.RLock()
+			writer := agent.outputWriter
+			outputBaseDir := agent.outputBaseDir
+			id := agent.ID
+			agent.stateMu.RUnlock()
+			if writer != nil {
+				snapshot.OutputFile = writer.FilePath()
+			} else if !snapshot.Completed {
+				snapshot.OutputFile = agentOutputFilePath(outputBaseDir, id)
+			}
+		}
+	}
+	return snapshot, true
 }
 
 // GetAgent returns an agent by ID.
@@ -350,6 +408,36 @@ func (r *Runner) Cancel(agentID string) error {
 	// persistence, learning and usage accounting have finished.
 	agent.Cancel()
 	return nil
+}
+
+// CancelAll requests cancellation for every currently running agent and
+// returns the exact IDs whose finalization must be awaited. Cancellation is
+// not completion: each run goroutine still has to commit tool responses,
+// finalize its workspace, persist state, publish its result, and close output.
+func (r *Runner) CancelAll() []string {
+	ids := r.ListRunning()
+	for _, id := range ids {
+		if err := r.Cancel(id); err != nil {
+			logging.Warn("failed to cancel background agent", "agent_id", id, "error", err)
+		}
+	}
+	return ids
+}
+
+// WaitAllWithContext waits for the supplied agents' complete result-publication
+// lifecycle. Callers should pass IDs captured before cancellation so an agent
+// whose status flips to Cancelled immediately is not accidentally skipped.
+func (r *Runner) WaitAllWithContext(ctx context.Context, agentIDs []string) error {
+	var waitErrs []error
+	for _, id := range agentIDs {
+		if _, err := r.WaitWithContext(ctx, id); err != nil {
+			waitErrs = append(waitErrs, fmt.Errorf("wait for agent %s: %w", id, err))
+			if ctx.Err() != nil {
+				break
+			}
+		}
+	}
+	return errors.Join(waitErrs...)
 }
 
 // ListAgents returns all agent IDs.

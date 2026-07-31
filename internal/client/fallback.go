@@ -29,11 +29,14 @@ func NewFallbackClient(clients []Client, providers []string) (*FallbackClient, e
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("fallback client requires at least one client")
 	}
-	ownedClients := make([]Client, len(clients))
 	for i, client := range clients {
 		if isNilClient(client) {
 			return nil, fmt.Errorf("fallback client at index %d is nil", i)
 		}
+	}
+	ownedClients := make([]Client, len(clients))
+	for i, client := range clients {
+		disableDirectHealthTracking(client)
 		ownedClients[i] = client
 	}
 	normalizedProviders := make([]string, len(clients))
@@ -543,6 +546,7 @@ func (fc *FallbackClient) WithModel(modelName string) Client {
 			model = modelName
 		}
 		newClients[i] = c.WithModel(model)
+		disableDirectHealthTracking(newClients[i])
 	}
 	newProviders := make([]string, len(fc.providers))
 	copy(newProviders, fc.providers)

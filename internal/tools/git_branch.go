@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"google.golang.org/genai"
@@ -107,7 +106,7 @@ func (t *GitBranchTool) listBranches(ctx context.Context, args map[string]any) (
 		cmdArgs = append(cmdArgs, "-a")
 	}
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -115,7 +114,7 @@ func (t *GitBranchTool) listBranches(ctx context.Context, args map[string]any) (
 	}
 
 	// Get current branch
-	currentCmd := exec.CommandContext(ctx, "git", "branch", "--show-current")
+	currentCmd := newProcessGroupCommand(ctx, "git", "branch", "--show-current")
 	currentCmd.Dir = t.workDir
 	currentOutput, _ := currentCmd.Output()
 	current := strings.TrimSpace(string(currentOutput))
@@ -160,7 +159,7 @@ func (t *GitBranchTool) createBranch(ctx context.Context, args map[string]any) (
 		cmdArgs = append(cmdArgs, from)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -183,7 +182,7 @@ func (t *GitBranchTool) deleteBranch(ctx context.Context, args map[string]any) (
 		flag = "-D"
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "branch", flag, name)
+	cmd := newProcessGroupCommand(ctx, "git", "branch", flag, name)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -210,7 +209,7 @@ func (t *GitBranchTool) switchBranch(ctx context.Context, args map[string]any) (
 		cmdArgs = []string{"checkout", "-f", name}
 	}
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -231,7 +230,7 @@ func (t *GitBranchTool) mergeBranch(ctx context.Context, args map[string]any) (T
 		return NewErrorResult("invalid branch name: must not start with '-'"), nil
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "merge", name)
+	cmd := newProcessGroupCommand(ctx, "git", "merge", name)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	outStr := strings.TrimSpace(string(output))
@@ -239,7 +238,7 @@ func (t *GitBranchTool) mergeBranch(ctx context.Context, args map[string]any) (T
 	if err != nil {
 		if strings.Contains(outStr, "CONFLICT") {
 			// Get conflict details
-			conflictCmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--diff-filter=U")
+			conflictCmd := newProcessGroupCommand(ctx, "git", "diff", "--name-only", "--diff-filter=U")
 			conflictCmd.Dir = t.workDir
 			conflictOutput, _ := conflictCmd.Output()
 
@@ -253,12 +252,12 @@ func (t *GitBranchTool) mergeBranch(ctx context.Context, args map[string]any) (T
 }
 
 func (t *GitBranchTool) currentBranch(ctx context.Context) (ToolResult, error) {
-	cmd := exec.CommandContext(ctx, "git", "branch", "--show-current")
+	cmd := newProcessGroupCommand(ctx, "git", "branch", "--show-current")
 	cmd.Dir = t.workDir
 	output, err := cmd.Output()
 	if err != nil {
 		// Might be in detached HEAD
-		hashCmd := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD")
+		hashCmd := newProcessGroupCommand(ctx, "git", "rev-parse", "--short", "HEAD")
 		hashCmd.Dir = t.workDir
 		hashOutput, hashErr := hashCmd.Output()
 		if hashErr != nil {
@@ -270,7 +269,7 @@ func (t *GitBranchTool) currentBranch(ctx context.Context) (ToolResult, error) {
 	branch := strings.TrimSpace(string(output))
 
 	// Also get upstream info
-	upstreamCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	upstreamCmd := newProcessGroupCommand(ctx, "git", "rev-parse", "--abbrev-ref", branch+"@{upstream}")
 	upstreamCmd.Dir = t.workDir
 	upstreamOutput, upstreamErr := upstreamCmd.Output()
 
@@ -280,7 +279,7 @@ func (t *GitBranchTool) currentBranch(ctx context.Context) (ToolResult, error) {
 		result += fmt.Sprintf("\nTracking: %s", upstream)
 
 		// Check ahead/behind
-		abCmd := exec.CommandContext(ctx, "git", "rev-list", "--left-right", "--count", branch+"..."+upstream)
+		abCmd := newProcessGroupCommand(ctx, "git", "rev-list", "--left-right", "--count", branch+"..."+upstream)
 		abCmd.Dir = t.workDir
 		abOutput, abErr := abCmd.Output()
 		if abErr == nil {

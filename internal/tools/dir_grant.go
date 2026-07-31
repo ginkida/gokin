@@ -3,7 +3,8 @@ package tools
 // allowedDirsSetter is implemented by every path-scoping tool — the ones that
 // build a PathValidator from workDir plus a set of additional allowed dirs
 // (read, edit, write, list_dir, glob, grep, tree, copy, move, delete, mkdir,
-// batch, refactor, diff, go_to_definition, find_references, go_search).
+// batch, refactor, diff, go_to_definition, find_references, go_search,
+// run_tests, verify_code).
 type allowedDirsSetter interface {
 	SetAllowedDirs(dirs []string)
 }

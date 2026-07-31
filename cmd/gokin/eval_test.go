@@ -52,6 +52,22 @@ func TestEvalResultLabel_WithFaultProfile(t *testing.T) {
 	}
 }
 
+func TestEvalCommandRegistersBaselineAudit(t *testing.T) {
+	cmd := newEvalCmd()
+	found, _, err := cmd.Find([]string{"baseline-audit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == nil || found.Name() != "baseline-audit" {
+		t.Fatalf("baseline-audit command = %#v", found)
+	}
+	if found.Flags().Lookup("manifest") == nil ||
+		found.Flags().Lookup("input") == nil ||
+		found.Flags().Lookup("json") == nil {
+		t.Fatal("baseline-audit is missing its manifest/input/json contract")
+	}
+}
+
 // --- evalGateOptions (additional edge cases) ---
 
 func TestEvalGateOptions_DisabledByDefault(t *testing.T) {

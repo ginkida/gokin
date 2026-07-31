@@ -143,10 +143,13 @@ func (t *GitPRTool) createPR(ctx context.Context, args map[string]any) (ToolResu
 	}
 
 	// Ensure branch is pushed
-	pushCmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", "HEAD")
+	pushCmd := newProcessGroupCommand(ctx, "git", "push", "-u", "origin", "HEAD")
 	pushCmd.Dir = t.workDir
 	pushOutput, err := pushCmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return NewErrorResult(fmt.Sprintf("push interrupted before PR creation: %v", ctx.Err())), nil
+		}
 		outStr := string(pushOutput)
 		if !strings.Contains(outStr, "Everything up-to-date") {
 			return NewErrorResult(fmt.Sprintf("failed to push branch: %s\n%s", err, outStr)), nil
@@ -165,7 +168,7 @@ func (t *GitPRTool) createPR(ctx context.Context, args map[string]any) (ToolResu
 		cmdArgs = append(cmdArgs, "--draft")
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "gh", cmdArgs...)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -176,7 +179,7 @@ func (t *GitPRTool) createPR(ctx context.Context, args map[string]any) (ToolResu
 }
 
 func (t *GitPRTool) listPRs(ctx context.Context, _ map[string]any) (ToolResult, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--limit", "20")
+	cmd := newProcessGroupCommand(ctx, "gh", "pr", "list", "--limit", "20")
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -192,7 +195,7 @@ func (t *GitPRTool) listPRs(ctx context.Context, _ map[string]any) (ToolResult, 
 
 func (t *GitPRTool) viewPR(ctx context.Context, args map[string]any) (ToolResult, error) {
 	prNum, _ := GetString(args, "pr_number")
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", prNum)
+	cmd := newProcessGroupCommand(ctx, "gh", "pr", "view", prNum)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -203,7 +206,7 @@ func (t *GitPRTool) viewPR(ctx context.Context, args map[string]any) (ToolResult
 
 func (t *GitPRTool) checksPR(ctx context.Context, args map[string]any) (ToolResult, error) {
 	prNum, _ := GetString(args, "pr_number")
-	cmd := exec.CommandContext(ctx, "gh", "pr", "checks", prNum)
+	cmd := newProcessGroupCommand(ctx, "gh", "pr", "checks", prNum)
 	cmd.Dir = t.workDir
 	// Separate stdout/stderr (not CombinedOutput) so a genuine gh failure
 	// (auth expired, network error, unknown/stale pr_number) can be told
@@ -215,6 +218,9 @@ func (t *GitPRTool) checksPR(ctx context.Context, args map[string]any) (ToolResu
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderrBuf
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		return NewErrorResult(fmt.Sprintf("gh pr checks interrupted: %v", ctx.Err())), nil
+	}
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
 		// Not even a normal exit (couldn't start gh, etc.) — always an error.
@@ -243,7 +249,7 @@ func formatDetail(detail string) string {
 
 func (t *GitPRTool) mergePR(ctx context.Context, args map[string]any) (ToolResult, error) {
 	prNum, _ := GetString(args, "pr_number")
-	cmd := exec.CommandContext(ctx, "gh", "pr", "merge", prNum, "--merge")
+	cmd := newProcessGroupCommand(ctx, "gh", "pr", "merge", prNum, "--merge")
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -254,7 +260,7 @@ func (t *GitPRTool) mergePR(ctx context.Context, args map[string]any) (ToolResul
 
 func (t *GitPRTool) closePR(ctx context.Context, args map[string]any) (ToolResult, error) {
 	prNum, _ := GetString(args, "pr_number")
-	cmd := exec.CommandContext(ctx, "gh", "pr", "close", prNum)
+	cmd := newProcessGroupCommand(ctx, "gh", "pr", "close", prNum)
 	cmd.Dir = t.workDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -274,7 +280,7 @@ func (t *GitPRTool) generatePRDescription(ctx context.Context, base string) (str
 	}
 
 	// Get commits since base
-	logCmd := exec.CommandContext(ctx, "git", "log", base+"..HEAD", "--oneline", "--no-decorate")
+	logCmd := newProcessGroupCommand(ctx, "git", "log", base+"..HEAD", "--oneline", "--no-decorate")
 	logCmd.Dir = t.workDir
 	logOutput, err := logCmd.Output()
 	if err != nil {
@@ -317,7 +323,7 @@ func (t *GitPRTool) generatePRDescription(ctx context.Context, base string) (str
 	body.WriteString("## Summary\n\n")
 
 	// Get diff stats
-	statCmd := exec.CommandContext(ctx, "git", "diff", "--stat", base+"..HEAD")
+	statCmd := newProcessGroupCommand(ctx, "git", "diff", "--stat", base+"..HEAD")
 	statCmd.Dir = t.workDir
 	statOutput, _ := statCmd.Output()
 
@@ -343,7 +349,7 @@ func (t *GitPRTool) generatePRDescription(ctx context.Context, base string) (str
 // detectDefaultBranch finds the default branch name (main or master).
 func (t *GitPRTool) detectDefaultBranch(ctx context.Context) string {
 	// Try to detect from remote
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+	cmd := newProcessGroupCommand(ctx, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
 	cmd.Dir = t.workDir
 	output, err := cmd.Output()
 	if err == nil {
@@ -357,7 +363,7 @@ func (t *GitPRTool) detectDefaultBranch(ctx context.Context) string {
 
 	// Fallback: check if main or master exists
 	for _, name := range []string{"main", "master"} {
-		checkCmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", name)
+		checkCmd := newProcessGroupCommand(ctx, "git", "rev-parse", "--verify", name)
 		checkCmd.Dir = t.workDir
 		if err := checkCmd.Run(); err == nil {
 			return name

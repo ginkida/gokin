@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"google.golang.org/genai"
@@ -114,7 +113,7 @@ func (t *GitAddTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		cmdArgs = append(cmdArgs, paths...)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 
 	output, err := cmd.CombinedOutput()
@@ -123,7 +122,7 @@ func (t *GitAddTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 	}
 
 	// Get status after add to show what was staged
-	statusCmd := exec.CommandContext(ctx, "git", "status", "--short")
+	statusCmd := newProcessGroupCommand(ctx, "git", "status", "--short")
 	statusCmd.Dir = t.workDir
 	statusOutput, _ := statusCmd.Output()
 

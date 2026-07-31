@@ -7,6 +7,26 @@ import (
 	"gokin/internal/security"
 )
 
+// canonicalToolWorkDir resolves the trusted workspace root supplied by the
+// application before model-provided paths are evaluated against it. This is
+// intentionally only for the construction-time root: on macOS a legitimate
+// temp/workspace path commonly starts with /var (a system symlink to
+// /private/var), while model-supplied symlinks must remain rejected.
+func canonicalToolWorkDir(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(filepath.Clean(workDir))
+	if err != nil {
+		return filepath.Clean(workDir)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err == nil {
+		return resolved
+	}
+	return absolute
+}
+
 // newWorkspacePathValidator builds the fail-closed filesystem boundary shared
 // by workspace-scoped tools. An empty workDir deliberately leaves the
 // validator nil: callers must reject execution rather than silently treating

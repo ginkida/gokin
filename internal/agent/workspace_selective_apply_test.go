@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,52 @@ func TestFinalizeAgentWorkspaceHonorsPerFileReview(t *testing.T) {
 	}
 	if got := result.Metadata["isolated_workspace_review_rejected_files"]; got != 1 {
 		t.Fatalf("rejected metadata = %v, want 1", got)
+	}
+}
+
+func TestFinalizeAgentWorkspaceReviewHonorsRunCancellation(t *testing.T) {
+	base := initGitRepo(t, map[string]string{"tracked.txt": "original\n"})
+	workspace, err := prepareGitWorktree(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = workspace.Cleanup() }()
+	if err := os.WriteFile(filepath.Join(workspace.Root, "tracked.txt"), []byte("changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	agent := &Agent{
+		ID:                "cancelled-review",
+		Type:              "writer",
+		workDir:           workspace.Root,
+		isolatedWorkspace: workspace,
+		runCtx:            runCtx,
+	}
+	runner := NewRunner(context.Background(), nil, nil, base)
+	reviewCalled := false
+	runner.SetWorkspaceReviewHandler(func(ctx context.Context, _ []WorkspaceChangePreview) ([]string, error) {
+		reviewCalled = true
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("review context error = %v, want context.Canceled", ctx.Err())
+		}
+		return nil, ctx.Err()
+	})
+	result := &AgentResult{
+		AgentID: agent.ID, Type: agent.Type,
+		Status: AgentStatusCompleted, Completed: true,
+	}
+	err = runner.finalizeAgentWorkspace(agent, result)
+	if !reviewCalled {
+		t.Fatal("workspace review handler was not called")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("finalization error = %v, want wrapped context.Canceled", err)
+	}
+	assertFileContent(t, filepath.Join(base, "tracked.txt"), "original\n")
+	if result.Metadata["isolated_workspace_apply_back"] == true {
+		t.Fatal("cancelled review applied changes back to primary workspace")
 	}
 }
 

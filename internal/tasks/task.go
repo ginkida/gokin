@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -187,6 +189,26 @@ func (b *safeBuffer) String() string {
 	return s
 }
 
+// FullString returns the complete file-backed output when the in-memory cap
+// was exceeded. It falls back to String when file persistence was unavailable
+// or failed, keeping callers honest about the evidence they actually have.
+func (b *safeBuffer) FullString() string {
+	b.mu.Lock()
+	truncated := b.truncated
+	path := b.filePath
+	fileFailed := b.fileFailed
+	b.mu.Unlock()
+
+	if !truncated || path == "" || fileFailed {
+		return b.String()
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return b.String()
+	}
+	return string(data)
+}
+
 // SetOutputFile configures file-backed output streaming.
 func (b *safeBuffer) SetOutputFile(path string) error {
 	b.mu.Lock()
@@ -249,6 +271,8 @@ type Task struct {
 	processStarted bool
 	done           chan struct{} // closed when task reaches a terminal state
 	doneOnce       sync.Once
+	summaryOnce    sync.Once
+	summary        string
 	mu             sync.RWMutex
 }
 
@@ -489,31 +513,86 @@ func (t *Task) Duration() time.Duration {
 
 // Info returns a summary of the task.
 type Info struct {
-	ID        string
-	Command   string
-	Status    string
-	Output    string
-	Error     string
-	ExitCode  int
-	Duration  time.Duration
-	StartTime time.Time
-	EndTime   time.Time
+	ID         string
+	Command    string
+	Status     string
+	Summary    string
+	Output     string
+	OutputFile string
+	Error      string
+	ExitCode   int
+	Duration   time.Duration
+	StartTime  time.Time
+	EndTime    time.Time
 }
 
 // GetInfo returns task information.
 func (t *Task) GetInfo() Info {
 	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	return Info{
-		ID:        t.ID,
-		Command:   t.Command,
-		Status:    t.Status.String(),
-		Output:    t.Output.String(),
-		Error:     t.Error,
-		ExitCode:  t.ExitCode,
-		Duration:  t.durationLocked(),
-		StartTime: t.StartTime,
-		EndTime:   t.EndTime,
+	info := Info{
+		ID:         t.ID,
+		Command:    t.Command,
+		Status:     t.Status.String(),
+		Output:     t.Output.String(),
+		OutputFile: t.Output.FilePath(),
+		Error:      t.Error,
+		ExitCode:   t.ExitCode,
+		Duration:   t.durationLocked(),
+		StartTime:  t.StartTime,
+		EndTime:    t.EndTime,
 	}
+	finished := false
+	select {
+	case <-t.done:
+		finished = true
+	default:
+	}
+	t.mu.RUnlock()
+
+	if finished {
+		t.summaryOnce.Do(func() {
+			t.summary = VerificationSummary(t.Command, t.Output.FullString())
+		})
+		info.Summary = t.summary
+	}
+	return info
+}
+
+var cargoTestSummaryRE = regexp.MustCompile(`(?m)^test result: (?:ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out`)
+
+// VerificationSummary extracts durable evidence from a completed shell
+// command's full captured output. In particular, Cargo emits one result line
+// per crate/target/doc-test; the final tail often shows only a zero-test
+// doc-test harness. Aggregating all lines keeps the actual workspace totals
+// visible even when UI detail output is shortened.
+func VerificationSummary(command, output string) string {
+	if !strings.Contains(strings.ToLower(command), "cargo test") {
+		return ""
+	}
+	matches := cargoTestSummaryRE.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+
+	var passed, failed, ignored, measured, filtered int
+	for _, match := range matches {
+		values := []*int{&passed, &failed, &ignored, &measured, &filtered}
+		for i, dst := range values {
+			if n, err := strconv.Atoi(match[i+1]); err == nil {
+				*dst += n
+			}
+		}
+	}
+
+	summary := fmt.Sprintf("Cargo test totals: %d passed; %d failed", passed, failed)
+	if ignored > 0 {
+		summary += fmt.Sprintf("; %d ignored", ignored)
+	}
+	if measured > 0 {
+		summary += fmt.Sprintf("; %d measured", measured)
+	}
+	if filtered > 0 {
+		summary += fmt.Sprintf("; %d filtered out", filtered)
+	}
+	return fmt.Sprintf("%s across %d test harnesses.", summary, len(matches))
 }

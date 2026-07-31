@@ -179,3 +179,26 @@ func (m *ToolMetrics) Lookup(tool string) (p95 time.Duration, successRate float6
 	}
 	return buf[p95Index(len(buf))], float64(s.successCount) / float64(calls), true
 }
+
+// recordToolPhaseOutcome feeds every foreground tool result into the metrics
+// collectors and the router's conversation-state inference. Keeping these
+// consumers on the executor's one terminal observer prevents success/error
+// semantics from drifting between telemetry and discuss-mode behavior.
+func (a *App) recordToolPhaseOutcome(tool string, d time.Duration, success bool) {
+	if a == nil {
+		return
+	}
+	if a.phaseMetrics != nil {
+		a.phaseMetrics.Record(PhaseTool, d)
+	}
+	if a.toolMetrics != nil {
+		kind := ""
+		if !success {
+			kind = "other"
+		}
+		a.toolMetrics.Record(tool, d, success, kind)
+	}
+	if a.taskRouter != nil {
+		a.taskRouter.TrackOperation(tool, success)
+	}
+}

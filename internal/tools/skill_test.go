@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"gokin/internal/permission"
 	"gokin/internal/skills"
 )
 
@@ -455,5 +457,247 @@ func TestSkillToolListAndFailedLoadDoNotMutateInvocationLedger(t *testing.T) {
 	}
 	if got := tool.InvocationLedger().SnapshotNewestFirst(); len(got) != 0 {
 		t.Fatalf("non-load operations recorded invocations: %#v", got)
+	}
+}
+
+func TestSkillToolAllowedToolsRequireProjectTrustAndResetPerTurn(t *testing.T) {
+	root := t.TempDir()
+	writeToolSkill(t, root, "commit", `---
+description: Commit reviewed changes
+allowed-tools: Read Bash(git status *)
+---
+Review status and commit when requested.`)
+	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{
+		Path: root, Source: "project",
+	}}))
+
+	untrusted, err := tool.Execute(context.Background(), map[string]any{"name": "commit"})
+	if err != nil || !untrusted.Success {
+		t.Fatalf("untrusted load = %#v, %v", untrusted, err)
+	}
+	untrustedData, _ := untrusted.Data.(map[string]any)
+	if untrustedData["permission_grants_active"] != false ||
+		!strings.Contains(untrustedData["permission_grants_ignored"].(string), "not trusted") ||
+		len(tool.ActivePermissionGrants()) != 0 {
+		t.Fatalf("untrusted grants = %#v active=%v", untrustedData, tool.ActivePermissionGrants())
+	}
+
+	tool.SetWorkspaceTrusted(true)
+	trusted, err := tool.Execute(context.Background(), map[string]any{"name": "commit"})
+	if err != nil || !trusted.Success {
+		t.Fatalf("trusted load = %#v, %v", trusted, err)
+	}
+	trustedData, _ := trusted.Data.(map[string]any)
+	if trustedData["permission_grants_active"] != true {
+		t.Fatalf("trusted data = %#v", trustedData)
+	}
+	if got := strings.Join(tool.ActivePermissionGrants(), ","); got != "bash(git status *),read" {
+		t.Fatalf("active grants = %q", got)
+	}
+
+	tool.ResetActivePermissionGrants()
+	if got := tool.ActivePermissionGrants(); len(got) != 0 {
+		t.Fatalf("grants survived turn reset: %#v", got)
+	}
+}
+
+func TestSkillToolGlobalAllowedToolsAreUserTrusted(t *testing.T) {
+	root := t.TempDir()
+	writeToolSkill(t, root, "format", `---
+description: Format a document
+allowed-tools: [Read, Write]
+---
+Format the requested document.`)
+	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{
+		Path: root, Source: "global",
+	}}))
+
+	result, err := tool.Execute(context.Background(), map[string]any{"name": "format"})
+	if err != nil || !result.Success {
+		t.Fatalf("global load = %#v, %v", result, err)
+	}
+	if got := strings.Join(tool.ActivePermissionGrants(), ","); got != "read,write" {
+		t.Fatalf("global grants = %q", got)
+	}
+}
+
+func TestSkillToolDisallowedToolsNeedNoWorkspaceTrustAndResetPerTurn(t *testing.T) {
+	root := t.TempDir()
+	writeToolSkill(t, root, "review", `---
+description: Review without mutations or pushes
+disallowed-tools: Write Bash(git push *)
+---
+Review without modifying the workspace.`)
+	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{
+		Path: root, Source: "project",
+	}}))
+
+	result, err := tool.Execute(context.Background(), map[string]any{"name": "review"})
+	if err != nil || !result.Success {
+		t.Fatalf("load = %#v, %v", result, err)
+	}
+	data, _ := result.Data.(map[string]any)
+	if data["permission_denies_active"] != true {
+		t.Fatalf("deny metadata = %#v", data)
+	}
+	if got := strings.Join(tool.ActivePermissionDenies(), ","); got != "bash(git push *),write" {
+		t.Fatalf("active denies = %q", got)
+	}
+
+	tool.ResetActivePermissionGrants()
+	if got := tool.ActivePermissionDenies(); len(got) != 0 {
+		t.Fatalf("denies survived turn reset: %#v", got)
+	}
+}
+
+func TestSkillToolExplicitUserGrantPromotesIntoExactlyOneTurn(t *testing.T) {
+	root := t.TempDir()
+	writeToolSkill(t, root, "generate", `---
+description: Generate a file
+allowed-tools: Write
+---
+Write the requested file.`)
+	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{
+		Path: root, Source: "global",
+	}}))
+	registry := NewRegistry()
+	registry.MustRegister(tool)
+
+	result, err := tool.ExecuteForUser(map[string]any{"name": "generate"})
+	if err != nil || !result.Success {
+		t.Fatalf("explicit load = %#v, %v", result, err)
+	}
+	if got := tool.ActivePermissionGrants(); len(got) != 0 {
+		t.Fatalf("pending /skill authority was active before prompt handoff: %#v", got)
+	}
+	BeginSkillPermissionTurn(registry)
+	if got := strings.Join(tool.ActivePermissionGrants(), ","); got != "write" {
+		t.Fatalf("promoted grants = %q", got)
+	}
+	BeginSkillPermissionTurn(registry)
+	if got := tool.ActivePermissionGrants(); len(got) != 0 {
+		t.Fatalf("one-shot explicit grant survived a later turn: %#v", got)
+	}
+}
+
+func TestSkillToolExplicitUserDenyPromotesIntoExactlyOneTurn(t *testing.T) {
+	root := t.TempDir()
+	writeToolSkill(t, root, "review", `---
+description: Review without writes
+disallowed-tools: Write
+---
+Review the requested files.`)
+	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{
+		Path: root, Source: "project",
+	}}))
+	registry := NewRegistry()
+	registry.MustRegister(tool)
+
+	result, err := tool.ExecuteForUser(map[string]any{"name": "review"})
+	if err != nil || !result.Success {
+		t.Fatalf("explicit load = %#v, %v", result, err)
+	}
+	if got := tool.ActivePermissionDenies(); len(got) != 0 {
+		t.Fatalf("pending /skill deny was active before prompt handoff: %#v", got)
+	}
+	BeginSkillPermissionTurn(registry)
+	if got := strings.Join(tool.ActivePermissionDenies(), ","); got != "write" {
+		t.Fatalf("promoted denies = %q", got)
+	}
+	BeginSkillPermissionTurn(registry)
+	if got := tool.ActivePermissionDenies(); len(got) != 0 {
+		t.Fatalf("one-shot explicit deny survived a later turn: %#v", got)
+	}
+}
+
+func TestExecutorHonorsSkillGrantOnlyUntilTurnReset(t *testing.T) {
+	workDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillRoot := t.TempDir()
+	writeToolSkill(t, skillRoot, "generate", `---
+description: Generate a requested file
+allowed-tools: Write
+---
+Write the requested file.`)
+	skillTool := NewSkillToolWithCatalogAndWorkDir(skills.NewCatalog([]skills.Root{{
+		Path: skillRoot, Source: "project",
+	}}), workDir)
+	skillTool.SetWorkspaceTrusted(true)
+
+	registry := NewRegistry()
+	registry.MustRegister(skillTool)
+	registry.MustRegister(NewWriteTool(workDir))
+	executor := NewExecutor(registry, nil, 2*time.Second)
+	executor.SetPermissions(permission.NewManager(permission.DefaultRules(), true))
+
+	if loaded, err := skillTool.Execute(context.Background(), map[string]any{"name": "generate"}); err != nil || !loaded.Success {
+		t.Fatalf("load = %#v, %v", loaded, err)
+	}
+	firstPath := filepath.Join(workDir, "first.txt")
+	first := executor.doExecuteTool(context.Background(), testFunctionCall(
+		"write-first", "write", map[string]any{"file_path": firstPath, "content": "first"},
+	))
+	if !first.Success {
+		t.Fatalf("granted write failed: %#v", first)
+	}
+
+	ResetSkillPermissionGrants(registry)
+	secondPath := filepath.Join(workDir, "second.txt")
+	second := executor.doExecuteTool(context.Background(), testFunctionCall(
+		"write-second", "write", map[string]any{"file_path": secondPath, "content": "second"},
+	))
+	if second.Success || second.PolicyBlock == nil || second.PolicyBlock.Kind != PolicyBlockPermission {
+		t.Fatalf("write retained stale skill authority: %#v", second)
+	}
+	if _, err := os.Stat(secondPath); !os.IsNotExist(err) {
+		t.Fatalf("denied write changed filesystem: %v", err)
+	}
+}
+
+func TestExecutorHonorsSkillDenyEvenWhenPromptsAreBypassed(t *testing.T) {
+	workDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillRoot := t.TempDir()
+	writeToolSkill(t, skillRoot, "review", `---
+description: Review without writes
+disallowed-tools: Write
+---
+Review the requested files without modifying them.`)
+	skillTool := NewSkillToolWithCatalogAndWorkDir(skills.NewCatalog([]skills.Root{{
+		Path: skillRoot, Source: "project",
+	}}), workDir)
+
+	registry := NewRegistry()
+	registry.MustRegister(skillTool)
+	registry.MustRegister(NewWriteTool(workDir))
+	executor := NewExecutor(registry, nil, 2*time.Second)
+	executor.SetPermissions(permission.NewManager(permission.DefaultRules(), false))
+
+	if loaded, err := skillTool.Execute(context.Background(), map[string]any{"name": "review"}); err != nil || !loaded.Success {
+		t.Fatalf("load = %#v, %v", loaded, err)
+	}
+	blockedPath := filepath.Join(workDir, "blocked.txt")
+	blocked := executor.doExecuteTool(context.Background(), testFunctionCall(
+		"write-blocked", "write", map[string]any{"file_path": blockedPath, "content": "blocked"},
+	))
+	if blocked.Success || blocked.PolicyBlock == nil ||
+		blocked.PolicyBlock.Kind != PolicyBlockPermission {
+		t.Fatalf("skill-denied write = %#v", blocked)
+	}
+	if _, err := os.Stat(blockedPath); !os.IsNotExist(err) {
+		t.Fatalf("skill-denied write changed filesystem: %v", err)
+	}
+
+	ResetSkillPermissionGrants(registry)
+	allowedPath := filepath.Join(workDir, "allowed.txt")
+	allowed := executor.doExecuteTool(context.Background(), testFunctionCall(
+		"write-allowed", "write", map[string]any{"file_path": allowedPath, "content": "allowed"},
+	))
+	if !allowed.Success {
+		t.Fatalf("reset deny still blocked write: %#v", allowed)
 	}
 }

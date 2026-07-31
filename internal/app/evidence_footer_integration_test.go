@@ -43,6 +43,20 @@ func TestAppBuildEvidenceFooterIfEnabled_DefaultOnProducesFooter(t *testing.T) {
 	}
 }
 
+func TestAppBuildEvidenceFooterIfEnabled_BareSuppressesFooter(t *testing.T) {
+	app := &App{
+		config: &config.Config{
+			Bare:       true,
+			Completion: config.CompletionConfig{EvidenceFooter: true},
+		},
+		responseTouchedPaths: []string{"internal/app/foo.go"},
+		responseCommands:     []string{"go test ./..."},
+	}
+	if got := app.buildEvidenceFooterIfEnabled("Wrote the change."); got != "" {
+		t.Fatalf("bare footer = %q, want empty", got)
+	}
+}
+
 // Regression: with no config present (nil pointer), the method must not
 // crash and must behave as if the knob is on — otherwise tests that
 // construct a minimal App for other features would silently lose the

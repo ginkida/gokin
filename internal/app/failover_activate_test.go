@@ -152,6 +152,9 @@ func TestActivateEmergencyFailover_PropagatesSystemInstructionAndThinking(t *tes
 			API: config.APIConfig{GLMKey: "x", KimiKey: "y"},
 		},
 	}
+	if err := app.ConfigureRunSystemPrompt(nil, "run-only"); err != nil {
+		t.Fatal(err)
+	}
 
 	restore := stubNewClientForFailover(t, func(context.Context, *config.Config, string) (client.Client, error) {
 		return newMock, nil
@@ -162,8 +165,11 @@ func TestActivateEmergencyFailover_PropagatesSystemInstructionAndThinking(t *tes
 		t.Fatalf("activate: %v", err)
 	}
 
-	if got := newMock.SystemInstruction(); got != "be concise" {
-		t.Errorf("SystemInstruction on new client = %q, want 'be concise'", got)
+	if got := newMock.SystemInstruction(); got != "be concise\n\nrun-only" {
+		t.Errorf("SystemInstruction on new client = %q, want composed prompt", got)
+	}
+	if got := session.GetSystemInstruction(); got != "be concise" {
+		t.Errorf("persisted instruction = %q, want canonical prompt", got)
 	}
 	if got := newMock.ThinkingBudget(); got != 2048 {
 		t.Errorf("ThinkingBudget on new client = %d, want 2048", got)

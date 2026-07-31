@@ -139,12 +139,23 @@ Run it locally after adding or editing any fixture.
 
 Snapshot a baseline per provider (uses your configured API keys — this
 spends real tokens; the full set is ~34 agent runs per provider). The
-committed baselines predate the 8 strong-model discriminator scenarios
-(`go_wrong_layer_normalize`, `go_two_bugs_stats`, `go_iface_drift_contract`,
+committed baselines currently predate 11 scenarios
+(`go_wrong_layer_paging`, `go_refactor_order_contract`, `go_cross_pkg_classify`,
+`go_wrong_layer_normalize`, `go_two_bugs_stats`, `go_iface_drift_contract`,
 `go_preserve_render_guard`, `go_int_overflow_average`, `py_mutable_default_tally`,
 `node_promise_order`, `go_enum_threading`) — regenerate them to capture those
-rows. To validate just the new set without a full run, scope it with repeated
-`--scenario` flags:
+rows. Check baseline coverage without spending provider tokens:
+
+```sh
+go run ./cmd/gokin eval baseline-audit \
+  --input evals/coding/baselines/glm.jsonl \
+  --input evals/coding/baselines/deepseek.jsonl \
+  --input evals/coding/baselines/kimi.jsonl
+```
+
+The command fails closed on missing, unknown, or duplicate rows in any
+provider/model cohort. To validate just the new set without a full run, scope
+the provider run with repeated `--scenario` flags:
 
 ```sh
 go build -o /tmp/gokin ./cmd/gokin

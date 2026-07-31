@@ -1931,14 +1931,16 @@ func hashPath(path string) string {
 // 2s window.
 var saveDebounceInterval = 2 * time.Second
 
-// saveIOHookForTest, when non-nil, is invoked at the start of the debounced
-// save's disk-write phase — after ioMu is acquired, before any file write.
+// saveIOHookForTest, when non-nil, is invoked with the owning Store at the
+// start of the debounced save's disk-write phase — after ioMu is acquired,
+// before any file write. Passing the owner lets tests ignore stale timers from
+// stores created by earlier tests instead of consuming the wrong global hook.
 // Test-only seam for deterministically widening the write-phase race window
 // (see store_flush_race_test.go). The seam lock prevents an old timer callback
 // from racing a test cleanup that restores these package-level values.
 var (
 	saveTestSeamMu    sync.RWMutex
-	saveIOHookForTest func()
+	saveIOHookForTest func(*Store)
 )
 
 // scheduleSave schedules a debounced save operation.
@@ -2014,7 +2016,7 @@ func (s *Store) scheduleSave() {
 		saveHook := saveIOHookForTest
 		saveTestSeamMu.RUnlock()
 		if saveHook != nil {
-			saveHook()
+			saveHook(s)
 		}
 
 		// Save outside lock — disk I/O no longer blocks readers/writers.

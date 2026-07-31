@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gokin/internal/logging"
+	"gokin/internal/undo"
 )
 
 // ApprovalDecision represents the user's decision on a plan.
@@ -719,6 +720,9 @@ func (m *Manager) CompleteStep(stepID int, output string) {
 	}
 
 	plan.CompleteStep(stepID, output)
+	if undoExt := m.GetUndoExtension(); undoExt != nil {
+		undoExt.RecordExecutedStep(stepID)
+	}
 
 	// Save progress (for crash recovery)
 	if store != nil {
@@ -972,6 +976,30 @@ func (m *Manager) SavePlanCheckpoint() error {
 	}
 
 	return undoExt.SaveCheckpoint()
+}
+
+// BeginPlanUndoCapture starts an exact file-change capture for the current
+// execution segment. snapshot must be taken immediately before plan tools
+// begin running.
+func (m *Manager) BeginPlanUndoCapture(snapshot undo.HistorySnapshot) error {
+	m.mu.RLock()
+	undoExt := m.undoExtension
+	m.mu.RUnlock()
+	if undoExt == nil {
+		return nil
+	}
+	return undoExt.BeginCapture(snapshot)
+}
+
+// FinishPlanUndoCapture closes the active execution segment and records the
+// exact changes that appeared since BeginPlanUndoCapture.
+func (m *Manager) FinishPlanUndoCapture(snapshot undo.HistorySnapshot) {
+	m.mu.RLock()
+	undoExt := m.undoExtension
+	m.mu.RUnlock()
+	if undoExt != nil {
+		undoExt.FinishCapture(snapshot)
+	}
 }
 
 // GetUndoExtension returns the undo extension (if enabled).

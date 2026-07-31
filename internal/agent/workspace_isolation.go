@@ -15,12 +15,16 @@ import (
 
 	"gokin/internal/git"
 	"gokin/internal/logging"
+	"gokin/internal/tools"
 )
 
-// worktreeRemoveTimeout bounds `git worktree remove --force`. If git hangs
-// (index lock, zombie subprocess), the command is killed so the agent can
-// complete shutdown and the next session can reuse the base workspace.
-const worktreeRemoveTimeout = 30 * time.Second
+const (
+	// Workspace git operations touch shared repository metadata and must never
+	// pin an agent forever on a stale lock/helper process.
+	worktreePrepareTimeout = 2 * time.Minute
+	worktreeRemoveTimeout  = 30 * time.Second
+	workspaceGitTimeout    = 5 * time.Minute
+)
 
 type workspaceIsolationMode string
 
@@ -154,10 +158,16 @@ func prepareGitWorktree(baseWorkDir string, applyBackOnSuccess bool) (*isolatedW
 	}
 
 	worktreeDir := filepath.Join(parent, "workspace")
-	cmd := exec.Command("git", "-C", baseWorkDir, "worktree", "add", "--detach", worktreeDir, "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), worktreePrepareTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", baseWorkDir, "worktree", "add", "--detach", worktreeDir, "HEAD")
+	tools.KillProcessGroupOnCancel(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		_ = os.RemoveAll(parent)
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("git worktree add timed out after %s", worktreePrepareTimeout)
+		}
 		return nil, fmt.Errorf("git worktree add failed: %s", strings.TrimSpace(string(output)))
 	}
 
@@ -170,6 +180,7 @@ func prepareGitWorktree(baseWorkDir string, applyBackOnSuccess bool) (*isolatedW
 			ctx, cancel := context.WithTimeout(context.Background(), worktreeRemoveTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "git", "-C", baseWorkDir, "worktree", "remove", "--force", worktreeDir)
+			tools.KillProcessGroupOnCancel(cmd)
 			output, err := cmd.CombinedOutput()
 			removeErr := os.RemoveAll(parent)
 			if err != nil {
@@ -367,13 +378,23 @@ func runGitCommand(workDir string, args ...string) ([]byte, error) {
 }
 
 func runGitCommandWithInput(workDir string, input []byte, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceGitTimeout)
+	defer cancel()
+
 	cmdArgs := append([]string{"-C", workDir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	tools.KillProcessGroupOnCancel(cmd)
 	if len(input) > 0 {
 		cmd.Stdin = bytes.NewReader(input)
 	}
 
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("git %s timed out after %s: %w", strings.Join(args, " "), workspaceGitTimeout, ctx.Err())
+	}
+	if ctx.Err() == context.Canceled {
+		return output, fmt.Errorf("git %s cancelled: %w", strings.Join(args, " "), ctx.Err())
+	}
 	if err != nil {
 		return output, formatGitCommandError(args, output, err)
 	}

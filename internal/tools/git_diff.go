@@ -120,7 +120,7 @@ func (t *GitDiffTool) Execute(ctx context.Context, args map[string]any) (ToolRes
 		cmdArgs = append(cmdArgs, "--", validatedFile)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 
 	output, err := cmd.Output()

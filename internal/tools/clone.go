@@ -61,6 +61,7 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		sandboxEnabled := t.sandboxEnabled
 		unrestrictedMode := t.unrestrictedMode
 		managedApplyBack := t.managedWorkspaceApplyBack
+		backgroundAllowed := t.backgroundAllowed
 		workspaceBoundaryEnabled := t.workspaceBoundaryEnabled
 		workspaceRoot := t.workspaceRoot
 		taskManager := t.taskManager
@@ -71,6 +72,7 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		cloned.SetTimeout(timeout)
 		cloned.SetSandboxEnabled(sandboxEnabled)
 		cloned.SetUnrestrictedMode(unrestrictedMode)
+		cloned.SetBackgroundAllowed(backgroundAllowed)
 		if workDir != "" {
 			// An explicit agent workspace is a new security boundary, regardless
 			// of the foreground shell's current boundary.
@@ -169,11 +171,26 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		// foreground instance, so a worktree-isolated agent's SetGrantedDirs
 		// clobbered the shared pathValidator (and multiple isolated agents raced
 		// it). Fresh per-agent instance; the runner re-applies grants after clone.
-		return NewGoToDefinitionTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewGoToDefinitionTool(pickWorkDir(workDir, t.workDir))
+		if workDir == "" {
+			// Non-isolated agents share the foreground workspace and may safely
+			// reuse its serialized managed-gopls provider. An explicit worktree
+			// must never send paths to the foreground provider.
+			cloned.SetSemanticProvider(t.semanticProvider())
+		}
+		return cloned
 	case *FindReferencesTool:
-		return NewFindReferencesTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewFindReferencesTool(pickWorkDir(workDir, t.workDir))
+		if workDir == "" {
+			cloned.SetSemanticProvider(t.semanticProvider())
+		}
+		return cloned
 	case *GoSearchTool:
-		return NewGoSearchTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewGoSearchTool(pickWorkDir(workDir, t.workDir))
+		if workDir == "" {
+			cloned.SetSemanticProvider(t.semanticProvider())
+		}
+		return cloned
 	case *ReviewChangesTool:
 		// Carries workDir (git commands run with cmd.Dir = workDir). Without a
 		// clone case a worktree-isolated agent's self-review ran `git diff`
@@ -221,10 +238,21 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		// foreground catalog. With no override, preserve the existing binding
 		// while still returning an agent-local tool instance; Catalog itself is
 		// immutable-by-snapshot and safe to share across concurrent callers.
+		//
+		// Skill DENIES travel with the clone: a `disallowed-tools` restriction
+		// the active skill imposed must not be escapable by delegating the same
+		// work to a sub-agent. Grants deliberately do NOT travel — inheriting
+		// authority would be fail-open.
 		if workDir != "" {
-			return NewSkillTool(workDir)
+			cloned := NewSkillTool(workDir)
+			cloned.SetWorkspaceTrusted(t.WorkspaceTrusted())
+			cloned.InheritPermissionDenies(t.ActivePermissionDenies())
+			return cloned
 		}
-		return NewSkillToolWithCatalogAndWorkDir(t.catalog, t.workDir)
+		cloned := NewSkillToolWithCatalogAndWorkDir(t.catalog, t.workDir)
+		cloned.SetWorkspaceTrusted(t.WorkspaceTrusted())
+		cloned.InheritPermissionDenies(t.ActivePermissionDenies())
+		return cloned
 	case *ToolsListTool:
 		// Registry-aware cloning is handled by CloneRegistryForWorkDir.
 		return NewToolsListTool(nil)

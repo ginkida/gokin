@@ -64,6 +64,36 @@ func TestDoctorCommand_NoStaleTestCommandRef(t *testing.T) {
 	}
 }
 
+func TestDoctorCommandChecksActiveProviderAuthentication(t *testing.T) {
+	t.Setenv("GOKIN_API_KEY", "")
+
+	ollama := &fakeAppForMCP{cfg: &config.Config{
+		API: config.APIConfig{ActiveProvider: "ollama", Backend: "ollama"},
+	}}
+	out, err := (&DoctorCommand{}).Execute(context.Background(), nil, ollama)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "API key not configured") {
+		t.Fatalf("key-optional Ollama reported missing authentication:\n%s", out)
+	}
+
+	wrongProviderKey := &fakeAppForMCP{cfg: &config.Config{
+		API: config.APIConfig{
+			ActiveProvider: "glm",
+			Backend:        "glm",
+			KimiKey:        "configured-for-a-different-provider",
+		},
+	}}
+	out, err = (&DoctorCommand{}).Execute(context.Background(), nil, wrongProviderKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "API key not configured") {
+		t.Fatalf("unusable key for another provider masked missing GLM auth:\n%s", out)
+	}
+}
+
 // TestPrettyHomePath pins the $HOME-collapse helper used by /status
 // and /doctor to keep paths short in their output.
 func TestPrettyHomePath(t *testing.T) {

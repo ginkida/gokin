@@ -21,6 +21,7 @@ import (
 	"gokin/internal/cache"
 	"gokin/internal/chat"
 	"gokin/internal/client"
+	"gokin/internal/codeintel"
 	"gokin/internal/commands"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
@@ -153,11 +154,25 @@ type App struct {
 	tokenRefreshTimeout time.Duration
 	promptBuilder       *appcontext.PromptBuilder
 	contextAgent        *appcontext.ContextAgent
+	// runSystemPromptMu guards invocation-scoped prompt customization. The
+	// canonical/default instruction remains in chat.Session; only the active
+	// provider client receives the composed replacement/append value. Keeping
+	// these separate prevents CLI-only instructions and secrets from leaking
+	// into resumable session files.
+	runSystemPromptMu          sync.RWMutex
+	runSystemPromptReplacement string
+	runSystemPromptReplace     bool
+	runSystemPromptAppend      string
+	runStructuredOutputPrompt  string
 
 	// hookFailures tracks per-hook failing streaks so a broken user hook
 	// toasts ONCE per streak, not once per tool call (see hooks_visibility.go).
 	// Self-locking leaf state — never held with a.mu.
 	hookFailures hookFailureTracker
+	// persistenceFailures applies the same once-per-streak anti-spam contract to
+	// hot-path plan saves. A plan can save after every mutating tool call, so a
+	// broken directory must be visible without producing one toast per edit.
+	persistenceFailures hookFailureTracker
 
 	// Permission management
 	permManager *permission.Manager
@@ -245,6 +260,9 @@ type App struct {
 	rateLimiter *ratelimit.Limiter
 	auditLogger *audit.Logger
 	fileWatcher *watcher.Watcher
+	// codeIntelProvider owns the lazy, workspace-scoped gopls process. It is
+	// separate from user MCP servers and must be closed explicitly.
+	codeIntelProvider codeintel.ReadOnlyProvider
 
 	// Task router for intelligent task routing
 	taskRouter *router.Router
@@ -314,6 +332,20 @@ type App struct {
 	headlessAgentUsageScope      agent.InvocationScope
 	headlessAgentUsageScopeOwner *headlessTerminalOutcome
 	headlessCostIncomplete       bool
+	// toolCapabilityCeiling is the exact per-process CLI capability set.
+	// restricted distinguishes an explicit empty --tools set from no ceiling.
+	// Schema filtering and executor runtime enforcement both consume it;
+	// delegated agents inherit its intersection. Guarded by a.mu.
+	toolCapabilityCeiling    []string
+	toolCapabilityRestricted bool
+	// The raw CLI inputs are retained so the ceiling can be recomputed against
+	// a registry that changes at runtime (MCP connect/reconnect/tools_changed).
+	// Without that, a deny-only run would freeze the ceiling to the boot-time
+	// tool list and permanently block every later-registered MCP tool the user
+	// never denied. A nil allow input means "everything the registry has minus
+	// the denies"; a non-nil one is an exact set that must NOT grow.
+	toolCapabilityAllowInput []string
+	toolCapabilityDenyInput  []string
 
 	// Discuss-mode (discuss_mode.go): flags for the foreground "don't jump to
 	// implementation during analysis" gate. turnDiscuss is set at turn start
@@ -427,6 +459,11 @@ type App struct {
 
 	running    bool
 	processing bool // Guards against concurrent message processing
+	// shuttingDown closes foreground admission before graceful shutdown starts.
+	// It is guarded by mu. foregroundWorkers then joins every turn that crossed
+	// that admission boundary before session/client teardown.
+	shuttingDown      bool
+	foregroundWorkers GoroutineTracker
 	// dropSteerLeftovers is set by explicit cancellation and cleared only when
 	// a new foreground operation is accepted. It is guarded by mu and provides
 	// defense in depth for embedders that invoke the execution handler directly.
@@ -545,6 +582,12 @@ func (a *App) markOnboardingWelcomeSeen() {
 
 // Run starts the application.
 func (a *App) Run() error {
+	return a.RunWithInitialPrompt("")
+}
+
+// RunWithInitialPrompt starts the interactive application and submits an
+// optional first user message through the same UI/ownership pipeline as Enter.
+func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 	// Interactive runs own the active session lease for their full lifetime,
 	// including any runtime /resume switches. Keep this defer at the outermost
 	// boundary so early returns and panics do not strand an in-process lease.
@@ -559,7 +602,10 @@ func (a *App) Run() error {
 
 	// Configure logging to file to avoid TUI interference
 	configDir, err := appcontext.GetConfigDir()
-	if err == nil && a.config.Logging.Level != "" {
+	if a.config.Debug {
+		// CLI debug logging is configured before Builder construction so it
+		// also captures startup. Do not replace its explicit sink here.
+	} else if err == nil && a.config.Logging.Level != "" {
 		level := logging.ParseLevel(a.config.Logging.Level)
 		if err := logging.EnableFileLogging(configDir, level); err != nil {
 			// Silently continue with logging disabled
@@ -571,10 +617,12 @@ func (a *App) Run() error {
 	}
 
 	// === Task 5.7: Detect project context once at startup ===
-	a.detectedProjectContext = a.detectProjectContext()
-	if a.detectedProjectContext != "" && a.promptBuilder != nil {
-		a.promptBuilder.SetDetectedContext(a.detectedProjectContext)
-		logging.Debug("project context auto-detected", "length", len(a.detectedProjectContext))
+	if !a.config.Bare {
+		a.detectedProjectContext = a.detectProjectContext()
+		if a.detectedProjectContext != "" && a.promptBuilder != nil {
+			a.promptBuilder.SetDetectedContext(a.detectedProjectContext)
+			logging.Debug("project context auto-detected", "length", len(a.detectedProjectContext))
+		}
 	}
 
 	// Sync plan-mode signal into prompt builder, tool schema, and TUI
@@ -598,8 +646,10 @@ func (a *App) Run() error {
 	}
 
 	// Load input history
-	if err := a.tui.LoadInputHistory(); err != nil {
-		logging.Debug("failed to load input history", "error", err)
+	if !a.config.Bare {
+		if err := a.tui.LoadInputHistory(); err != nil {
+			logging.Debug("failed to load input history", "error", err)
+		}
 	}
 
 	// Auto-load previous session if enabled (skip if already pre-loaded via
@@ -611,7 +661,7 @@ func (a *App) Run() error {
 	var sessionRestored bool
 	if a.sessionPreloaded {
 		sessionRestored = true
-	} else if a.sessionManager != nil {
+	} else if a.sessionManager != nil && !a.config.Bare {
 		// Bound startup auto-resume: LoadLast reads + parses session metadata
 		// from disk; a pathological session dir (thousands of files / a hung
 		// network FS) must not stall cold start unboundedly. Cap it at 5s; on
@@ -699,41 +749,14 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Build model-specific enhancement
-	modelEnhancement := a.buildModelEnhancement()
-
-	// Set system instruction via native API parameter (not as user message)
-	if !sessionRestored {
-		systemPrompt := a.promptBuilder.Build()
-		systemPrompt += modelEnhancement
-		a.client.SetSystemInstruction(systemPrompt)
-		a.session.SetSystemInstruction(systemPrompt)
-	} else {
+	// Set system instruction via native API parameter (not as user message).
+	if sessionRestored {
 		// Restored session: clean up legacy system prompt messages from history
 		a.stripLegacySystemMessages()
-
-		// If plan mode is active for this session, always rebuild the system
-		// instruction — the stored one might be from a previous run where
-		// plan mode was off (no banner) and the model would be confused why
-		// its write/edit tools are gone. Rebuilding guarantees the banner
-		// state matches the current plan-mode flag.
-		if a.planningModeEnabled {
-			systemPrompt := a.promptBuilder.Build()
-			systemPrompt += modelEnhancement
-			a.client.SetSystemInstruction(systemPrompt)
-			a.session.SetSystemInstruction(systemPrompt)
-		} else if saved := a.session.GetSystemInstruction(); saved != "" {
-			// Use saved system instruction — same prompt as when the
-			// session was saved, so tool expectations stay consistent.
-			a.client.SetSystemInstruction(saved)
-		} else {
-			// Legacy session without SystemInstruction — rebuild
-			systemPrompt := a.promptBuilder.Build()
-			systemPrompt += modelEnhancement
-			a.client.SetSystemInstruction(systemPrompt)
-			a.session.SetSystemInstruction(systemPrompt)
-		}
 	}
+	// Plan mode and run-scoped customization rebuild the current canonical
+	// prompt; an ordinary resume keeps its saved prompt for compatibility.
+	a.applyStartupSystemInstruction(sessionRestored)
 
 	// Deliver any disk-restored working memory as per-turn context (it is
 	// NOT part of the system prompt — see roadmap #7 / pushTurnContext).
@@ -853,6 +876,7 @@ func (a *App) Run() error {
 	// Create and run the program. Publish the program reference under
 	// programMu (not a.mu) so safeSendToProgram can observe it from
 	// goroutines that may already hold a.mu (e.g., ApplyConfig).
+	a.tui.SetInitialPrompt(initialPrompt)
 	a.programMu.Lock()
 	a.program = a.tui.GetProgram()
 	a.programMu.Unlock()
@@ -983,6 +1007,15 @@ func (a *App) Run() error {
 	}
 
 	_, runErr := a.program.Run()
+
+	// Bubble Tea invokes handleQuit from inside Model.Update. Waiting for
+	// foreground workers there deadlocks because those workers may be blocked in
+	// Program.Send until Update returns. The callback only closes admission and
+	// cancels work; perform the blocking teardown after the event loop exits.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
+	a.gracefulShutdown(shutdownCtx)
+	shutdownCancel()
+
 	a.tui.Cleanup()
 
 	a.mu.Lock()
@@ -1039,6 +1072,11 @@ func (a *App) handleSubmitWithIntent(message string, explicitUser bool) {
 	}
 	a.sessionLeaseMu.Lock()
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		return
+	}
 	if explicitUser && a.processing && a.dropSteerLeftovers {
 		pos, ok := a.enqueuePostCancelUserPending(message)
 		a.mu.Unlock()
@@ -1068,6 +1106,11 @@ func (a *App) handleSubmitWithIntent(message string, explicitUser bool) {
 		acceptedLineage.sessionID = a.session.GetID()
 	}
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		return
+	}
 	// Esc may have landed after the optimistic check above. Preserve the same
 	// explicit provenance instead of steering into the cancelled executor or
 	// appending an indistinguishable callback-owned FIFO entry.
@@ -1135,6 +1178,11 @@ func (a *App) commitSubmitAfterSteerMiss(message string, explicitUser bool) {
 		commitLineage.sessionID = a.session.GetID()
 	}
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		a.sessionLeaseMu.Unlock()
+		return
+	}
 	if explicitUser && a.processing && a.dropSteerLeftovers {
 		pos, ok := a.enqueuePostCancelUserPending(message)
 		a.mu.Unlock()
@@ -1229,6 +1277,90 @@ func (a *App) startAcceptedSubmitWithRecoveryIdentity(
 	recoveryEpoch uint64,
 	recovery []tools.ToolCheckpoint,
 ) {
+	if !a.foregroundWorkers.Add() {
+		// Shutdown sealed admission after this request claimed processing but
+		// before its launcher ran. It has not touched history or tools yet, so
+		// release the orphaned claim without dispatching queued work. A durable
+		// recovery claim is also proven-unstarted at this exact boundary and can
+		// safely return to scheduled instead of blocking the next launch as an
+		// ambiguous claimed mutation.
+		a.processingMu.Lock()
+		if a.processingCancel != nil {
+			a.processingCancel()
+			a.processingCancel = nil
+		}
+		a.processingMu.Unlock()
+		a.mu.Lock()
+		a.processing = false
+		a.dropSteerLeftovers = true
+		a.mu.Unlock()
+		if recoveryID != "" && recoverySessionID != "" {
+			if err := a.releaseClaimedRecovery(
+				recoveryID, recoverySessionID, recoveryEpoch,
+				"shutdown_before_foreground_start", false); err != nil {
+				logging.Warn("shutdown could not release proven-unstarted recovery",
+					"recovery_id", recoveryID,
+					"session_id", recoverySessionID,
+					"error", err)
+			}
+		}
+		return
+	}
+	workerName := "message-processing"
+	if isCmd {
+		workerName = "command-execution"
+	}
+	a.safeGo(workerName, func() {
+		defer a.foregroundWorkers.Done()
+		a.runAcceptedSubmitWithRecoveryIdentity(
+			ctx, message, name, args, isCmd,
+			recoveryID, recoverySessionID, recoveryMemoryQuery, recoveryEpoch, recovery)
+	})
+}
+
+func (a *App) runAcceptedSubmitWithRecoveryIdentity(
+	ctx context.Context,
+	message, name string,
+	args []string,
+	isCmd bool,
+	recoveryID, recoverySessionID, recoveryMemoryQuery string,
+	recoveryEpoch uint64,
+	recovery []tools.ToolCheckpoint,
+) {
+	// executeCommandCtx and processMessageWithMemoryQuery each own their normal
+	// terminal finalizer. This guard covers the setup before either pipeline is
+	// entered (journal, recovery snapshot, @reference expansion). A panic there
+	// must not leave the application permanently busy merely because safeGo
+	// recovered the goroutine at its outer boundary.
+	pipelineStarted := false
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			logging.Error("accepted foreground setup panicked",
+				"panic", panicValue,
+				"stack", logging.PanicStack())
+			if !pipelineStarted {
+				if recoveryID != "" && recoverySessionID != "" {
+					if err := a.releaseClaimedRecovery(
+						recoveryID, recoverySessionID, recoveryEpoch,
+						"foreground_setup_panic_before_start", true); err != nil {
+						logging.Warn("setup panic left durable recovery claimed",
+							"recovery_id", recoveryID,
+							"session_id", recoverySessionID,
+							"error", err)
+					}
+				}
+				a.processingMu.Lock()
+				a.processingCancel = nil
+				a.processingMu.Unlock()
+				a.finishForegroundProcessing(func() {
+					a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf(
+						"internal error before request execution: %v — your work was saved, please retry",
+						panicValue)))
+				})
+			}
+		}
+	}()
+
 	if recoverySessionID != "" {
 		ctx = withConversationLineage(ctx, recoverySessionID, recoveryEpoch)
 	} else if _, ok := conversationLineageFromContext(ctx); !ok {
@@ -1236,16 +1368,39 @@ func (a *App) startAcceptedSubmitWithRecoveryIdentity(
 		ctx = withConversationLineage(ctx, lineage.sessionID, lineage.epoch)
 	}
 	ctx = withPersistedSideEffectRecovery(ctx, recoveryID, recoverySessionID, recovery)
+	if ctx.Err() != nil {
+		// Add succeeded, but cancellation won the scheduler gap before either
+		// command or model pipeline began. No tool could have run, so a durable
+		// recovery is still provably unstarted and may return to scheduled. Once
+		// a pipeline is entered, cancellation remains conservatively claimed.
+		if recoveryID != "" && recoverySessionID != "" {
+			if err := a.releaseClaimedRecovery(
+				recoveryID, recoverySessionID, recoveryEpoch,
+				"cancelled_before_foreground_pipeline", false); err != nil {
+				logging.Warn("pre-start cancellation left durable recovery claimed",
+					"recovery_id", recoveryID,
+					"session_id", recoverySessionID,
+					"error", err)
+			}
+		}
+		a.processingMu.Lock()
+		a.processingCancel = nil
+		a.processingMu.Unlock()
+		a.finishForegroundProcessing(func() {
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+		})
+		return
+	}
 	// Journal and recovery AFTER unlock (saveRecoverySnapshot takes a.mu internally)
 	a.journalEvent("request_accept", map[string]any{
 		"message_preview": previewForJournal(message),
 	})
 	a.saveRecoverySnapshot()
 
-	// Now safely start the goroutine
 	if isCmd {
 		ctx = commands.WithRawInvocation(ctx, message)
-		a.safeGo("command-execution", func() { a.executeCommandCtx(ctx, name, args) })
+		pipelineStarted = true
+		a.executeCommandCtx(ctx, name, args)
 		return
 	}
 
@@ -1273,16 +1428,15 @@ func (a *App) startAcceptedSubmitWithRecoveryIdentity(
 	agentMessage, memoryQuery := a.prepareAgentMessageForSubmit(
 		message, recoveryMemoryQuery, isRecovery)
 
-	// Process message normally (coordinator is now integrated in agent system)
-	a.safeGo("message-processing", func() {
-		if isRecovery && a.recoveryEpoch.Load() != recoveryEpoch {
-			logging.Info("discarded recovery invalidated before pipeline start",
-				"recovery_id", recoveryID, "session_id", recoverySessionID)
-			a.finishMessageProcessing()
-			return
-		}
-		a.processMessageWithMemoryQuery(ctx, agentMessage, memoryQuery)
-	})
+	// Process message normally (coordinator is now integrated in agent system).
+	if isRecovery && a.recoveryEpoch.Load() != recoveryEpoch {
+		logging.Info("discarded recovery invalidated before pipeline start",
+			"recovery_id", recoveryID, "session_id", recoverySessionID)
+		a.finishMessageProcessing()
+		return
+	}
+	pipelineStarted = true
+	a.processMessageWithMemoryQuery(ctx, agentMessage, memoryQuery)
 }
 
 func (a *App) prepareAgentMessageForSubmit(message, recoveryMemoryQuery string, recovery bool) (string, string) {
@@ -1621,6 +1775,12 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			a.processingMu.Lock()
 			if ctx.Err() == nil {
 				a.prependPending(prompt)
+			} else {
+				// A cancelled /skill command may have prepared one-shot tool
+				// rules for this exact continuation. If the handoff is not
+				// queued, discard them so a later unrelated prompt cannot
+				// inherit an abandoned grant or denial.
+				tools.ResetSkillPermissionGrants(a.registry)
 			}
 			a.processingMu.Unlock()
 		} else {
@@ -1634,16 +1794,8 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 
 // handleQuit handles quit request.
 func (a *App) handleQuit() {
-	a.mu.Lock()
-	a.processing = false
-	a.mu.Unlock()
-	a.saveRecoverySnapshot()
 	a.journalEvent("app_quit", nil)
-
-	// Use graceful shutdown with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
-	defer cancel()
-	a.gracefulShutdown(ctx)
+	a.beginShutdown()
 }
 
 // processMessageWithContext and related methods are in message_processor.go
@@ -1762,7 +1914,7 @@ func (a *App) DisableMCP() error {
 			}
 		}
 		if a.client != nil {
-			a.client.SetTools(a.registry.GeminiTools())
+			a.client.SetTools(a.planModeToolsLocked(a.planningModeEnabled))
 		}
 	}
 	saveErr := a.config.Save()
@@ -1931,6 +2083,11 @@ func (a *App) SyncMCPToolsForServer(serverName string) {
 		permission.SetToolRiskOverride(name, level)
 	}
 
+	// The registry just changed shape. Recompute the capability ceiling before
+	// pushing the schema so a deny-only run keeps offering the MCP tools the
+	// user never denied, instead of freezing at the boot-time tool list.
+	a.refreshToolCapabilityCeiling()
+
 	// Push fresh declarations to the main client.
 	if c := a.GetMainClient(); c != nil {
 		c.SetTools(a.toolsForCurrentMode())
@@ -1943,13 +2100,18 @@ func (a *App) SyncMCPToolsForServer(serverName string) {
 // client — otherwise a schema push from one callsite could undo plan-mode
 // filtering applied from another.
 //
-// Safe to call from any goroutine: holds no App lock itself, and the
+// Safe to call from any goroutine: it takes only short App snapshots, and the
 // registry operations it invokes take their own internal locks.
 func (a *App) toolsForCurrentMode() []*genai.Tool {
 	// IsPlanningModeEnabled takes a.mu briefly; fine here — callers are
 	// outside ApplyConfig's critical section (that's why this helper exists
 	// as a separate method rather than being inlined).
-	return a.planModeToolsLocked(a.IsPlanningModeEnabled())
+	base := a.baseToolsForPlanMode(a.IsPlanningModeEnabled())
+	ceiling, restricted := a.toolCapabilitySnapshot()
+	if !restricted {
+		return base
+	}
+	return filterToolSchemaByCeiling(base, ceiling)
 }
 
 // planModeToolsLocked is the lock-free variant of toolsForCurrentMode — it
@@ -1958,6 +2120,16 @@ func (a *App) toolsForCurrentMode() []*genai.Tool {
 // IsPlanningModeEnabled takes the same mutex and would self-deadlock on
 // Go's non-reentrant sync.Mutex.
 func (a *App) planModeToolsLocked(planModeEnabled bool) []*genai.Tool {
+	base := a.baseToolsForPlanMode(planModeEnabled)
+	if !a.toolCapabilityRestricted {
+		return base
+	}
+	return filterToolSchemaByCeiling(base, a.toolCapabilityCeiling)
+}
+
+// baseToolsForPlanMode applies feature and plan-mode gates but no invocation
+// capability ceiling. It does not touch App mutex-protected fields.
+func (a *App) baseToolsForPlanMode(planModeEnabled bool) []*genai.Tool {
 	if planModeEnabled {
 		return a.registry.PlanModeGeminiTools()
 	}
@@ -2009,6 +2181,34 @@ func (a *App) GetRuntimeHealthReport() string {
 	} else {
 		sb.WriteString("- step_heartbeat_age: n/a\n")
 	}
+
+	journalStatus := "healthy"
+	recoveryStatus := "healthy"
+	if a.journal == nil {
+		journalStatus = "unavailable"
+		recoveryStatus = "unavailable"
+	} else {
+		if a.persistenceFailures.isFailing("execution_journal") {
+			journalStatus = "failing"
+		}
+		if a.persistenceFailures.isFailing("recovery_snapshot") {
+			recoveryStatus = "failing"
+		}
+	}
+	planStatus := "unavailable"
+	if a.planManager != nil {
+		if a.planManager.GetPlanStore() == nil {
+			planStatus = "disabled"
+		} else if a.persistenceFailures.isFailing("current_plan") {
+			planStatus = "failing"
+		} else {
+			planStatus = "healthy"
+		}
+	}
+	sb.WriteString("- persistence:\n")
+	fmt.Fprintf(&sb, "  - execution_journal: %s\n", journalStatus)
+	fmt.Fprintf(&sb, "  - recovery_snapshot: %s\n", recoveryStatus)
+	fmt.Fprintf(&sb, "  - plan_store: %s\n", planStatus)
 
 	sb.WriteString("\n")
 	sb.WriteString(client.GetProviderHealthReport())
@@ -2504,6 +2704,9 @@ func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionI
 	if a.agentRunner != nil {
 		a.agentRunner.SetSharedScratchpad(a.scratchpad)
 	}
+	if a.executor != nil {
+		a.executor.SetSessionID(state.ID)
+	}
 
 	// Restore tool checkpoints into the executor's journal
 	a.restoreToolCheckpoints()
@@ -2880,10 +3083,10 @@ func (a *App) ClearConversationChecked() error {
 		a.promptBuilder.Invalidate()
 	}
 
-	// Re-set system instruction via API parameter
-	systemPrompt := a.promptBuilder.Build()
-	a.client.SetSystemInstruction(systemPrompt)
-	a.session.SetSystemInstruction(systemPrompt)
+	// Re-set system instruction via API parameter. The session retains only the
+	// canonical prompt; invocation-scoped CLI content stays client-only.
+	systemPrompt := a.buildDefaultSystemInstruction()
+	a.applySystemInstruction(a.client, systemPrompt, true)
 
 	// Clear per-session telemetry so /stats and /cost after /clear reflect the
 	// new conversation instead of accumulating across unrelated tasks. Also
@@ -2987,7 +3190,7 @@ func (a *App) ClearConversationChecked() error {
 // The root replacement shares /clear's durable recovery boundary so no older
 // timer/checkpoint generation can enter the approved plan context.
 func (a *App) CompactContextWithPlan(planSummary string) {
-	systemPrompt := a.promptBuilder.Build()
+	systemPrompt := a.buildDefaultSystemInstruction()
 	_, boundaryErr := a.replaceConversationPersistenceBoundary(func() {
 		a.session.SetSystemInstruction(systemPrompt)
 
@@ -2999,7 +3202,7 @@ func (a *App) CompactContextWithPlan(planSummary string) {
 	if boundaryErr != nil {
 		logging.Warn("failed to persist compacted plan context", "error", boundaryErr)
 		if errors.Is(boundaryErr, errRecoveryCommitUncertain) {
-			a.client.SetSystemInstruction(systemPrompt)
+			a.applySystemInstruction(a.client, systemPrompt, false)
 		}
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusWarning,
@@ -3007,7 +3210,7 @@ func (a *App) CompactContextWithPlan(planSummary string) {
 		})
 		return
 	}
-	a.client.SetSystemInstruction(systemPrompt)
+	a.applySystemInstruction(a.client, systemPrompt, false)
 	a.safeSendToProgram(ui.StreamTextMsg(
 		"\n📋 Context cleared for plan execution. Previous conversation archived.\n"))
 
@@ -3444,13 +3647,8 @@ func (a *App) togglePlanningModeWithRevision() (bool, uint64) {
 	// and waste a round trying a blocked tool before reading the error.
 	if a.promptBuilder != nil {
 		a.promptBuilder.SetPlanMode(newEnabled)
-		systemPrompt := a.promptBuilder.Build()
-		if a.client != nil {
-			a.client.SetSystemInstruction(systemPrompt)
-		}
-		if a.session != nil {
-			a.session.SetSystemInstruction(systemPrompt)
-		}
+		systemPrompt := a.buildDefaultSystemInstruction()
+		a.applySystemInstruction(a.client, systemPrompt, true)
 	}
 
 	if newEnabled {
@@ -3558,13 +3756,8 @@ func (a *App) disablePlanModeAfterApproval() {
 	// discovering the tools are suddenly available.
 	if a.promptBuilder != nil {
 		a.promptBuilder.SetPlanMode(false)
-		systemPrompt := a.promptBuilder.Build()
-		if client != nil {
-			client.SetSystemInstruction(systemPrompt)
-		}
-		if a.session != nil {
-			a.session.SetSystemInstruction(systemPrompt)
-		}
+		systemPrompt := a.buildDefaultSystemInstruction()
+		a.applySystemInstruction(client, systemPrompt, true)
 	}
 
 	a.safeSendToProgram(ui.ConfigUpdateMsg{
@@ -3953,6 +4146,8 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 		merged.UI.HintsEnabled = cfg.UI.HintsEnabled
 	case "toolcalls":
 		merged.UI.ShowToolCalls = cfg.UI.ShowToolCalls
+	case "markdown":
+		merged.UI.MarkdownRendering = cfg.UI.MarkdownRendering
 	case "bell":
 		merged.UI.Bell = cfg.UI.Bell
 	case "nativealerts":
@@ -3965,6 +4160,7 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 		merged.UI.ReducedMotion = cfg.UI.ReducedMotion
 		merged.UI.HintsEnabled = cfg.UI.HintsEnabled
 		merged.UI.ShowToolCalls = cfg.UI.ShowToolCalls
+		merged.UI.MarkdownRendering = cfg.UI.MarkdownRendering
 		merged.UI.Bell = cfg.UI.Bell
 		merged.UI.NativeNotifications = cfg.UI.NativeNotifications
 	}
@@ -3991,6 +4187,7 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 	if a.executor != nil {
 		notificationManager = a.executor.GetNotificationManager()
 	}
+	markdownRendering := merged.UI.MarkdownRendering
 	bellEnabled := merged.UI.Bell
 	nativeNotifications := merged.UI.NativeNotifications
 	a.mu.Unlock()
@@ -4007,6 +4204,7 @@ func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 		tuiModel.SetShowTokens(msg.ShowTokenUsage)
 		tuiModel.SetHintsEnabled(msg.HintsEnabled)
 		tuiModel.SetShowToolCalls(msg.ShowToolCalls)
+		tuiModel.SetMarkdownRendering(markdownRendering)
 		tuiModel.SetBellEnabled(bellEnabled)
 	}
 	if notificationManager != nil {
@@ -4051,6 +4249,18 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	if baseRevision, tracked := cfg.SnapshotRevision(); tracked && baseRevision != a.configRevision {
 		a.mu.Unlock()
 		return 0, fmt.Errorf("%w (based on revision %d, current revision %d)", errConfigConflict, baseRevision, a.configRevision)
+	}
+	// --bare is an invocation boundary, not a persisted setting. Runtime
+	// config changes may update provider/model/UI fields, but cannot escape the
+	// physically minimal registry/prompt for this process.
+	if a.config != nil && a.config.Bare {
+		cfg.Bare = true
+	}
+	if a.config != nil && a.config.Debug {
+		cfg.Debug = true
+		cfg.DebugFile = a.config.DebugFile
+		cfg.DebugFilter = a.config.DebugFilter
+		cfg.DebugLevel = a.config.DebugLevel
 	}
 
 	requestedPlanMode := cfg.Plan.Enabled
@@ -4138,6 +4348,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	// 4. Update executor's client and sync tools
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
+		a.executor.SetToolTimeout(a.config.Tools.Timeout)
 		// The executor caches the active context window for in-loop pruning.
 		// Builder initializes it at boot, but /model and /provider replace the
 		// model without rebuilding the executor. Keep the pruning threshold in
@@ -4146,6 +4357,11 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		// miss pruning before the new model overflows.
 		a.executor.SetMaxInputTokens(effectiveMaxInputTokens(a.config))
 		if a.registry != nil {
+			if registered, ok := a.registry.Get("bash"); ok {
+				if bash, ok := registered.(*tools.BashTool); ok {
+					bash.SetTimeout(a.config.Tools.Timeout)
+				}
+			}
 			// a.mu is held for the whole critical section (see NOTE at the top),
 			// so this MUST use the lock-free planModeToolsLocked, never
 			// toolsForCurrentMode() — that calls IsPlanningModeEnabled(), which
@@ -4162,6 +4378,9 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	// client and must not retain the previous model's capability profile.
 	capability := router.InferModelCapability(runtimeProviderForConfig(a.config), a.config.Model.Name)
 	threshold := a.config.Tools.SmartValidation.SelfReviewThreshold
+	if a.config.Bare {
+		threshold = 0
+	}
 	if threshold > 2 && (capability.SelfReviewBoost || a.config.Model.ForceWeakOptimizations) {
 		threshold = 2
 	}
@@ -4207,11 +4426,8 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	// through TogglePlanningMode. Keep the rebuilt client/session instruction
 	// aligned with the tool schema and every long-lived runtime consumer.
 	if a.promptBuilder != nil {
-		systemPrompt := a.promptBuilder.Build()
-		newClient.SetSystemInstruction(systemPrompt)
-		if a.session != nil {
-			a.session.SetSystemInstruction(systemPrompt)
-		}
+		systemPrompt := a.buildDefaultSystemInstruction()
+		a.applySystemInstruction(newClient, systemPrompt, true)
 	}
 
 	// 6b. Update session-memory config live. The manager is always instantiated
@@ -4286,6 +4502,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.tui.SetReducedMotion(a.config.UI.ReducedMotion)
 		a.tui.SetHintsEnabled(a.config.UI.HintsEnabled)
 		a.tui.SetShowToolCalls(a.config.UI.ShowToolCalls)
+		a.tui.SetMarkdownRendering(a.config.UI.MarkdownRendering)
 		a.tui.SetBellEnabled(a.config.UI.Bell)
 		a.tui.SetPermissionsEnabled(a.config.Permission.Enabled)
 		a.tui.SetSandboxEnabled(a.config.Tools.Bash.Sandbox)
@@ -4460,7 +4677,7 @@ func (a *App) handleKeyEntrySubmit(requestID, provider, key string) {
 		// slash command; if it is busy, keep the secret out of any plaintext FIFO
 		// and ask the user to retry after the active turn settles.
 		a.mu.Lock()
-		if a.processing || a.headlessRunActive {
+		if a.shuttingDown || a.processing || a.headlessRunActive {
 			a.mu.Unlock()
 			a.safeSendToProgram(ui.KeyEntryResultMsg{
 				RequestID: requestID,
@@ -4472,7 +4689,17 @@ func (a *App) handleKeyEntrySubmit(requestID, provider, key string) {
 		a.processing = true
 		a.dropSteerLeftovers = false
 		foregroundCtx := a.claimForegroundContextLocked()
+		if !a.foregroundWorkers.Add() {
+			a.processingMu.Lock()
+			a.processingCancel()
+			a.processingCancel = nil
+			a.processingMu.Unlock()
+			a.processing = false
+			a.mu.Unlock()
+			return
+		}
 		a.mu.Unlock()
+		defer a.foregroundWorkers.Done()
 
 		var outcome ui.KeyEntryResultMsg
 		outcome.RequestID = requestID
@@ -4593,6 +4820,9 @@ func (a *App) buildModelEnhancement() string {
 	if a == nil || a.config == nil {
 		return ""
 	}
+	if a.config.Bare {
+		return ""
+	}
 	modelName := a.config.Model.Name
 	profile := client.GetModelProfile(modelName)
 	var enhancement string
@@ -4639,12 +4869,11 @@ func (a *App) refreshSystemInstruction() {
 	if a.promptBuilder == nil || a.client == nil || a.session == nil {
 		return
 	}
-	systemPrompt := a.promptBuilder.Build() + a.buildModelEnhancement()
-	if strings.TrimSpace(systemPrompt) == "" {
+	systemPrompt := a.buildDefaultSystemInstruction()
+	if strings.TrimSpace(systemPrompt) == "" && !a.hasRunSystemPromptCustomization() {
 		return
 	}
-	a.client.SetSystemInstruction(systemPrompt)
-	a.session.SetSystemInstruction(systemPrompt)
+	a.applySystemInstruction(a.client, systemPrompt, true)
 }
 
 // getActiveToolDeclarations returns declarations for the tools actually available

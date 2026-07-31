@@ -942,6 +942,26 @@ func (c *DoctorCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	return RenderDoctor(DoctorOptions{
+		Version: app.GetVersion(),
+		Config:  app.GetConfig(),
+		WorkDir: app.GetWorkDir(),
+	}), nil
+}
+
+// DoctorOptions contains the inputs needed by diagnostics without requiring a
+// fully initialized App. The top-level `gokin doctor` command uses this path so
+// configuration failures can be diagnosed before a provider client or TUI
+// exists; /doctor uses the same renderer after startup.
+type DoctorOptions struct {
+	Version    string
+	Config     *config.Config
+	WorkDir    string
+	ConfigPath string
+	CLI        bool
+}
+
+func RenderDoctor(options DoctorOptions) string {
 	var sb strings.Builder
 	// Header style matches /stats and /tree-stats (lowercase muted label,
 	// no banner, no emoji). The double-border `╔═╗ 🔍 ╚═╝` box was the
@@ -950,13 +970,13 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	fmt.Fprintf(&sb, "\n%sSystem Diagnostics%s\n", colorCyan, colorReset)
 	fmt.Fprintf(&sb, "%s──────────────────%s\n", colorCyan, colorReset)
 
-	if v := app.GetVersion(); v != "" {
+	if v := options.Version; v != "" {
 		fmt.Fprintf(&sb, "  Version: %s%s%s\n", colorGreen, v, colorReset)
 	}
 
 	fmt.Fprintf(&sb, "\n%s─── Authentication ───%s\n", colorCyan, colorReset)
 
-	cfg := app.GetConfig()
+	cfg := options.Config
 	issues := []string{}
 	solutions := []string{}
 
@@ -969,19 +989,18 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 	fmt.Fprintf(&sb, "  Backend: %s%s%s\n", colorGreen, backend, colorReset)
 
-	hasKey := false
-	if cfg != nil {
-		hasKey = config.AnyProviderHasKey(&cfg.API)
-	}
-	if !hasKey {
-		// Check legacy env var
-		if os.Getenv("GOKIN_API_KEY") != "" {
-			hasKey = true
-		}
+	hasKey := cfg != nil && cfg.API.HasProvider(backend)
+	if !hasKey && os.Getenv("GOKIN_API_KEY") != "" {
+		hasKey = true
 	}
 
 	if hasKey {
-		fmt.Fprintf(&sb, "  Status: %s✓ API key configured%s\n", colorGreen, colorReset)
+		provider := config.GetProvider(backend)
+		if provider != nil && provider.KeyOptional && cfg != nil && cfg.API.GetActiveKey() == "" {
+			fmt.Fprintf(&sb, "  Status: %s✓ Authentication not required%s\n", colorGreen, colorReset)
+		} else {
+			fmt.Fprintf(&sb, "  Status: %s✓ API key configured%s\n", colorGreen, colorReset)
+		}
 	} else {
 		fmt.Fprintf(&sb, "  Status: %s✗ API key not configured%s\n", colorRed, colorReset)
 		issues = append(issues, "API key not found")
@@ -993,13 +1012,20 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		if p := config.GetProvider(backend); p != nil && len(p.EnvVars) > 0 {
 			envHint = p.EnvVars[0]
 		}
-		solutions = append(solutions, fmt.Sprintf("Use /login <provider> <api_key> or set %s", envHint))
+		if options.CLI {
+			solutions = append(solutions, fmt.Sprintf("Run gokin --setup or set %s", envHint))
+		} else {
+			solutions = append(solutions, fmt.Sprintf("Use /login <provider> <api_key> or set %s", envHint))
+		}
 	}
 
 	fmt.Fprintf(&sb, "\n%s─── Environment ───%s\n", colorCyan, colorReset)
 
 	// Config file
-	configPath := config.GetConfigPath()
+	configPath := options.ConfigPath
+	if configPath == "" {
+		configPath = config.GetConfigPath()
+	}
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Fprintf(&sb, "  %s✓%s Config: %s\n", colorGreen, colorReset, prettyHomePath(configPath))
 	} else {
@@ -1023,7 +1049,7 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	}
 
 	// Git repo check
-	workDir := app.GetWorkDir()
+	workDir := options.WorkDir
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
 		fmt.Fprintf(&sb, "  %s✓%s Working directory is a git repository\n", colorGreen, colorReset)
 	} else {
@@ -1075,12 +1101,17 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 	// is the actual command for "show me my settings".
 	if len(issues) > 0 {
 		fmt.Fprintf(&sb, "\n%sCommands to fix issues:%s\n", colorCyan, colorReset)
-		fmt.Fprintf(&sb, "  %s/login%s    Set up authentication\n", colorGreen, colorReset)
-		fmt.Fprintf(&sb, "  %s/status%s   Show current configuration\n", colorGreen, colorReset)
-		fmt.Fprintf(&sb, "  %s/init%s     Create GOKIN.md template\n", colorGreen, colorReset)
+		if options.CLI {
+			fmt.Fprintf(&sb, "  %sgokin --setup%s      Set up authentication\n", colorGreen, colorReset)
+			fmt.Fprintf(&sb, "  %sgokin%s              Open Gokin, then use /status or /init\n", colorGreen, colorReset)
+		} else {
+			fmt.Fprintf(&sb, "  %s/login%s    Set up authentication\n", colorGreen, colorReset)
+			fmt.Fprintf(&sb, "  %s/status%s   Show current configuration\n", colorGreen, colorReset)
+			fmt.Fprintf(&sb, "  %s/init%s     Create GOKIN.md template\n", colorGreen, colorReset)
+		}
 	}
 
-	return sb.String(), nil
+	return sb.String()
 }
 
 // prettyHomePath collapses the user's $HOME prefix in a path to "~".
@@ -1218,8 +1249,8 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 	if configured := configuredThemeValue(app); configured != "" && configured != string(activeTheme) {
 		fmt.Fprintf(&sb, "  Configured ui.theme %q is legacy/unsupported and is not applied\n", configured)
 	}
-	fmt.Fprintf(&sb, "  Tokens: %v  Stream: %v  Bell: %v\n",
-		cfg.UI.ShowTokenUsage, cfg.UI.StreamOutput, cfg.UI.Bell)
+	fmt.Fprintf(&sb, "  Tokens: %v  Markdown: %v  Bell: %v\n",
+		cfg.UI.ShowTokenUsage, cfg.UI.MarkdownRendering, cfg.UI.Bell)
 
 	// Context
 	fmt.Fprintf(&sb, "\n%s─── Context ───%s\n", colorCyan, colorReset)

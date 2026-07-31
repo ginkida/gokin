@@ -93,3 +93,130 @@ func TestAdaptiveToolTimeout_NonPositiveBaseFallsBackToDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestToolExecutionTimeoutHonorsLongOperationBudget(t *testing.T) {
+	base := 30 * time.Second
+	if got, want := toolExecutionTimeout(base, 0, false, "run_tests", nil),
+		DefaultRunTestsTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("run_tests outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "run_tests", map[string]any{"timeout_seconds": 900}),
+		15*time.Minute+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("requested run_tests outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "bash", map[string]any{
+		"command": "cargo test --workspace 2>&1 | tail -20",
+	}), DefaultRunTestsTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("direct verification bash outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "verify_code", nil),
+		DefaultVerifyCodeTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("verify_code outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "coordinate", nil),
+		DefaultCoordinateTimeout+coordinateCleanupTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("coordinate outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "coordinate", map[string]any{"timeout_minutes": 30}),
+		30*time.Minute+coordinateCleanupTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("requested coordinate outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type": "bash",
+	}), 15*time.Minute+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("normal bash task outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type": "bash",
+		"thoroughness":  "thorough",
+	}), 35*time.Minute+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("thorough bash task outer timeout = %v, want %v", got, want)
+	}
+	if got := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type":     "bash",
+		"run_in_background": true,
+	}); got != base {
+		t.Fatalf("background task outer timeout = %v, want base %v", got, base)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task_output", map[string]any{
+		"block": true,
+	}), DefaultTaskOutputWaitTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("blocking task_output outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task_output", map[string]any{
+		"block":      true,
+		"timeout_ms": 600000,
+	}), MaxTaskOutputWaitTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("long blocking task_output outer timeout = %v, want %v", got, want)
+	}
+	if got := toolExecutionTimeout(base, 0, false, "task_output", nil); got != base {
+		t.Fatalf("non-blocking task_output outer timeout = %v, want base %v", got, base)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "ssh", map[string]any{
+		"timeout": 600,
+	}), 10*time.Minute+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("foreground ssh outer timeout = %v, want %v", got, want)
+	}
+	if got := toolExecutionTimeout(base, 0, false, "ssh", map[string]any{
+		"timeout":           600,
+		"run_in_background": true,
+	}); got != base {
+		t.Fatalf("background ssh outer timeout = %v, want base %v", got, base)
+	}
+	for _, test := range []struct {
+		tool string
+		wait time.Duration
+	}{
+		{tool: "ask_user", wait: 10 * time.Minute},
+		{tool: "enter_plan_mode", wait: 10 * time.Minute},
+		{tool: "write", wait: 5 * time.Minute},
+		{tool: "edit", wait: 5 * time.Minute},
+	} {
+		if got, want := toolExecutionTimeout(base, 0, false, test.tool, nil),
+			test.wait+toolTimeoutCompletionGrace; got != want {
+			t.Fatalf("%s outer timeout = %v, want %v", test.tool, got, want)
+		}
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "bash", map[string]any{"timeout_seconds": 600}),
+		10*time.Minute+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("requested bash outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "bash", nil),
+		base+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("ordinary bash outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 10*time.Second, true, "bash", nil),
+		50*time.Second; got != want {
+		t.Fatalf("adaptive bash outer timeout = %v, want %v", got, want)
+	}
+}
+
+func TestExecutorDynamicInteractiveWaitBudget(t *testing.T) {
+	executor := NewExecutor(NewRegistry(), nil, 30*time.Second)
+	executor.SetToolWaitBudgetResolver(func(tool string, _ map[string]any) (time.Duration, bool) {
+		switch tool {
+		case "ask_user":
+			return 30 * time.Minute, true
+		case "indefinite":
+			return 0, true
+		default:
+			return 0, false
+		}
+	})
+
+	if got, deadline := executor.resolveToolExecutionTimeout(
+		30*time.Second, 0, false, "ask_user", nil,
+	); !deadline || got != 30*time.Minute+toolTimeoutCompletionGrace {
+		t.Fatalf("dynamic ask_user timeout = %v/%t", got, deadline)
+	}
+	if got, deadline := executor.resolveToolExecutionTimeout(
+		30*time.Second, 0, false, "indefinite", nil,
+	); deadline || got != 0 {
+		t.Fatalf("indefinite timeout = %v/%t, want 0/false", got, deadline)
+	}
+	if got, deadline := executor.resolveToolExecutionTimeout(
+		30*time.Second, 0, false, "read", nil,
+	); !deadline || got != 30*time.Second {
+		t.Fatalf("ordinary timeout = %v/%t, want 30s/true", got, deadline)
+	}
+}

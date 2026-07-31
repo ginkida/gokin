@@ -5,10 +5,25 @@ import (
 	"path/filepath"
 	"testing"
 
+	"gokin/internal/config"
 	"gokin/internal/donegate"
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
+
+func TestDoneGatePolicyBareIsDisabledWithoutMutatingConfig(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Bare = true
+	cfg.DoneGate.Enabled = true
+	app := &App{config: cfg}
+
+	if policy := app.doneGatePolicy(); policy.Enabled {
+		t.Fatalf("bare done-gate policy = %+v, want disabled", policy)
+	}
+	if !cfg.DoneGate.Enabled {
+		t.Fatal("bare policy mutated persistent done-gate setting")
+	}
+}
 
 func TestAppRecordResponseTouchedPaths_TracksSuccessfulMutationsOnly(t *testing.T) {
 	dir := t.TempDir()

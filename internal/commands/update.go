@@ -46,19 +46,7 @@ func (c *UpdateCommand) Execute(ctx context.Context, args []string, app AppInter
 		currentVersion = "0.1.0" // fallback
 	}
 
-	updateCfg := &update.Config{
-		Enabled:           cfg.Update.Enabled,
-		AutoCheck:         cfg.Update.AutoCheck,
-		CheckInterval:     cfg.Update.CheckInterval,
-		AutoDownload:      cfg.Update.AutoDownload,
-		IncludePrerelease: cfg.Update.IncludePrerelease,
-		Channel:           update.Channel(cfg.Update.Channel),
-		GitHubRepo:        cfg.Update.GitHubRepo,
-		MaxBackups:        cfg.Update.MaxBackups,
-		VerifyChecksum:    cfg.Update.VerifyChecksum,
-		NotifyOnly:        cfg.Update.NotifyOnly,
-		Timeout:           30 * time.Second,
-	}
+	updateCfg := update.FromConfig(&cfg.Update)
 
 	updater, err := update.NewUpdater(updateCfg, currentVersion)
 	if err != nil {
@@ -89,7 +77,7 @@ func (c *UpdateCommand) Execute(ctx context.Context, args []string, app AppInter
 }
 
 func (c *UpdateCommand) checkForUpdate(ctx context.Context, updater *update.Updater, currentVersion string) (string, error) {
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, updater.GetConfig().Timeout)
 	defer cancel()
 
 	info, err := updater.CheckForUpdate(checkCtx)

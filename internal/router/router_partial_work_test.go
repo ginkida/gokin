@@ -32,6 +32,43 @@ func (s *stubRunner) GetResult(_ string) (*agent.AgentResult, bool) {
 	return s.result, s.resultOK
 }
 
+func TestExecuteViaSubAgent_BackgroundUsesRealTasksCommand(t *testing.T) {
+	r := &Router{
+		agentRunner: &stubRunner{spawnID: "715ca37352122226"},
+		analyzer:    NewTaskAnalyzer(6, 8),
+	}
+	_, response, err := r.executeViaSubAgent(
+		context.Background(), "run the workspace tests", "bash", true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"/tasks 715ca37352122226",
+		"/tasks stop 715ca37352122226",
+	} {
+		if !strings.Contains(response, want) {
+			t.Fatalf("background response missing %q: %s", want, response)
+		}
+	}
+	if strings.Contains(response, "/task_output") {
+		t.Fatalf("response advertised nonexistent slash command: %s", response)
+	}
+}
+
+func TestExecuteViaSubAgent_BackgroundEmptyIDFailsHonestly(t *testing.T) {
+	r := &Router{
+		agentRunner: &stubRunner{},
+		analyzer:    NewTaskAnalyzer(6, 8),
+	}
+	_, response, err := r.executeViaSubAgent(
+		context.Background(), "run the workspace tests", "bash", true,
+	)
+	if err == nil || response != "" || !strings.Contains(err.Error(), "empty ID") {
+		t.Fatalf("empty spawn result = response %q, error %v", response, err)
+	}
+}
+
 // TestExecuteViaSubAgent_PreservesPartialWorkOnFailure pins that a sub-agent
 // which did real work before failing surfaces that work (and an actionable
 // reason) instead of the router discarding it and ending the turn with a bare

@@ -22,7 +22,78 @@ func newEvalCmd() *cobra.Command {
 	evalCmd.AddCommand(newEvalReportCmd())
 	evalCmd.AddCommand(newEvalDiagnoseCmd())
 	evalCmd.AddCommand(newEvalValidateCmd())
+	evalCmd.AddCommand(newEvalBaselineAuditCmd())
 	return evalCmd
+}
+
+func newEvalBaselineAuditCmd() *cobra.Command {
+	var manifestPath string
+	var inputPaths []string
+	var jsonOut bool
+
+	cmd := &cobra.Command{
+		Use:   "baseline-audit",
+		Short: "Check baseline coverage against the current eval manifest",
+		Long: `Check that every provider/model cohort in each baseline JSONL file contains
+exactly one result for every scenario in the current manifest. This detects
+stale baselines after scenarios are added, plus unknown or duplicate rows,
+without running an agent or spending provider tokens.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			if len(inputPaths) == 0 {
+				return fmt.Errorf("at least one --input baseline JSONL path is required")
+			}
+			audits := make([]evals.BaselineCoverage, 0, len(inputPaths))
+			complete := true
+			for _, inputPath := range inputPaths {
+				audit, err := evals.AuditBaselineCoverage(manifestPath, inputPath)
+				if err != nil {
+					return fmt.Errorf("audit %s: %w", inputPath, err)
+				}
+				complete = complete && audit.Complete
+				audits = append(audits, audit)
+			}
+			if jsonOut {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(audits); err != nil {
+					return err
+				}
+			} else {
+				for _, audit := range audits {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s:\n", audit.InputPath)
+					for _, variant := range audit.Variants {
+						status := "complete"
+						if !variant.Complete {
+							status = "STALE"
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d/%d · %s\n",
+							variant.Variant, variant.Present, variant.Expected, status)
+						if len(variant.Missing) > 0 {
+							fmt.Fprintf(cmd.OutOrStdout(), "    missing: %s\n",
+								strings.Join(variant.Missing, ", "))
+						}
+						if len(variant.Unknown) > 0 {
+							fmt.Fprintf(cmd.OutOrStdout(), "    unknown: %s\n",
+								strings.Join(variant.Unknown, ", "))
+						}
+						if len(variant.Duplicates) > 0 {
+							fmt.Fprintf(cmd.OutOrStdout(), "    duplicates: %s\n",
+								strings.Join(variant.Duplicates, ", "))
+						}
+					}
+				}
+			}
+			if !complete {
+				return fmt.Errorf("baseline audit failed: one or more cohorts do not match the current manifest")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&manifestPath, "manifest", "evals/coding/manifest.json", "eval manifest path")
+	cmd.Flags().StringArrayVar(&inputPaths, "input", nil, "baseline JSONL results path; repeatable")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON")
+	return cmd
 }
 
 func newEvalValidateCmd() *cobra.Command {

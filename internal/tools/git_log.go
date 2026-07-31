@@ -128,7 +128,7 @@ func (t *GitLogTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		cmdArgs = append(cmdArgs, "--", ".")
 	}
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 
 	output, err := cmd.Output()

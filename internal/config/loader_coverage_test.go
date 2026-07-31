@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -529,6 +530,45 @@ func TestLoadFromFile_ValidYAML(t *testing.T) {
 	}
 	if cfg.Model.Temperature != 0.5 {
 		t.Errorf("Temperature = %v, want 0.5", cfg.Model.Temperature)
+	}
+}
+
+func TestLoadFromExplicitPathPinsSubsequentSaves(t *testing.T) {
+	tmpDir := t.TempDir()
+	explicit := filepath.Join(tmpDir, "custom.yaml")
+	if err := os.WriteFile(explicit, []byte("model:\n  name: glm-5.2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "unused-default"))
+
+	cfg, err := LoadFrom(explicit)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.savePath != explicit {
+		t.Fatalf("savePath = %q, want %q", cfg.savePath, explicit)
+	}
+	clone := cfg.Clone()
+	clone.UI.Theme = "custom-save-target"
+	if err := clone.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "custom-save-target") {
+		t.Fatalf("explicit config was not updated:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "unused-default", "gokin", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("default config unexpectedly written: %v", err)
+	}
+}
+
+func TestLoadFromExplicitPathRequiresExistingValidFile(t *testing.T) {
+	if _, err := LoadFrom(filepath.Join(t.TempDir(), "missing.yaml")); err == nil ||
+		!strings.Contains(err.Error(), "load config") {
+		t.Fatalf("missing explicit config error = %v", err)
 	}
 }
 

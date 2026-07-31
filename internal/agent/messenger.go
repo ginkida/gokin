@@ -73,6 +73,12 @@ func (m *AgentMessenger) parentCtx() context.Context {
 // SendMessage sends a message to another agent (by role or ID).
 // Returns the message ID for tracking responses.
 func (m *AgentMessenger) SendMessage(msgType string, toRole string, content string, data map[string]any) (string, error) {
+	switch msgType {
+	case "help_request", "delegate":
+	default:
+		return "", fmt.Errorf("unknown message type: %s", msgType)
+	}
+
 	m.mu.Lock()
 	m.msgCounter++
 	msgID := fmt.Sprintf("msg_%s_%d", m.fromAgentID, m.msgCounter)
@@ -99,18 +105,57 @@ func (m *AgentMessenger) SendMessage(msgType string, toRole string, content stri
 		"type", msgType)
 
 	// Handle the message based on type
-	switch msgType {
-	case "help_request":
-		// Spawn a sub-agent to handle the request
-		go m.handleHelpRequest(msg)
-	case "delegate":
-		// Delegate task to sub-agent
-		go m.handleDelegation(msg)
-	default:
-		return "", fmt.Errorf("unknown message type: %s", msgType)
-	}
+	go m.handleMessageSafely(msg)
 
 	return msgID, nil
+}
+
+func (m *AgentMessenger) handleMessageSafely(msg Message) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Error("panic in inter-agent message handler",
+				"msg_id", msg.ID,
+				"type", msg.Type,
+				"panic", recovered,
+				"stack", logging.PanicStack())
+			m.deliverResponse(msg.ID, fmt.Sprintf(
+				"Inter-agent request failed: internal panic while handling %s: %v",
+				msg.Type, recovered))
+		}
+	}()
+
+	switch msg.Type {
+	case "help_request":
+		m.handleHelpRequest(msg)
+	case "delegate":
+		m.handleDelegation(msg)
+	}
+}
+
+func (m *AgentMessenger) deliverResponse(messageID, response string) {
+	m.mu.RLock()
+	responseChan, ok := m.pending[messageID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	select {
+	case responseChan <- response:
+	default:
+		logging.Debug("response channel full, receiver likely timed out", "msg_id", messageID)
+	}
+}
+
+const maxInterAgentResponseWait = 40 * time.Minute
+
+func interAgentResponseContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, maxInterAgentResponseWait)
 }
 
 // ReceiveResponse waits for a response to a specific message.
@@ -123,8 +168,8 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 		return "", fmt.Errorf("no pending message with ID: %s", messageID)
 	}
 
-	timer := time.NewTimer(5 * time.Minute)
-	defer timer.Stop()
+	waitCtx, cancel := interAgentResponseContext(ctx)
+	defer cancel()
 
 	select {
 	case response := <-responseChan:
@@ -132,16 +177,11 @@ func (m *AgentMessenger) ReceiveResponse(ctx context.Context, messageID string) 
 		delete(m.pending, messageID)
 		m.mu.Unlock()
 		return response, nil
-	case <-ctx.Done():
+	case <-waitCtx.Done():
 		m.mu.Lock()
 		delete(m.pending, messageID)
 		m.mu.Unlock()
-		return "", ctx.Err()
-	case <-timer.C:
-		m.mu.Lock()
-		delete(m.pending, messageID)
-		m.mu.Unlock()
-		return "", fmt.Errorf("timeout waiting for response to message %s", messageID)
+		return "", waitCtx.Err()
 	}
 }
 
@@ -180,7 +220,7 @@ func spawnResponse(runner *Runner, agentID string, spawnErr error, errPrefix, no
 
 // handleHelpRequest spawns a sub-agent to answer a help request.
 func (m *AgentMessenger) handleHelpRequest(msg Message) {
-	ctx, cancel := context.WithTimeout(m.parentCtx(), 3*time.Minute)
+	ctx, cancel := context.WithCancel(m.parentCtx())
 	defer cancel()
 
 	// Map role to agent type
@@ -205,24 +245,12 @@ func (m *AgentMessenger) handleHelpRequest(msg Message) {
 		fmt.Sprintf("No response from %s agent", agentType))
 
 	// Send response back (non-blocking to prevent goroutine leak)
-	m.mu.RLock()
-	responseChan, ok := m.pending[msg.ID]
-	m.mu.RUnlock()
-
-	if ok {
-		select {
-		case responseChan <- response:
-			// Response sent successfully
-		default:
-			// Channel full or closed - response already timed out
-			logging.Debug("response channel full, receiver likely timed out", "msg_id", msg.ID)
-		}
-	}
+	m.deliverResponse(msg.ID, response)
 }
 
 // handleDelegation spawns a sub-agent to handle a delegated task.
 func (m *AgentMessenger) handleDelegation(msg Message) {
-	ctx, cancel := context.WithTimeout(m.parentCtx(), 5*time.Minute)
+	ctx, cancel := context.WithCancel(m.parentCtx())
 	defer cancel()
 
 	agentType := msg.To
@@ -257,19 +285,7 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 			"max", MaxDelegationDepth,
 			"from", msg.From)
 
-		m.mu.RLock()
-		responseChan, ok := m.pending[msg.ID]
-		m.mu.RUnlock()
-
-		if ok {
-			select {
-			case responseChan <- fmt.Sprintf("Delegation failed: maximum depth (%d) exceeded", MaxDelegationDepth):
-				// Sent successfully
-			default:
-				// Channel full or closed - receiver already timed out
-				logging.Debug("response channel full, receiver likely timed out", "msg_id", msg.ID)
-			}
-		}
+		m.deliverResponse(msg.ID, fmt.Sprintf("Delegation failed: maximum depth (%d) exceeded", MaxDelegationDepth))
 		return
 	}
 
@@ -287,19 +303,7 @@ func (m *AgentMessenger) handleDelegation(msg Message) {
 		"Delegated task completed (no output)")
 
 	// Send response back (non-blocking to prevent goroutine leak)
-	m.mu.RLock()
-	responseChan, ok := m.pending[msg.ID]
-	m.mu.RUnlock()
-
-	if ok {
-		select {
-		case responseChan <- response:
-			// Response sent successfully
-		default:
-			// Channel full or closed - response already timed out
-			logging.Debug("response channel full, receiver likely timed out", "msg_id", msg.ID)
-		}
-	}
+	m.deliverResponse(msg.ID, response)
 }
 
 // Broadcast sends a message to all agents of a given type.

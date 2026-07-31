@@ -326,6 +326,28 @@ func (m *Manager) CancelAll() {
 	}
 }
 
+// WaitAll waits until every task known at the call boundary has published a
+// terminal state and closed its output file. This is deliberately separate
+// from CancelAll: shutdown first cancels shell tasks and agents together, then
+// waits for both groups concurrently within one shared deadline.
+func (m *Manager) WaitAll(ctx context.Context) error {
+	m.mu.RLock()
+	snapshot := make([]*Task, 0, len(m.tasks))
+	for _, task := range m.tasks {
+		snapshot = append(snapshot, task)
+	}
+	m.mu.RUnlock()
+
+	for _, task := range snapshot {
+		select {
+		case <-task.Done():
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // Count returns the number of tasks.
 func (m *Manager) Count() int {
 	m.mu.RLock()

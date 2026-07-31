@@ -18,7 +18,17 @@ type Manager struct {
 	undone      []FileChange // stack of undone changes for redo
 	maxRedo     int
 	activeGroup string // Current group ID stamped on all recorded changes
+	recordCount uint64 // successful external Record calls
+	mutations   uint64 // all successful history mutations
 	mu          sync.Mutex
+}
+
+// HistorySnapshot is an atomic, content-free view of undo history used to
+// delimit higher-level transactions such as a plan execution.
+type HistorySnapshot struct {
+	ChangeIDs   []string
+	RecordCount uint64
+	Mutations   uint64
 }
 
 // NewManager creates a new undo/redo Manager.
@@ -66,6 +76,8 @@ func (m *Manager) Record(change FileChange) {
 	m.tracker.Record(change)
 	// Clear redo stack when new changes are made
 	m.undone = make([]FileChange, 0)
+	m.recordCount++
+	m.mutations++
 }
 
 // Undo reverts the last change and returns information about it.
@@ -90,6 +102,7 @@ func (m *Manager) Undo() (*FileChange, error) {
 		m.undone = m.undone[1:]
 	}
 	m.undone = append(m.undone, *change)
+	m.mutations++
 
 	return change, nil
 }
@@ -116,6 +129,7 @@ func (m *Manager) Redo() (*FileChange, error) {
 
 	// Add back to tracker
 	m.tracker.Record(change)
+	m.mutations++
 
 	return &change, nil
 }
@@ -127,6 +141,180 @@ func (m *Manager) UndoGroup(groupID string) ([]*FileChange, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.undoGroupLocked(groupID)
+}
+
+// UndoChanges reverts exactly the requested recorded changes as one
+// transaction. IDs may refer to changes that are not at the top of the global
+// history; unrelated later changes are preserved. A later change that touches
+// one of the same paths makes the operation fail closed instead of overwriting
+// work performed after the requested changes.
+func (m *Manager) UndoChanges(ids []string) ([]*FileChange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	requested, err := uniqueChangeIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+
+	selected := make([]*FileChange, 0, len(requested))
+	found := make(map[string]struct{}, len(requested))
+	firstIndex := len(m.tracker.changes)
+	targetPaths := make(map[string]struct{})
+	for i := len(m.tracker.changes) - 1; i >= 0; i-- {
+		change := m.tracker.changes[i]
+		if _, ok := requested[change.ID]; !ok {
+			continue
+		}
+		changeCopy := change
+		selected = append(selected, &changeCopy) // newest first
+		found[change.ID] = struct{}{}
+		firstIndex = i
+		for _, path := range changePaths(&change) {
+			targetPaths[path] = struct{}{}
+		}
+	}
+	if len(found) != len(requested) {
+		return nil, fmt.Errorf("cannot undo requested changes: %s", missingChangeIDs(requested, found))
+	}
+
+	// Content preflight catches ordinary overlapping edits. This identity check
+	// also catches the rarer case where a later edit happened to produce exactly
+	// the same bytes and would otherwise be silently discarded.
+	for i := firstIndex; i < len(m.tracker.changes); i++ {
+		change := &m.tracker.changes[i]
+		if _, ok := requested[change.ID]; ok {
+			continue
+		}
+		for _, path := range changePaths(change) {
+			if _, overlaps := targetPaths[path]; overlaps {
+				return nil, fmt.Errorf(
+					"cannot undo requested changes: later change %s also touches %s",
+					change.ID, path,
+				)
+			}
+		}
+	}
+
+	if err := preflightUndoChanges(selected); err != nil {
+		return nil, fmt.Errorf("failed to undo requested changes: %w", err)
+	}
+
+	reverted := make([]*FileChange, 0, len(selected))
+	for _, change := range selected {
+		if err := m.revertChangeUnchecked(change); err != nil {
+			if rbErr := rollbackUndoChanges(reverted); rbErr != nil {
+				return nil, fmt.Errorf(
+					"failed to undo requested changes AND rollback incomplete (check logs): %w",
+					err,
+				)
+			}
+			return nil, fmt.Errorf("failed to undo requested changes (rolled back): %w", err)
+		}
+		reverted = append(reverted, change)
+	}
+
+	remaining := make([]FileChange, 0, len(m.tracker.changes)-len(selected))
+	for _, change := range m.tracker.changes {
+		if _, ok := requested[change.ID]; !ok {
+			remaining = append(remaining, change)
+		}
+	}
+	m.tracker.changes = remaining
+	// Exact transactions must remain exactly redoable even when they contain
+	// more entries than the ordinary rolling redo limit. Discard older,
+	// unrelated redo entries first; allow this transaction itself to exceed the
+	// soft limit rather than silently retaining only its tail.
+	redoRoom := m.maxRedo - len(reverted)
+	if redoRoom < 0 {
+		redoRoom = 0
+	}
+	if len(m.undone) > redoRoom {
+		m.undone = m.undone[len(m.undone)-redoRoom:]
+	}
+	for _, change := range reverted {
+		m.undone = append(m.undone, *change)
+	}
+	m.mutations++
+
+	return reverted, nil
+}
+
+// RedoChanges re-applies exactly the requested changes as one transaction.
+// ids must be in original execution order (oldest first).
+func (m *Manager) RedoChanges(ids []string) ([]*FileChange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	requested, err := uniqueChangeIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+
+	byID := make(map[string]FileChange, len(requested))
+	for _, change := range m.undone {
+		if _, ok := requested[change.ID]; ok {
+			byID[change.ID] = change
+		}
+	}
+	if len(byID) != len(requested) {
+		found := make(map[string]struct{}, len(byID))
+		for id := range byID {
+			found[id] = struct{}{}
+		}
+		return nil, fmt.Errorf("cannot redo requested changes: %s", missingChangeIDs(requested, found))
+	}
+
+	selected := make([]*FileChange, 0, len(ids))
+	for _, id := range ids {
+		change := byID[id]
+		changeCopy := change
+		selected = append(selected, &changeCopy)
+	}
+	if err := preflightRedoChanges(selected); err != nil {
+		return nil, fmt.Errorf("failed to redo requested changes: %w", err)
+	}
+
+	applied := make([]*FileChange, 0, len(selected))
+	for _, change := range selected {
+		if err := m.applyChangeUnchecked(change); err != nil {
+			rollback := make([]*FileChange, 0, len(applied))
+			for i := len(applied) - 1; i >= 0; i-- {
+				rollback = append(rollback, applied[i])
+			}
+			rbErr := preflightUndoChanges(rollback)
+			if rbErr == nil {
+				for _, appliedChange := range rollback {
+					if undoErr := m.revertChangeUnchecked(appliedChange); undoErr != nil {
+						rbErr = undoErr
+						break
+					}
+				}
+			}
+			if rbErr != nil {
+				return nil, fmt.Errorf(
+					"failed to redo requested changes AND rollback incomplete (check logs): %w",
+					err,
+				)
+			}
+			return nil, fmt.Errorf("failed to redo requested changes (rolled back): %w", err)
+		}
+		applied = append(applied, change)
+	}
+
+	remainingUndone := make([]FileChange, 0, len(m.undone)-len(selected))
+	for _, change := range m.undone {
+		if _, ok := requested[change.ID]; !ok {
+			remainingUndone = append(remainingUndone, change)
+		}
+	}
+	m.undone = remainingUndone
+	for _, change := range selected {
+		m.tracker.RecordUnlocked(*change)
+	}
+	m.mutations++
+
+	return applied, nil
 }
 
 // UndoLastGroup reverts all changes belonging to the same group as the most recent change.
@@ -154,6 +342,7 @@ func (m *Manager) UndoLastGroup() ([]*FileChange, error) {
 			m.undone = m.undone[1:]
 		}
 		m.undone = append(m.undone, *change)
+		m.mutations++
 		return []*FileChange{change}, nil
 	}
 
@@ -234,6 +423,7 @@ func (m *Manager) undoGroupLocked(groupID string) ([]*FileChange, error) {
 		}
 		m.undone = append(m.undone, *change)
 	}
+	m.mutations++
 
 	return reverted, nil
 }
@@ -266,6 +456,37 @@ func (m *Manager) ListRecent(n int) []FileChange {
 	return m.tracker.ListRecent(n)
 }
 
+// ChangeIDs returns the current undo history IDs in execution order (oldest
+// first). It is intentionally content-free so callers can capture lightweight
+// transaction boundaries without copying file snapshots.
+func (m *Manager) ChangeIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ids := make([]string, len(m.tracker.changes))
+	for i := range m.tracker.changes {
+		ids[i] = m.tracker.changes[i].ID
+	}
+	return ids
+}
+
+// Snapshot returns IDs and revision counters under one lock so no concurrent
+// Record can land between the boundary's identity and count observations.
+func (m *Manager) Snapshot() HistorySnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snapshot := HistorySnapshot{
+		ChangeIDs:   make([]string, len(m.tracker.changes)),
+		RecordCount: m.recordCount,
+		Mutations:   m.mutations,
+	}
+	for i := range m.tracker.changes {
+		snapshot.ChangeIDs[i] = m.tracker.changes[i].ID
+	}
+	return snapshot
+}
+
 // Count returns the number of undoable changes.
 func (m *Manager) Count() int {
 	m.mu.Lock()
@@ -279,6 +500,7 @@ func (m *Manager) Clear() {
 	defer m.mu.Unlock()
 	m.tracker.Clear()
 	m.undone = make([]FileChange, 0)
+	m.mutations++
 }
 
 // GetTracker returns the underlying tracker.
@@ -296,6 +518,7 @@ func (m *Manager) RestoreChanges(changes []FileChange) {
 		m.tracker.Record(change)
 	}
 	m.undone = make([]FileChange, 0)
+	m.mutations++
 }
 
 // GetUndone returns the redo stack (undone changes).
@@ -313,6 +536,77 @@ func (m *Manager) SetRedoStack(stack []FileChange) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.undone = append([]FileChange{}, stack...)
+}
+
+func uniqueChangeIDs(ids []string) (map[string]struct{}, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no change IDs supplied")
+	}
+	result := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return nil, fmt.Errorf("change ID cannot be empty")
+		}
+		if _, exists := result[id]; exists {
+			return nil, fmt.Errorf("duplicate change ID %s", id)
+		}
+		result[id] = struct{}{}
+	}
+	return result, nil
+}
+
+func missingChangeIDs(requested, found map[string]struct{}) string {
+	missing := make([]string, 0)
+	for id := range requested {
+		if _, ok := found[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return fmt.Sprintf("change history is no longer available for IDs %v", missing)
+}
+
+func changePaths(change *FileChange) []string {
+	if change.Tool == "move" {
+		return []string{string(change.OldContent), change.FilePath}
+	}
+	return []string{change.FilePath}
+}
+
+func rollbackUndoChanges(reverted []*FileChange) error {
+	rollback := make([]*FileChange, 0, len(reverted))
+	for i := len(reverted) - 1; i >= 0; i-- {
+		rollback = append(rollback, reverted[i])
+	}
+	if err := preflightRedoChanges(rollback); err != nil {
+		return err
+	}
+	for _, change := range rollback {
+		if err := applyChangeUncheckedStandalone(change); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyChangeUncheckedStandalone mirrors Manager.applyChangeUnchecked without
+// requiring a Manager receiver. It is used only while rolling back a failed
+// exact undo transaction under the manager lock.
+func applyChangeUncheckedStandalone(change *FileChange) error {
+	switch change.Tool {
+	case "move":
+		return applyMove(change)
+	case "mkdir":
+		return os.MkdirAll(change.FilePath, 0755)
+	case "delete", "batch_delete":
+		if err := os.Remove(change.FilePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(change.FilePath), 0755); err != nil {
+		return err
+	}
+	return fileutil.AtomicWrite(change.FilePath, change.NewContent, permOrDefault(change.Mode))
 }
 
 // revertChange reverts a file change to its previous state.

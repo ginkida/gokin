@@ -34,6 +34,19 @@ type Config struct {
 
 	// Runtime version information
 	Version string `yaml:"-"`
+	// Bare is an invocation-scoped startup mode. It is deliberately excluded
+	// from YAML so `--bare` can never leak into or rewrite persistent config.
+	Bare bool `yaml:"-"`
+	// Debug fields are invocation-scoped. They keep App.Run and headless setup
+	// from replacing a CLI-selected diagnostic sink with normal config logging.
+	Debug       bool   `yaml:"-"`
+	DebugFile   string `yaml:"-"`
+	DebugFilter string `yaml:"-"`
+	DebugLevel  string `yaml:"-"`
+
+	// savePath pins an explicitly loaded --config file as the destination for
+	// later runtime saves. Clone preserves it through the ordinary struct copy.
+	savePath string
 
 	// snapshotRevision is app-owned optimistic-concurrency metadata. It is
 	// deliberately unexported and never serialized; commands only carry it back
@@ -343,7 +356,7 @@ type SmartValidationConfig struct {
 
 // UIConfig holds UI-related settings.
 type UIConfig struct {
-	StreamOutput        bool   `yaml:"stream_output"`
+	StreamOutput        bool   `yaml:"stream_output"` // Legacy/reserved; responses currently always stream
 	MarkdownRendering   bool   `yaml:"markdown_rendering"`
 	ShowToolCalls       bool   `yaml:"show_tool_calls"`
 	ShowTokenUsage      bool   `yaml:"show_token_usage"`
@@ -378,6 +391,10 @@ type PermissionConfig struct {
 	Enabled       bool              `yaml:"enabled"`        // Enable/disable permission system
 	DefaultPolicy string            `yaml:"default_policy"` // Default policy: "allow", "ask", "deny"
 	Rules         map[string]string `yaml:"rules"`          // Per-tool rules
+	// DontAsk is a process-local runtime mode: prompt-required calls are denied
+	// immediately while explicit allows remain usable. CLI wiring sets it after
+	// loading configuration; it is never persisted accidentally.
+	DontAsk bool `yaml:"-"`
 	// PromptTimeoutSeconds bounds how long an interactive permission prompt
 	// waits for a response. >0 = that many seconds; 0 = default (300 = 5m, also
 	// the value old configs without this field get); <0 = NO timeout (wait

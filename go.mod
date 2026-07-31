@@ -17,8 +17,10 @@ require (
 	github.com/ollama/ollama v0.20.3
 	github.com/pkg/sftp v1.13.10
 	github.com/rivo/uniseg v0.4.7
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
 	golang.org/x/crypto v0.51.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
@@ -60,7 +62,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/rogpeppe/go-internal v1.8.0 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect

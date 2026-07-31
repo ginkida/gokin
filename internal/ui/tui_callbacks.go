@@ -34,6 +34,11 @@ func (m *Model) SetCallbacks(onSubmit func(string), onQuit func()) {
 	}
 }
 
+// SetInitialPrompt schedules one first-turn submission from Model.Init.
+func (m *Model) SetInitialPrompt(prompt string) {
+	m.initialPrompt = prompt
+}
+
 // SetPermissionCallback sets the permission decision callback. reqID
 // identifies which in-flight permission request the decision answers.
 func (m *Model) SetPermissionCallback(onPermission func(reqID string, decision PermissionDecision)) {

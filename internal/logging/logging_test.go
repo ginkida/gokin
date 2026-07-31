@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -150,6 +151,92 @@ func TestEnableFileLoggingRotation(t *testing.T) {
 	backupPath := logPath + ".old"
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 		t.Error("backup file should exist after rotation")
+	}
+}
+
+func TestEnablePathLoggingFiltersRedactsAndSecuresFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "debug.jsonl")
+	if err := EnablePathLogging(path, LevelDebug, "mcp,!health"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(Close)
+
+	Debug("api request", "api_key", "sk-supersecret123")
+	Debug("debug logging enabled", "category", "startup", "filter", "mcp")
+	Debug("mcp request", "authorization", "Bearer abcdefghijklmnop")
+	Debug("mcp health request", "token", "ghp_abcdefghijklmnopqrstuvwxyz")
+	Logger().Info("mcp direct logger", "password", "very-secret-password")
+	With("category", "mcp").Info("child logger", "value", "token=secret-value-123")
+	Debug("mcp request body", "body", `{"api_key":"json-secret-123","ok":true}`)
+	Debug("mcp headers", "headers", map[string][]string{
+		"Authorization": {"Bearer header-secret-123"},
+	})
+	Close()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(data)
+	if strings.Contains(output, "api request") ||
+		strings.Contains(output, "mcp health request") ||
+		strings.Contains(output, "debug logging enabled") {
+		t.Fatalf("category filter leaked excluded records:\n%s", output)
+	}
+	for _, required := range []string{"mcp request", "mcp direct logger", "child logger", "[REDACTED]"} {
+		if !strings.Contains(output, required) {
+			t.Fatalf("debug output missing %q:\n%s", required, output)
+		}
+	}
+	for _, secret := range []string{
+		"abcdefghijklmnop",
+		"very-secret-password",
+		"secret-value-123",
+		"json-secret-123",
+		"header-secret-123",
+		"sk-supersecret123",
+	} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("debug output leaked secret %q:\n%s", secret, output)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("debug file permissions = %o, want 600", got)
+		}
+	}
+	if got, err := filepath.Abs(path); err != nil || CurrentLogPath() != "" {
+		// Close above deliberately clears the active path.
+		t.Fatalf("CurrentLogPath after Close = %q (abs=%q, err=%v)", CurrentLogPath(), got, err)
+	}
+}
+
+func TestEnablePathLoggingReportsAbsoluteActivePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "debug.jsonl")
+	if err := EnablePathLogging(path, LevelInfo, ""); err != nil {
+		t.Fatal(err)
+	}
+	defer Close()
+	want, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := CurrentLogPath(); got != want {
+		t.Fatalf("CurrentLogPath = %q, want %q", got, want)
+	}
+}
+
+func TestEnablePathLoggingRejectsInvalidFilterBeforeCreatingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "debug.jsonl")
+	if err := EnablePathLogging(path, LevelDebug, "api,,mcp"); err == nil {
+		t.Fatal("invalid category filter unexpectedly succeeded")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid filter created log file: %v", err)
 	}
 }
 

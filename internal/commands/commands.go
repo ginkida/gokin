@@ -113,9 +113,9 @@ type AppInterface interface {
 	GetAgentTaskRunner() AgentTaskRunner
 
 	// Background shell task runner — used by /tasks to list/stop bash/ssh
-	// run_in_background commands. Before this, only the MODEL could list
-	// (task_output-equivalent doesn't exist for shell) or kill (kill_shell
-	// tool) a background shell command; the user had no surface at all — a
+	// run_in_background commands. Before /tasks covered shell work, only the
+	// MODEL could list (task_output tool) or kill (kill_shell tool) a
+	// background shell command; the user had no surface at all — a
 	// stray `npm run dev &`-style task from a finished turn kept holding a
 	// port with no way to find or stop it short of quitting gokin. May be
 	// nil when the tasks subsystem isn't wired; the command nil-checks.

@@ -39,6 +39,12 @@ func (t *hookFailureTracker) shouldNotify(key string, failed bool) bool {
 	return failed && !was
 }
 
+func (t *hookFailureTracker) isFailing(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.failing != nil && t.failing[key]
+}
+
 // onHookResult is the hooks.Manager handler (wired by the builder): the
 // runtime-visibility surface for every hook execution. Failures that are
 // DESIGNED control flow stay quiet here — a FailOnError pre_tool failure

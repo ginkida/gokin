@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gokin/internal/config"
 	"gokin/internal/tools"
@@ -77,7 +79,10 @@ func (t AgentType) AllowedTools() []string {
 			"tools_list", "skill", "request_tool", "ask_agent",
 		}
 	case AgentTypeBash:
-		return []string{"bash", "read", "glob", "tools_list", "skill", "request_tool", "ask_agent"}
+		return []string{
+			"bash", "run_tests", "verify_code", "task_output",
+			"read", "glob", "tools_list", "skill", "request_tool", "ask_agent",
+		}
 	case AgentTypeGeneral:
 		return nil // nil means all tools allowed
 	case AgentTypePlan:
@@ -210,11 +215,14 @@ const maxAgentMemoryOutput = 2 * 1024 * 1024 // 2 MB in-memory cap for agent out
 // The file is created at .gokin/agent-output/{agentID}.log under workDir.
 func NewAgentOutputWriter(workDir, agentID string) *AgentOutputWriter {
 	w := &AgentOutputWriter{}
-	dir := filepath.Join(workDir, ".gokin", "agent-output")
+	path := agentOutputFilePath(workDir, agentID)
+	if path == "" {
+		return w
+	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return w // proceed without file backing
 	}
-	path := filepath.Join(dir, agentID+".log")
 	f, err := os.Create(path)
 	if err != nil {
 		return w
@@ -222,6 +230,47 @@ func NewAgentOutputWriter(workDir, agentID string) *AgentOutputWriter {
 	w.file = f
 	w.filePath = path
 	return w
+}
+
+// agentOutputFilePath returns a deterministic workDir-contained path. Generated
+// IDs stay readable; an invalid/restored ID is hashed instead of being allowed
+// to traverse outside .gokin/agent-output.
+func agentOutputFilePath(workDir, agentID string) string {
+	if workDir == "" || agentID == "" {
+		return ""
+	}
+	safe := len(agentID) <= 128
+	for _, r := range agentID {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_') {
+			safe = false
+			break
+		}
+	}
+	if !safe {
+		sum := sha256.Sum256([]byte(agentID))
+		agentID = fmt.Sprintf("agent-%x", sum[:8])
+	}
+	return filepath.Join(workDir, ".gokin", "agent-output", agentID+".log")
+}
+
+// boundedAgentResultOutput keeps the result ledger bounded while the complete
+// live transcript remains available through OutputFile. Cut only at a UTF-8
+// boundary so task/report renderers never receive malformed text.
+func boundedAgentResultOutput(output, outputFile string) string {
+	if len(output) <= maxAgentMemoryOutput {
+		return output
+	}
+	cut := maxAgentMemoryOutput
+	for cut > 0 && !utf8.ValidString(output[:cut]) {
+		cut--
+	}
+	result := output[:cut]
+	result += fmt.Sprintf("\n\n[Output truncated: %d bytes total.", len(output))
+	if outputFile != "" {
+		result += fmt.Sprintf(" Live transcript in: %s", outputFile)
+	}
+	return result + "]"
 }
 
 // Write appends data to both in-memory buffer and file.

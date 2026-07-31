@@ -25,8 +25,8 @@ func TestSetAllowedDirsOnRegistryCoversAllScopingTools(t *testing.T) {
 	}
 
 	count := SetAllowedDirsOnRegistry(reg, []string{granted})
-	if count < 13 {
-		t.Fatalf("expected >=13 path-scoping tools updated, got %d", count)
+	if count < 15 {
+		t.Fatalf("expected >=15 path-scoping tools updated, got %d", count)
 	}
 
 	// A file in the granted dir must now validate through the read tool.
@@ -47,6 +47,20 @@ func TestSetAllowedDirsOnRegistryCoversAllScopingTools(t *testing.T) {
 		if r, ok := rt.(*RefactorTool); ok {
 			if _, verr := r.pathValidator.ValidateDir(granted); verr != nil {
 				t.Errorf("refactor should accept the granted dir after propagation: %v", verr)
+			}
+		}
+	}
+	if rt, ok := reg.Get("run_tests"); ok {
+		if r, ok := rt.(*RunTestsTool); ok {
+			if _, verr := r.pathValidator.ValidateDir(granted); verr != nil {
+				t.Errorf("run_tests should accept the granted dir after propagation: %v", verr)
+			}
+		}
+	}
+	if vt, ok := reg.Get("verify_code"); ok {
+		if v, ok := vt.(*VerifyCodeTool); ok {
+			if _, verr := v.pathValidator.ValidateDir(granted); verr != nil {
+				t.Errorf("verify_code should accept the granted dir after propagation: %v", verr)
 			}
 		}
 	}

@@ -17,6 +17,7 @@ type fakeCoordinator struct {
 	stopped     int
 	addCalls    []fakeCoordinateAddCall
 	maxParallel int
+	waitTimeout time.Duration
 }
 
 type fakeCoordinateAddCall struct {
@@ -34,6 +35,7 @@ func (f *fakeCoordinator) SetMaxParallel(maxParallel int) {
 	f.maxParallel = maxParallel
 }
 func (f *fakeCoordinator) WaitWithTimeout(ctx context.Context, timeout time.Duration) (map[string]any, error) {
+	f.waitTimeout = timeout
 	return f.waitResults, f.waitErr
 }
 func (f *fakeCoordinator) GetStatus() any { return nil }

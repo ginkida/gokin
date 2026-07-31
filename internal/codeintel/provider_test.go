@@ -286,6 +286,32 @@ func TestGoplsProvider_CloseKillsHungManagedProcess(t *testing.T) {
 	}
 }
 
+func TestDialProcessPreservesFinalOutputWhenChildExits(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		connection, err := dialProcess(context.Background(), ProcessSpec{
+			Command:         os.Args[0],
+			Args:            []string{"-test.run=TestManagedGoplsHelperProcess", "--", "--codeintel-helper", "--emit-final-and-exit"},
+			Dir:             t.TempDir(),
+			Env:             managedGoEnv(),
+			MaxMessageBytes: 64 << 10,
+			MaxStderrBytes:  64 << 10,
+		})
+		if err != nil {
+			t.Fatalf("dial iteration %d: %v", i, err)
+		}
+		message, err := connection.Receive()
+		if err != nil || message == nil || message.ID == nil {
+			t.Fatalf("receive iteration %d: message=%+v err=%v", i, message, err)
+		}
+		if err := connection.Close(context.Background()); err != nil {
+			t.Fatalf("close iteration %d: %v", i, err)
+		}
+		if diagnostic := connection.Diagnostic(); !strings.Contains(diagnostic, "final diagnostic") {
+			t.Fatalf("stderr iteration %d was truncated: %q", i, diagnostic)
+		}
+	}
+}
+
 func TestGoplsProvider_InstalledGoplsIntegration(t *testing.T) {
 	if os.Getenv("GOKIN_TEST_REAL_GOPLS_MCP") != "1" {
 		t.Skip("set GOKIN_TEST_REAL_GOPLS_MCP=1 to exercise the installed gopls")
@@ -319,6 +345,25 @@ func TestGoplsProvider_InstalledGoplsIntegration(t *testing.T) {
 func TestManagedGoplsHelperProcess(t *testing.T) {
 	if !hasProcessArg("--codeintel-helper") {
 		return
+	}
+	if hasProcessArg("--emit-final-and-exit") {
+		encoder := json.NewEncoder(os.Stdout)
+		_ = encoder.Encode(&mcp.JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      float64(1),
+			Result:  map[string]any{"final": true},
+		})
+		_, _ = fmt.Fprintln(os.Stderr, "final diagnostic")
+		os.Exit(0)
+	}
+	if pidFile := processArgValue("--child-pid-file="); pidFile != "" {
+		child := exec.Command("sleep", "60")
+		if err := child.Start(); err != nil {
+			os.Exit(4)
+		}
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprint(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(5)
+		}
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
@@ -363,6 +408,15 @@ func hasProcessArg(want string) bool {
 		}
 	}
 	return false
+}
+
+func processArgValue(prefix string) string {
+	for _, arg := range os.Args {
+		if value, ok := strings.CutPrefix(arg, prefix); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 func newTestProvider(t *testing.T, workspace string, opts Options) *GoplsProvider {
