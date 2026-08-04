@@ -35,9 +35,10 @@ func TestUpdaterDownload_FailsClosedOnMissingChecksumEntry(t *testing.T) {
 		currentVer: "0.0.1",
 		tempDir:    t.TempDir(),
 		downloader: &Downloader{
-			httpClient: &http.Client{Timeout: 10 * time.Second},
-			config:     cfg,
-			tempDir:    t.TempDir(),
+			httpClient:  &http.Client{Timeout: 10 * time.Second},
+			config:      cfg,
+			tempDir:     t.TempDir(),
+			validateURL: allowTestUpdateURL,
 		},
 	}
 

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
+	"gokin/internal/pinned"
 	"gokin/internal/skills"
 	"gokin/internal/tools"
 
@@ -408,6 +408,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	// Wire up PinContext tool (Custom Improvement)
 	if pt, ok := agent.registry.Get("pin_context"); ok {
 		if ptt, ok := pt.(*tools.PinContextTool); ok {
+			ptt.SetWorkDir(workDir)
 			ptt.SetUpdater(agent.SetPinnedContext)
 		}
 	}
@@ -566,6 +567,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	// Wire up PinContext tool (Custom Improvement)
 	if pt, ok := agent.registry.Get("pin_context"); ok {
 		if ptt, ok := pt.(*tools.PinContextTool); ok {
+			ptt.SetWorkDir(workDir)
 			ptt.SetUpdater(agent.SetPinnedContext)
 		}
 	}
@@ -952,28 +954,12 @@ func (a *Agent) SetOnScratchpadUpdate(fn func(string)) {
 	a.stateMu.Unlock()
 }
 
-// SetPinnedContext sets the pinned context for the agent and persists to disk.
+// SetPinnedContext updates the agent-local prompt state. The pin_context tool
+// owns persistence so it can report storage failures before mutating this state.
 func (a *Agent) SetPinnedContext(content string) {
 	a.stateMu.Lock()
 	a.PinnedContext = content
-	workDir := a.workDir
 	a.stateMu.Unlock()
-
-	// Persist to disk so it survives restarts
-	if workDir != "" {
-		pinnedPath := filepath.Join(workDir, ".gokin", "pinned_context.md")
-		if content == "" {
-			os.Remove(pinnedPath) // best-effort; file may not exist
-		} else {
-			if err := os.MkdirAll(filepath.Dir(pinnedPath), 0750); err != nil {
-				logging.Warn("failed to create pinned context directory", "path", pinnedPath, "error", err)
-				return
-			}
-			if err := os.WriteFile(pinnedPath, []byte(content), 0644); err != nil {
-				logging.Warn("failed to persist pinned context", "path", pinnedPath, "error", err)
-			}
-		}
-	}
 }
 
 // LoadPinnedContext loads pinned context from disk if it exists.
@@ -985,17 +971,17 @@ func (a *Agent) LoadPinnedContext() {
 	if workDir == "" {
 		return
 	}
-	pinnedPath := filepath.Join(workDir, ".gokin", "pinned_context.md")
-	data, err := os.ReadFile(pinnedPath)
+	content, err := pinned.Load(workDir)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logging.Warn("failed to restore pinned context", "error", err)
+		}
 		return
 	}
-	content := strings.TrimSpace(string(data))
-	if content != "" {
-		a.stateMu.Lock()
-		a.PinnedContext = content
-		a.stateMu.Unlock()
-	}
+	// Apply an empty durable-clear marker as well as non-empty content.
+	a.stateMu.Lock()
+	a.PinnedContext = content
+	a.stateMu.Unlock()
 }
 
 // GetPinnedContext returns the pinned context.
@@ -1561,7 +1547,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 
 		result.Status = terminalStatus
 		result.Error = err.Error()
-		result.Output = boundedAgentResultOutput(output, outputWriter.FilePath())
+		result.Output = boundedAgentResultOutput(output, outputWriter.FilePath(), outputWriter.DiskTruncated())
 		result.OutputFile = outputWriter.FilePath()
 		result.Duration = endTime.Sub(startTime)
 		result.Completed = true
@@ -1592,7 +1578,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.clearCallHistory()
 
 	result.Status = AgentStatusCompleted
-	result.Output = boundedAgentResultOutput(output, outputWriter.FilePath())
+	result.Output = boundedAgentResultOutput(output, outputWriter.FilePath(), outputWriter.DiskTruncated())
 	result.OutputFile = outputWriter.FilePath()
 	result.Duration = endTime.Sub(startTime)
 	result.Completed = true

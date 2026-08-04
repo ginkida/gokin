@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"gokin/internal/securefs"
 )
 
 var (
@@ -70,28 +72,32 @@ func EnablePathLogging(path string, level Level, rawFilter string) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Rotate if the log file exceeds the size limit
-	if info, err := os.Stat(absolute); err == nil {
-		if info.IsDir() {
-			return fmt.Errorf("log path is a directory: %s", absolute)
-		}
+	// Reject symlinks/special files and repair a legacy log's permissions before
+	// either rotating or appending to it.
+	if err := securefs.SecurePrivateFile(absolute); err != nil {
+		return fmt.Errorf("secure log file: %w", err)
+	}
+
+	// Rotate if the log file exceeds the size limit.
+	if info, err := os.Lstat(absolute); err == nil {
 		if info.Size() > maxLogFileSize {
 			// Keep one backup
 			backupPath := absolute + ".old"
 			_ = os.Remove(backupPath)
 			if os.Rename(absolute, backupPath) == nil {
-				_ = os.Chmod(backupPath, 0o600)
+				moved, movedErr := os.Lstat(backupPath)
+				if movedErr == nil && moved.Mode().IsRegular() && os.SameFile(info, moved) {
+					_ = securefs.SecurePrivateFile(backupPath)
+				}
 			}
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect log file: %w", err)
 	}
 
-	f, err := os.OpenFile(absolute, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := securefs.OpenPrivateAppend(absolute)
 	if err != nil {
 		return err
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("secure log file: %w", err)
 	}
 
 	// Close previous log file if any

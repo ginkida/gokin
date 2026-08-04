@@ -63,11 +63,16 @@ func (s *FileStorage) path(id string) string {
 // (typically the Manager constructor) log them so users can find and
 // fix or delete bad state files without losing the rest of their loops.
 func (s *FileStorage) Load() ([]*Loop, []error) {
+	if _, err := os.Lstat(s.dir); os.IsNotExist(err) {
+		return nil, nil // first run — no loops yet
+	} else if err != nil {
+		return nil, []error{fmt.Errorf("loops: inspect dir %s: %w", s.dir, err)}
+	}
+	if err := fileutil.EnsurePrivateDir(s.dir); err != nil {
+		return nil, []error{fmt.Errorf("loops: secure dir %s: %w", s.dir, err)}
+	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // first run — no loops yet
-		}
 		return nil, []error{fmt.Errorf("loops: read dir %s: %w", s.dir, err)}
 	}
 
@@ -87,6 +92,10 @@ func (s *FileStorage) Load() ([]*Loop, []error) {
 			continue
 		}
 		fullPath := filepath.Join(s.dir, name)
+		if secureErr := fileutil.SecurePrivateFile(fullPath); secureErr != nil {
+			errs = append(errs, fmt.Errorf("loops: secure %s: %w", name, secureErr))
+			continue
+		}
 		data, readErr := os.ReadFile(fullPath)
 		if readErr != nil {
 			errs = append(errs, fmt.Errorf("loops: read %s: %w", name, readErr))
@@ -122,8 +131,8 @@ func (s *FileStorage) Save(l *Loop) error {
 	if err := l.Validate(); err != nil {
 		return fmt.Errorf("loops: refuse to save invalid loop: %w", err)
 	}
-	if err := os.MkdirAll(s.dir, 0700); err != nil {
-		return fmt.Errorf("loops: create dir: %w", err)
+	if err := fileutil.EnsurePrivateDir(s.dir); err != nil {
+		return fmt.Errorf("loops: secure dir: %w", err)
 	}
 	data, err := l.Marshal()
 	if err != nil {

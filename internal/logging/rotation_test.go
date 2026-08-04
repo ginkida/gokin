@@ -100,3 +100,45 @@ func TestEnablePathLoggingInstallsRotatingSink(t *testing.T) {
 		t.Fatalf("log file not written: %v", err)
 	}
 }
+
+// A benign external rotation — a second Gokin process, logrotate, a manual mv
+// of the shared gokin.log — must not kill this process's logging. Returning
+// early from the unverifiable branch left the sink nil, and every later Write
+// then discarded its record while reporting success.
+func TestRotationReattachesAfterAnExternalRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared.jsonl")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := newRotatingFileWriter(file, path, 0, 128)
+	t.Cleanup(func() { _ = writer.Close() })
+
+	if _, err := writer.Write([]byte("before\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Someone else rotates the shared file out from under us.
+	if err := os.Rename(path, path+".external"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("someone-elses\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cross the limit so rotation runs against a path that is no longer ours.
+	big := []byte(strings.Repeat("y", 200) + "\n")
+	if _, err := writer.Write(big); err != nil {
+		t.Fatalf("write after external rotation: %v", err)
+	}
+	if _, err := writer.Write([]byte("after\n")); err != nil {
+		t.Fatalf("second write after external rotation: %v", err)
+	}
+
+	live, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(live), "after") {
+		t.Fatalf("logging stopped after an external rotation; live log = %q", live)
+	}
+}

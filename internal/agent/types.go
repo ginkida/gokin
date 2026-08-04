@@ -3,13 +3,15 @@ package agent
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"gokin/internal/config"
+	"gokin/internal/fileutil"
+	"gokin/internal/format"
 	"gokin/internal/tools"
 )
 
@@ -206,10 +208,18 @@ type AgentOutputWriter struct {
 	file       *os.File
 	filePath   string
 	totalBytes int64
+	diskBytes  int64
 	truncated  bool
+	diskCut    bool
 }
 
-const maxAgentMemoryOutput = 2 * 1024 * 1024 // 2 MB in-memory cap for agent output
+const (
+	maxAgentMemoryOutput int64 = 2 << 20
+	maxAgentDiskOutput   int64 = 16 << 20
+)
+
+var agentOutputDiskTruncationMarker = []byte(fmt.Sprintf(
+	"\n\n[Transcript truncated at %d MiB disk limit.]\n", maxAgentDiskOutput>>20))
 
 // NewAgentOutputWriter creates a file-backed output writer for an agent.
 // The file is created at .gokin/agent-output/{agentID}.log under workDir.
@@ -219,12 +229,24 @@ func NewAgentOutputWriter(workDir, agentID string) *AgentOutputWriter {
 	if path == "" {
 		return w
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	gokinDir := filepath.Join(workDir, ".gokin")
+	if err := fileutil.EnsurePrivateDir(gokinDir); err != nil {
 		return w // proceed without file backing
 	}
-	f, err := os.Create(path)
+	dir := filepath.Dir(path)
+	if err := fileutil.EnsurePrivateDir(dir); err != nil {
+		return w // proceed without file backing
+	}
+	f, err := fileutil.OpenPrivateReadWrite(path)
 	if err != nil {
+		return w
+	}
+	if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		return w
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
 		return w
 	}
 	w.file = f
@@ -257,18 +279,21 @@ func agentOutputFilePath(workDir, agentID string) string {
 // boundedAgentResultOutput keeps the result ledger bounded while the complete
 // live transcript remains available through OutputFile. Cut only at a UTF-8
 // boundary so task/report renderers never receive malformed text.
-func boundedAgentResultOutput(output, outputFile string) string {
-	if len(output) <= maxAgentMemoryOutput {
+func boundedAgentResultOutput(output, outputFile string, diskTruncated bool) string {
+	if int64(len(output)) <= maxAgentMemoryOutput {
 		return output
 	}
-	cut := maxAgentMemoryOutput
-	for cut > 0 && !utf8.ValidString(output[:cut]) {
-		cut--
-	}
-	result := output[:cut]
+	// Same trap as the writers above: validating output[:cut] rescans from the
+	// start every iteration, and one pre-existing invalid byte would walk the
+	// cut all the way back to it. Trim only a sequence this cut split.
+	result := string(format.TrimSplitTrailingRune([]byte(output[:maxAgentMemoryOutput])))
 	result += fmt.Sprintf("\n\n[Output truncated: %d bytes total.", len(output))
 	if outputFile != "" {
-		result += fmt.Sprintf(" Live transcript in: %s", outputFile)
+		if diskTruncated {
+			result += fmt.Sprintf(" Transcript prefix in: %s (disk limit reached).", outputFile)
+		} else {
+			result += fmt.Sprintf(" Full transcript in: %s", outputFile)
+		}
 	}
 	return result + "]"
 }
@@ -278,17 +303,76 @@ func (w *AgentOutputWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.file != nil {
-		w.file.Write(p)
-	}
+	w.writeDiskLocked(p)
 	w.totalBytes += int64(len(p))
 
-	if !w.truncated && int64(len(w.buf))+int64(len(p)) <= maxAgentMemoryOutput {
-		w.buf = append(w.buf, p...)
-	} else if !w.truncated {
+	if !w.truncated {
+		remaining := int(maxAgentMemoryOutput) - len(w.buf)
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		if remaining > 0 {
+			w.buf = append(w.buf, p[:remaining]...)
+		}
+		if remaining < len(p) {
+			w.buf = format.TrimSplitTrailingRune(w.buf)
+			w.truncated = true
+		}
+	}
+	if int64(len(w.buf)) >= maxAgentMemoryOutput && w.totalBytes > maxAgentMemoryOutput {
 		w.truncated = true
 	}
 	return len(p), nil
+}
+
+func (w *AgentOutputWriter) writeDiskLocked(p []byte) {
+	if w.file == nil || w.diskCut || len(p) == 0 {
+		return
+	}
+	dataLimit := maxAgentDiskOutput - int64(len(agentOutputDiskTruncationMarker))
+	remaining := dataLimit - w.diskBytes
+	if remaining < 0 {
+		remaining = 0
+	}
+	toWrite := p
+	crossesLimit := int64(len(p)) > remaining
+	if crossesLimit {
+		toWrite = p[:int(remaining)]
+		toWrite = format.TrimSplitTrailingRune(toWrite)
+	}
+	n, err := writeAgentOutputBytes(w.file, toWrite)
+	w.diskBytes += int64(n)
+	if err != nil {
+		w.diskCut = true
+		_ = w.file.Close()
+		w.file = nil
+		return
+	}
+	if crossesLimit {
+		n, err = writeAgentOutputBytes(w.file, agentOutputDiskTruncationMarker)
+		w.diskBytes += int64(n)
+		w.diskCut = true
+		if err != nil {
+			_ = w.file.Close()
+			w.file = nil
+		}
+	}
+}
+
+func writeAgentOutputBytes(file *os.File, data []byte) (int, error) {
+	total := 0
+	for len(data) > 0 {
+		n, err := file.Write(data)
+		total += n
+		data = data[n:]
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 // WriteString appends a string to the output.
@@ -302,8 +386,18 @@ func (w *AgentOutputWriter) String() string {
 	defer w.mu.Unlock()
 	s := string(w.buf)
 	if w.truncated {
-		s += fmt.Sprintf("\n\n[Output truncated: %d bytes total. Full output in: %s]",
-			w.totalBytes, w.filePath)
+		s += fmt.Sprintf("\n\n[Output truncated: %d bytes total.", w.totalBytes)
+		switch {
+		case w.filePath == "":
+			s += " No backing transcript is available."
+		case w.diskCut:
+			s += fmt.Sprintf(" Transcript prefix in: %s (disk limit reached or write failed).", w.filePath)
+		default:
+			s += fmt.Sprintf(" Full transcript in: %s", w.filePath)
+		}
+		s += "]"
+	} else if w.diskCut {
+		s += "\n\n[Transcript file is incomplete; complete output is retained in memory.]"
 	}
 	return s
 }
@@ -322,9 +416,20 @@ func (w *AgentOutputWriter) TotalBytes() int64 {
 	return w.totalBytes
 }
 
+// DiskTruncated reports whether the persistent transcript hit its disk cap or
+// became unavailable after a write failure.
+func (w *AgentOutputWriter) DiskTruncated() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.diskCut
+}
+
 // ReadFrom reads output from the file starting at the given offset.
 // Returns the content and the new offset.
 func (w *AgentOutputWriter) ReadFrom(offset int64) (string, int64, error) {
+	if offset < 0 {
+		return "", offset, fmt.Errorf("agent output offset must be non-negative")
+	}
 	w.mu.Lock()
 	path := w.filePath
 	w.mu.Unlock()
@@ -338,7 +443,7 @@ func (w *AgentOutputWriter) ReadFrom(offset int64) (string, int64, error) {
 		return s[offset:], int64(len(s)), nil
 	}
 
-	f, err := os.Open(path)
+	f, err := fileutil.OpenPrivateRead(path)
 	if err != nil {
 		return "", offset, err
 	}
@@ -361,9 +466,11 @@ func (w *AgentOutputWriter) ReadFrom(offset int64) (string, int64, error) {
 		}
 	}
 
-	buf := make([]byte, fileSize-offset)
-	n, _ := f.Read(buf)
-	return string(buf[:n]), offset + int64(n), nil
+	data, err := io.ReadAll(io.LimitReader(f, fileSize-offset))
+	if err != nil {
+		return "", offset, err
+	}
+	return string(data), offset + int64(len(data)), nil
 }
 
 // Close closes the output file.
@@ -371,7 +478,8 @@ func (w *AgentOutputWriter) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file != nil {
-		w.file.Close()
+		_ = w.file.Sync()
+		_ = w.file.Close()
 		w.file = nil
 	}
 }

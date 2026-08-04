@@ -205,7 +205,9 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 	case *AskAgentTool:
 		return NewAskAgentTool()
 	case *PinContextTool:
-		return NewPinContextTool(nil)
+		cloned := NewPinContextTool(nil)
+		cloned.SetWorkDir(pickWorkDir(workDir, t.persistenceWorkDir()))
+		return cloned
 	case *HistorySearchTool:
 		return NewHistorySearchTool(nil)
 	case *UpdateScratchpadTool:

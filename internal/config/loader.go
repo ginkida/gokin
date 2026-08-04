@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,11 @@ import (
 )
 
 var configSaveMu sync.Mutex
+
+const (
+	maxConfigFileBytes     = MaxConfigFileBytes
+	maxExpandedConfigBytes = 8 << 20
+)
 
 // Load loads configuration from file and environment variables.
 // It merges global config with per-project config (.gokin/config.yaml) if present.
@@ -227,24 +233,27 @@ func getConfigPath() string {
 
 // loadFromFile loads configuration from a YAML file.
 func loadFromFile(cfg *Config, path string) error {
-	data, err := os.ReadFile(path)
+	data, err := ReadConfigFile(path)
 	if err != nil {
-		return err
+		if errors.Is(err, os.ErrNotExist) {
+			return configNotExistError(path)
+		}
+		return fmt.Errorf("read config file %s: %w", path, err)
 	}
 
 	// Warn if config file has overly permissive permissions
-	if info, statErr := os.Stat(path); statErr == nil {
-		mode := info.Mode().Perm()
-		if mode&0077 != 0 {
-			slog.Warn("config file has insecure permissions",
-				"path", path,
-				"mode", fmt.Sprintf("%04o", mode),
-				"recommended", "0600")
-		}
+	if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o077 != 0 {
+		slog.Warn("config file has insecure permissions",
+			"path", path,
+			"mode", fmt.Sprintf("%04o", info.Mode().Perm()),
+			"recommended", "0600")
 	}
 
 	// Expand only safe environment variables in the config file
 	expanded := expandSafeEnvVars(string(data))
+	if len(expanded) > maxExpandedConfigBytes {
+		return fmt.Errorf("expanded config file %s exceeds %d-byte limit", path, maxExpandedConfigBytes)
+	}
 
 	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
 		return fmt.Errorf("failed to parse config file %s: %w", path, err)
@@ -457,9 +466,6 @@ func GetConfigPath() string {
 
 // Save saves the configuration to the config file.
 func (c *Config) Save() error {
-	configSaveMu.Lock()
-	defer configSaveMu.Unlock()
-
 	configPath := c.savePath
 	if configPath == "" {
 		configPath = getConfigPath()
@@ -468,33 +474,14 @@ func (c *Config) Save() error {
 		return fmt.Errorf("could not determine config path")
 	}
 
-	// Ensure config directory exists (0700 for security - only owner can access)
-	configDir := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
 	// Marshal config to YAML with proper ordering
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Write to file atomically (write to temp file then rename)
-	// Use 0600 permissions for security - config may contain API keys
-	tmpPath := configPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+	if err := WriteConfigFile(configPath, data); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	// Rename temp file to actual config file (atomic on POSIX systems)
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		// If rename fails, try direct write (Windows filesystem)
-		if err := os.WriteFile(configPath, data, 0600); err != nil {
-			return fmt.Errorf("failed to write config file: %w", err)
-		}
-		// Clean up the .tmp file that rename couldn't move.
-		os.Remove(tmpPath)
 	}
 
 	return nil

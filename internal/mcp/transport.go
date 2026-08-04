@@ -31,6 +31,15 @@ type Transport interface {
 	Close() error
 }
 
+// Streamable HTTP responses can contain tool output, so the limit is higher
+// than the line-oriented stdio ceiling while still preventing an untrusted MCP
+// server from growing the client process without bound.
+const maxHTTPResponseBodyBytes int64 = 8 << 20
+
+// A single SSE response may contain a result plus interleaved notifications.
+// Keep delivery bounded across requests, but large enough for realistic bursts.
+const maxHTTPQueuedMessages = 256
+
 // SafeEnvVars is the whitelist of environment variables passed to MCP server processes.
 // This prevents leaking sensitive environment variables like API keys.
 var SafeEnvVars = []string{
@@ -359,6 +368,7 @@ type HTTPTransport struct {
 	// For receiving messages (long-polling or SSE)
 	recvChan chan *JSONRPCMessage
 	errChan  chan error
+	recvMu   sync.Mutex // serializes all-or-nothing response batch delivery
 
 	mu     sync.Mutex
 	closed bool
@@ -376,12 +386,16 @@ func NewHTTPTransport(ctx context.Context, url string, headers map[string]string
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	headerSnapshot := make(map[string]string, len(headers))
+	for key, value := range headers {
+		headerSnapshot[key] = value
+	}
 
 	t := &HTTPTransport{
 		url:      url,
-		headers:  headers,
+		headers:  headerSnapshot,
 		timeout:  timeout,
-		recvChan: make(chan *JSONRPCMessage, 10),
+		recvChan: make(chan *JSONRPCMessage, maxHTTPQueuedMessages),
 		errChan:  make(chan error, 1),
 		ctx:      ctx,
 		cancel:   cancel,
@@ -443,13 +457,10 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Capture the session id the server assigns on initialize (Streamable HTTP);
-	// it must be echoed on every subsequent request.
-	if respSID := resp.Header.Get("Mcp-Session-Id"); respSID != "" {
-		t.mu.Lock()
-		t.sessionID = respSID
-		t.mu.Unlock()
-	}
+	// Do not commit the assigned session until the response has passed status,
+	// size, decoding and queue-capacity checks. A failed/malformed initialize
+	// must not poison every subsequent request with an unusable session id.
+	respSID := resp.Header.Get("Mcp-Session-Id")
 
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
@@ -457,12 +468,13 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedHTTPBody(resp.Body, resp.ContentLength, maxHTTPResponseBodyBytes)
 	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+		return err
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		// Accepted with no body (e.g. a notification ack) — nothing to dispatch.
+		t.commitSessionID(respSID)
 		logging.Debug("MCP HTTP message sent", "method", msg.Method, "id", msg.ID)
 		return nil
 	}
@@ -477,23 +489,83 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 	} else {
 		payloads = [][]byte{body}
 	}
+	responses := make([]*JSONRPCMessage, 0, len(payloads))
 	for _, p := range payloads {
 		var response JSONRPCMessage
 		if err := json.Unmarshal(p, &response); err != nil {
 			return fmt.Errorf("failed to decode response: %w", err)
 		}
-		select {
-		case t.recvChan <- &response:
-		case <-t.ctx.Done():
-			return t.ctx.Err()
-		}
+		responses = append(responses, &response)
 	}
+	if err := t.enqueueHTTPResponses(responses); err != nil {
+		return err
+	}
+	t.commitSessionID(respSID)
 
 	logging.Debug("MCP HTTP message sent",
 		"method", msg.Method,
 		"id", msg.ID)
 
 	return nil
+}
+
+func (t *HTTPTransport) commitSessionID(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	t.mu.Lock()
+	t.sessionID = sessionID
+	t.mu.Unlock()
+}
+
+func (t *HTTPTransport) enqueueHTTPResponses(responses []*JSONRPCMessage) error {
+	if len(responses) == 0 {
+		return nil
+	}
+
+	// Serialize the capacity check and sends so concurrent HTTP requests cannot
+	// each observe the same free slots. Receive only increases available space,
+	// therefore every send below is guaranteed non-blocking once this check
+	// succeeds. Reject the whole batch instead of exposing a partial SSE event
+	// sequence or deadlocking the caller before it can invoke Receive.
+	t.recvMu.Lock()
+	defer t.recvMu.Unlock()
+
+	pending := len(t.recvChan)
+	available := cap(t.recvChan) - pending
+	if len(responses) > available {
+		return fmt.Errorf(
+			"MCP HTTP receive queue capacity exceeded: %d pending + %d new > %d limit",
+			pending, len(responses), cap(t.recvChan),
+		)
+	}
+	select {
+	case <-t.ctx.Done():
+		return t.ctx.Err()
+	default:
+	}
+	for _, response := range responses {
+		t.recvChan <- response
+	}
+	return nil
+}
+
+func readLimitedHTTPBody(body io.Reader, contentLength, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("MCP HTTP response limit must be positive")
+	}
+	if contentLength > maxBytes {
+		return nil, fmt.Errorf("MCP HTTP response exceeds %d-byte limit", maxBytes)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("MCP HTTP response exceeds %d-byte limit", maxBytes)
+	}
+	return data, nil
 }
 
 // Receive receives a JSON-RPC message from the server.

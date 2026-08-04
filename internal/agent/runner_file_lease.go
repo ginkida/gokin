@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"gokin/internal/securefs"
 )
 
 var errAgentRunFileLeaseBusy = errors.New("durable agent run lease busy")
@@ -25,13 +27,13 @@ func (s *AgentStore) acquireAgentRunFileLease(agentID string) (*agentRunFileLeas
 		return nil, nil
 	}
 	lockDir := filepath.Join(s.dir, "run-locks")
-	if err := os.MkdirAll(lockDir, 0700); err != nil {
-		return nil, fmt.Errorf("create agent run lock directory: %w", err)
+	if err := securefs.EnsurePrivateDir(lockDir); err != nil {
+		return nil, fmt.Errorf("secure agent run lock directory: %w", err)
 	}
 
 	digest := sha256.Sum256([]byte(agentID))
 	path := filepath.Join(lockDir, hex.EncodeToString(digest[:])+".lock")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	file, err := securefs.OpenPrivateReadWrite(path)
 	if err != nil {
 		return nil, fmt.Errorf("open agent run lock: %w", err)
 	}

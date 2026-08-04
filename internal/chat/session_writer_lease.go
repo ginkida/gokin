@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"gokin/internal/securefs"
 )
 
 // ErrSessionWriterLeaseBusy is returned when another goroutine or process
@@ -72,9 +74,9 @@ func sessionWriterLeaseHeld(sessionsDir, sessionID string) bool {
 		return true
 	}
 	lockPath := filepath.Join(filepath.Clean(absSessionsDir), sessionWriterLockDirName, sessionID+".lock")
-	file, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
+	file, err := securefs.OpenPrivateReadWriteExisting(lockPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return false // never leased by anyone
 		}
 		return true
@@ -212,62 +214,5 @@ func (l *SessionWriterLease) Release() error {
 // objects. Lock files are intentionally retained: unlinking an advisory-lock
 // file can let another process lock a new inode while the original is active.
 func openSessionWriterLockFile(path string) (*os.File, error) {
-	for attempts := 0; attempts < 3; attempts++ {
-		before, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			file, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-			if os.IsExist(createErr) {
-				continue
-			}
-			if createErr != nil {
-				return nil, createErr
-			}
-			if err := verifySessionWriterLockFile(path, file, nil); err != nil {
-				_ = file.Close()
-				return nil, err
-			}
-			return file, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("session writer lock path %q is not a regular file", path)
-		}
-
-		file, err := os.OpenFile(path, os.O_RDWR, 0)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := verifySessionWriterLockFile(path, file, before); err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		return file, nil
-	}
-	return nil, fmt.Errorf("session writer lock path changed while opening")
-}
-
-func verifySessionWriterLockFile(path string, file *os.File, before os.FileInfo) error {
-	opened, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if !opened.Mode().IsRegular() || (before != nil && !os.SameFile(before, opened)) {
-		return fmt.Errorf("session writer lock path %q changed while opening", path)
-	}
-	after, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !after.Mode().IsRegular() || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
-		return fmt.Errorf("session writer lock path %q changed while opening", path)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		return fmt.Errorf("set session writer lock permissions: %w", err)
-	}
-	return nil
+	return securefs.OpenPrivateReadWrite(path)
 }

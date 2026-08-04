@@ -2,10 +2,13 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
-	"path/filepath"
+	"sync"
 
 	"gokin/internal/logging"
+	"gokin/internal/pinned"
 
 	"google.golang.org/genai"
 )
@@ -13,6 +16,7 @@ import (
 // PinContextTool allows the agent to pin information to the system prompt.
 // Pinned context is persisted to .gokin/pinned_context.md and restored on restart.
 type PinContextTool struct {
+	mu      sync.Mutex
 	updater func(content string)
 	workDir string
 }
@@ -26,30 +30,43 @@ func NewPinContextTool(updater func(content string)) *PinContextTool {
 
 // SetWorkDir sets the working directory for pin persistence.
 func (t *PinContextTool) SetWorkDir(dir string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.workDir = dir
 }
 
 // LoadPersistedPin reads pinned context from disk and applies it via updater.
 // Called at app startup to restore the pin from a previous session.
 func (t *PinContextTool) LoadPersistedPin() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.workDir == "" || t.updater == nil {
 		return
 	}
-	path := filepath.Join(t.workDir, ".gokin", "pinned_context.md")
-	data, err := os.ReadFile(path)
+	content, err := pinned.Load(t.workDir)
 	if err != nil {
-		return // No pin file or not readable — that's fine
+		if !errors.Is(err, os.ErrNotExist) {
+			logging.Warn("failed to restore pinned context", "error", err)
+		}
+		return
 	}
-	content := string(data)
-	if content != "" {
-		t.updater(content)
-		logging.Debug("restored pinned context from disk", "size", len(content))
-	}
+	// An empty persisted value is a durable clear marker and must overwrite a
+	// previously-active value when this method is called more than once.
+	t.updater(content)
+	logging.Debug("restored pinned context from disk", "size", len(content))
 }
 
 // SetUpdater sets the function to update pinned context.
 func (t *PinContextTool) SetUpdater(fn func(string)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.updater = fn
+}
+
+func (t *PinContextTool) persistenceWorkDir() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.workDir
 }
 
 func (t *PinContextTool) Name() string {
@@ -62,7 +79,8 @@ Use this for "hot memory" — to keep track of your current high-level goal, imp
 
 PARAMETERS:
 - content (required): The information to pin. Providing an empty string or 'clear' will unpin all context.
-- clear (optional): If true, clears the pinned context rather than setting it.`
+- clear (optional): If true, clears the pinned context rather than setting it.
+Pinned content is limited to 64 KiB.`
 }
 
 func (t *PinContextTool) Declaration() *genai.FunctionDeclaration {
@@ -87,14 +105,20 @@ func (t *PinContextTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *PinContextTool) Validate(args map[string]any) error {
-	_, ok := GetString(args, "content")
+	content, ok := GetString(args, "content")
 	if !ok {
 		return NewValidationError("content", "is required")
+	}
+	clear, _ := args["clear"].(bool)
+	if !clear && content != "clear" && len(content) > pinned.MaxContentBytes {
+		return NewValidationError("content", fmt.Sprintf("exceeds the %d-byte limit", pinned.MaxContentBytes))
 	}
 	return nil
 }
 
 func (t *PinContextTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	content, _ := GetString(args, "content")
 	clear, _ := args["clear"].(bool)
 
@@ -103,37 +127,32 @@ func (t *PinContextTool) Execute(ctx context.Context, args map[string]any) (Tool
 	}
 
 	if clear || content == "clear" {
+		if err := t.persistPin(""); err != nil {
+			logging.Warn("failed to clear persisted pinned context", "error", err)
+			return NewErrorResult(fmt.Sprintf("failed to clear pinned context: %v", err)), nil
+		}
 		t.updater("")
-		t.persistPin("")
 		EmitMemoryNotify(ctx, "unpinned", "")
 		return NewSuccessResult("Pinned context cleared."), nil
 	}
 
+	if len(content) > pinned.MaxContentBytes {
+		return NewErrorResult(fmt.Sprintf("pinned context exceeds the %d-byte limit", pinned.MaxContentBytes)), nil
+	}
+	if err := t.persistPin(content); err != nil {
+		logging.Warn("failed to persist pinned context", "error", err)
+		return NewErrorResult(fmt.Sprintf("failed to persist pinned context: %v", err)), nil
+	}
 	t.updater(content)
-	t.persistPin(content)
 	EmitMemoryNotify(ctx, "pinned", content)
 	return NewSuccessResult("Information pinned to system prompt."), nil
 }
 
-// persistPin saves or removes the pin file on disk.
-func (t *PinContextTool) persistPin(content string) {
+// persistPin saves the pin when this tool is bound to a workspace. Tools used
+// without a workspace retain their historical session-only behavior.
+func (t *PinContextTool) persistPin(content string) error {
 	if t.workDir == "" {
-		return
+		return nil
 	}
-	path := filepath.Join(t.workDir, ".gokin", "pinned_context.md")
-	if content == "" {
-		os.Remove(path)
-		return
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		logging.Warn("failed to create pinned context directory", "path", dir, "error", err)
-		return
-	}
-	// AtomicWrite (temp+rename): a crash/kill/disk-full mid-write must not leave
-	// a truncated pinned_context.md that LoadPersistedPin silently injects into
-	// the system prompt next boot.
-	if err := AtomicWriteString(path, content, 0644); err != nil {
-		logging.Warn("failed to persist pinned context", "path", path, "error", err)
-	}
+	return pinned.Save(t.workDir, content)
 }

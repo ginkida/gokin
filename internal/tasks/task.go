@@ -3,7 +3,9 @@ package tasks
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
+	"gokin/internal/format"
 	"gokin/internal/logging"
 )
 
@@ -119,15 +123,18 @@ func (s Status) String() string {
 //
 // When OutputFile is set, writes go to both the in-memory buffer and a file.
 // The in-memory buffer is capped at maxMemoryOutputBytes; beyond that, only
-// the file contains the full output. String() returns in-memory content.
-// FullString() reads from file if available and in-memory buffer was truncated.
+// the bounded file transcript retains additional output. A disk-cap marker
+// makes partial transcripts self-describing. String() returns memory content;
+// FullString() returns the most complete retained evidence.
 type safeBuffer struct {
 	mu         sync.Mutex
 	buf        bytes.Buffer
 	file       *os.File
 	filePath   string
 	totalBytes int64
+	diskBytes  int64
 	truncated  bool
+	diskCut    bool
 	// fileFailed records a mid-stream write failure: filePath then points at
 	// an INCOMPLETE file and the truncation notice must not advertise it as
 	// the full output. Distinct from file==nil, which also happens on the
@@ -135,35 +142,98 @@ type safeBuffer struct {
 	fileFailed bool
 }
 
-const maxMemoryOutputBytes = 10 * 1024 * 1024 // 10 MB cap for in-memory output
+const (
+	maxMemoryOutputBytes = 10 << 20
+	maxTaskDiskOutput    = 64 << 20
+)
+
+var taskOutputDiskTruncationMarker = []byte(fmt.Sprintf(
+	"\n\n[Task transcript truncated at %d MiB disk limit.]\n", maxTaskDiskOutput>>20))
 
 func (b *safeBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Always write to file if available
-	if b.file != nil {
-		if _, err := b.file.Write(p); err != nil {
-			// Disable file-backed output on first failure so we don't
-			// keep attempting broken writes on every subsequent chunk.
-			logging.Warn("task output file write failed; disabling file output", "path", b.filePath, "error", err)
-			b.file.Close()
-			b.file = nil
-			b.fileFailed = true
-		}
-	}
+	b.writeDiskLocked(p)
 
 	b.totalBytes += int64(len(p))
 
-	// Write to in-memory buffer only if under cap
-	if !b.truncated && b.buf.Len()+len(p) <= maxMemoryOutputBytes {
-		return b.buf.Write(p)
-	}
-
 	if !b.truncated {
+		remaining := int(maxMemoryOutputBytes) - b.buf.Len()
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		if remaining > 0 {
+			_, _ = b.buf.Write(p[:remaining])
+		}
+		if remaining < len(p) {
+			if trimmed := format.TrimSplitTrailingRune(b.buf.Bytes()); len(trimmed) < b.buf.Len() {
+				b.buf.Truncate(len(trimmed))
+			}
+			b.truncated = true
+		}
+	}
+	if int64(b.buf.Len()) >= maxMemoryOutputBytes && b.totalBytes > maxMemoryOutputBytes {
 		b.truncated = true
 	}
-	return len(p), nil // Accept write but don't store in memory
+	return len(p), nil
+}
+
+func (b *safeBuffer) writeDiskLocked(p []byte) {
+	if b.file == nil || b.diskCut || len(p) == 0 {
+		return
+	}
+	dataLimit := maxTaskDiskOutput - int64(len(taskOutputDiskTruncationMarker))
+	remaining := dataLimit - b.diskBytes
+	if remaining < 0 {
+		remaining = 0
+	}
+	toWrite := p
+	crossesLimit := int64(len(p)) > remaining
+	if crossesLimit {
+		toWrite = p[:int(remaining)]
+		toWrite = format.TrimSplitTrailingRune(toWrite)
+	}
+	n, err := writeTaskOutputBytes(b.file, toWrite)
+	b.diskBytes += int64(n)
+	if err != nil {
+		b.failFileLocked(err)
+		return
+	}
+	if crossesLimit {
+		n, err = writeTaskOutputBytes(b.file, taskOutputDiskTruncationMarker)
+		b.diskBytes += int64(n)
+		b.diskCut = true
+		if err != nil {
+			b.failFileLocked(err)
+		}
+	}
+}
+
+func (b *safeBuffer) failFileLocked(err error) {
+	logging.Warn("task output file write failed; disabling file output", "path", b.filePath, "error", err)
+	if b.file != nil {
+		_ = b.file.Close()
+		b.file = nil
+	}
+	b.fileFailed = true
+	b.diskCut = true
+}
+
+func writeTaskOutputBytes(file *os.File, data []byte) (int, error) {
+	total := 0
+	for len(data) > 0 {
+		n, err := file.Write(data)
+		total += n
+		data = data[n:]
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 func (b *safeBuffer) String() string {
@@ -175,6 +245,9 @@ func (b *safeBuffer) String() string {
 		// output exists: pointing the user/model at a nonexistent or
 		// incomplete log file sends them chasing output that isn't there.
 		switch {
+		case b.filePath != "" && b.diskCut && !b.fileFailed:
+			s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total. Transcript prefix in: %s (disk limit reached).]",
+				b.totalBytes, b.filePath)
 		case b.filePath != "" && !b.fileFailed:
 			s += fmt.Sprintf("\n\n[Output truncated in memory: %d bytes total. Full output in: %s]",
 				b.totalBytes, b.filePath)
@@ -189,7 +262,7 @@ func (b *safeBuffer) String() string {
 	return s
 }
 
-// FullString returns the complete file-backed output when the in-memory cap
+// FullString returns the bounded file-backed transcript when the in-memory cap
 // was exceeded. It falls back to String when file persistence was unavailable
 // or failed, keeping callers honest about the evidence they actually have.
 func (b *safeBuffer) FullString() string {
@@ -202,7 +275,7 @@ func (b *safeBuffer) FullString() string {
 	if !truncated || path == "" || fileFailed {
 		return b.String()
 	}
-	data, err := os.ReadFile(path)
+	data, err := fileutil.ReadPrivateFile(path, maxTaskDiskOutput)
 	if err != nil {
 		return b.String()
 	}
@@ -213,12 +286,44 @@ func (b *safeBuffer) FullString() string {
 func (b *safeBuffer) SetOutputFile(path string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if path == "" {
+		return fmt.Errorf("task output path is empty")
+	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := fileutil.EnsurePrivateDir(dir); err != nil {
 		return err
 	}
-	f, err := os.Create(path)
+	return b.openOutputFileLocked(path)
+}
+
+func (b *safeBuffer) setTaskOutputFile(workDir, taskID string) error {
+	path := taskOutputFilePath(workDir, taskID)
+	if path == "" {
+		return fmt.Errorf("task output path is unavailable")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	gokinDir := filepath.Join(workDir, ".gokin")
+	if err := fileutil.EnsurePrivateDir(gokinDir); err != nil {
+		return err
+	}
+	if err := fileutil.EnsurePrivateDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return b.openOutputFileLocked(path)
+}
+
+func (b *safeBuffer) openOutputFileLocked(path string) error {
+	f, err := fileutil.OpenPrivateReadWrite(path)
 	if err != nil {
+		return err
+	}
+	if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
 		return err
 	}
 	b.file = f
@@ -226,12 +331,32 @@ func (b *safeBuffer) SetOutputFile(path string) error {
 	return nil
 }
 
+func taskOutputFilePath(workDir, taskID string) string {
+	if workDir == "" || taskID == "" {
+		return ""
+	}
+	safe := len(taskID) <= 128
+	for _, r := range taskID {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_') {
+			safe = false
+			break
+		}
+	}
+	if !safe {
+		sum := sha256.Sum256([]byte(taskID))
+		taskID = fmt.Sprintf("task-%x", sum[:8])
+	}
+	return filepath.Join(workDir, ".gokin", "task-output", taskID+".log")
+}
+
 // Close closes the output file if open.
 func (b *safeBuffer) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.file != nil {
-		b.file.Close()
+		_ = b.file.Sync()
+		_ = b.file.Close()
 		b.file = nil
 	}
 }
@@ -325,8 +450,7 @@ func (t *Task) Start(ctx context.Context) error {
 	t.cmd.Stderr = &t.Output
 
 	// Set up file-backed output streaming for long-running tasks
-	outputDir := filepath.Join(t.WorkDir, ".gokin", "task-output")
-	if err := t.Output.SetOutputFile(filepath.Join(outputDir, t.ID+".log")); err != nil {
+	if err := t.Output.setTaskOutputFile(t.WorkDir, t.ID); err != nil {
 		// Non-fatal: task runs fine, but /task-output won't have persistent log.
 		// Common cause: .gokin/task-output directory can't be created (e.g., read-only fs).
 		fmt.Fprintf(&t.Output, "[warning: file-backed output unavailable: %s]\n", err)
@@ -350,14 +474,18 @@ func (t *Task) Start(ctx context.Context) error {
 
 // run executes the command and updates status.
 func (t *Task) run() {
-	defer t.Output.Close() // Close output file when task finishes
+	// Publish Done only after the transcript has been synced and closed, so
+	// WaitAll and FullString never race a still-open writer.
+	defer func() {
+		t.Output.Close()
+		t.doneOnce.Do(func() { close(t.done) })
+	}()
 
 	err := t.cmd.Start()
 
 	t.mu.Lock()
 	if err != nil {
 		defer t.mu.Unlock()
-		defer t.doneOnce.Do(func() { close(t.done) }) // Guarantees done is closed on any exit path
 
 		// Release context resources regardless of how the command finished.
 		if t.cancelFunc != nil {
@@ -388,7 +516,6 @@ func (t *Task) run() {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	defer t.doneOnce.Do(func() { close(t.done) }) // Guarantees done is closed on any exit path
 
 	// Release context resources regardless of how the command finished.
 	if t.cancelFunc != nil {

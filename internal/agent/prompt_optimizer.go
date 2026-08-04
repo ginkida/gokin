@@ -4,13 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -65,6 +65,10 @@ func NewPromptOptimizer(configDir string) *PromptOptimizer {
 		variants:  make(map[string]*PromptVariant),
 		byBase:    make(map[string][]string),
 	}
+	if err := ensureOptimizerStoreDir(configDir); err != nil {
+		logging.Debug("failed to prepare prompt optimizer directory", "error", err)
+		return po
+	}
 
 	if err := po.load(); err != nil {
 		logging.Debug("failed to load prompt optimizer", "error", err)
@@ -80,9 +84,9 @@ func (po *PromptOptimizer) storagePath() string {
 
 // load loads variants from disk.
 func (po *PromptOptimizer) load() error {
-	data, err := os.ReadFile(po.storagePath())
+	data, err := readOptimizerStore(po.storagePath())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -93,12 +97,21 @@ func (po *PromptOptimizer) load() error {
 		return err
 	}
 
-	po.variants = variants
+	valid := make(map[string]*PromptVariant, len(variants))
+	for id, variant := range variants {
+		if id != "" && variant != nil {
+			valid[id] = variant
+		}
+	}
+	po.variants = valid
 
 	// Rebuild base index
 	po.byBase = make(map[string][]string)
 	for id, v := range po.variants {
 		po.byBase[v.BasePrompt] = append(po.byBase[v.BasePrompt], id)
+	}
+	if len(po.variants) > MaxPromptVariants {
+		po.evictOldest(MaxPromptVariants)
 	}
 
 	return nil
@@ -116,11 +129,7 @@ func (po *PromptOptimizer) save() ([]byte, error) {
 
 // writeSnapshot writes pre-serialized data to disk without holding any locks.
 func (po *PromptOptimizer) writeSnapshot(data []byte) error {
-	dir := filepath.Dir(po.storagePath())
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	return fileutil.AtomicWrite(po.storagePath(), data, 0644)
+	return writeOptimizerStore(po.storagePath(), data)
 }
 
 // generateVariantID creates a unique ID for a variant.

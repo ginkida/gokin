@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -390,31 +389,18 @@ func saveProviderConfig(backend, apiKey, modelName string) (string, error) {
 		return "", fmt.Errorf("failed to get config path: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return "", fmt.Errorf("failed to create directory: %w", err)
-	}
+	if err := updateRawConfig(configPath, func(root map[string]any) {
+		api := ensureMap(root, "api")
+		// Write to the provider-specific key field (glm_key / kimi_key / minimax_key).
+		keyField := backend + "_key"
+		api[keyField] = apiKey
+		api["active_provider"] = backend
+		api["backend"] = backend // keep legacy alias in sync for older readers
 
-	root, err := loadRawConfigOrEmpty(configPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read existing config: %w", err)
-	}
-
-	api := ensureMap(root, "api")
-	// Write to the provider-specific key field (glm_key / kimi_key / minimax_key).
-	keyField := backend + "_key"
-	api[keyField] = apiKey
-	api["active_provider"] = backend
-	api["backend"] = backend // keep legacy alias in sync for older readers
-
-	model := ensureMap(root, "model")
-	model["provider"] = backend
-	model["name"] = modelName
-
-	data, err := yaml.Marshal(root)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal config: %w", err)
-	}
-	if err := writeFileAtomic(configPath, data, 0600); err != nil {
+		model := ensureMap(root, "model")
+		model["provider"] = backend
+		model["name"] = modelName
+	}); err != nil {
 		return "", fmt.Errorf("failed to save config: %w", err)
 	}
 	return configPath, nil
@@ -440,42 +426,27 @@ func saveOllamaConfig(apiKey, modelName, serverURL string) (string, error) {
 		return "", fmt.Errorf("failed to get config path: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return "", fmt.Errorf("failed to create directory: %w", err)
-	}
+	if err := updateRawConfig(configPath, func(root map[string]any) {
+		api := ensureMap(root, "api")
+		api["active_provider"] = "ollama"
+		api["backend"] = "ollama"
+		// Reset ollama-specific fields before applying the current mode. Without
+		// this, a user who ran Cloud setup (writing ollama_key + ollama_base_url=
+		// https://ollama.com) and later re-ran the wizard picking Local with the
+		// default endpoint would end up with stale cloud settings still in place.
+		delete(api, "ollama_key")
+		delete(api, "ollama_base_url")
+		if apiKey != "" {
+			api["ollama_key"] = apiKey
+		}
+		if serverURL != "" {
+			api["ollama_base_url"] = serverURL
+		}
 
-	root, err := loadRawConfigOrEmpty(configPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read existing config: %w", err)
-	}
-
-	api := ensureMap(root, "api")
-	api["active_provider"] = "ollama"
-	api["backend"] = "ollama"
-	// Reset ollama-specific fields before applying the current mode. Without
-	// this, a user who ran Cloud setup (writing ollama_key + ollama_base_url=
-	// https://ollama.com) and later re-ran the wizard picking Local with the
-	// default endpoint would end up with stale cloud settings still in place
-	// — the client would keep hitting ollama.com. Other providers' keys and
-	// unrelated config sections are intentionally untouched.
-	delete(api, "ollama_key")
-	delete(api, "ollama_base_url")
-	if apiKey != "" {
-		api["ollama_key"] = apiKey
-	}
-	if serverURL != "" {
-		api["ollama_base_url"] = serverURL
-	}
-
-	model := ensureMap(root, "model")
-	model["provider"] = "ollama"
-	model["name"] = modelName
-
-	data, err := yaml.Marshal(root)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal config: %w", err)
-	}
-	if err := writeFileAtomic(configPath, data, 0600); err != nil {
+		model := ensureMap(root, "model")
+		model["provider"] = "ollama"
+		model["name"] = modelName
+	}); err != nil {
 		return "", fmt.Errorf("failed to save config: %w", err)
 	}
 	return configPath, nil
@@ -484,13 +455,17 @@ func saveOllamaConfig(apiKey, modelName, serverURL string) (string, error) {
 // loadRawConfigOrEmpty reads config.yaml as a generic YAML tree so we can
 // preserve unknown fields across a save. Missing file returns an empty map.
 func loadRawConfigOrEmpty(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
+	data, err := config.ReadConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]any{}, nil
 		}
 		return nil, err
 	}
+	return parseRawConfig(path, data)
+}
+
+func parseRawConfig(path string, data []byte) (map[string]any, error) {
 	if len(data) == 0 {
 		return map[string]any{}, nil
 	}
@@ -502,6 +477,24 @@ func loadRawConfigOrEmpty(path string) (map[string]any, error) {
 		root = map[string]any{}
 	}
 	return root, nil
+}
+
+// updateRawConfig holds the shared config writer lock across the entire
+// read-modify-write cycle, so concurrent wizard updates cannot silently drop
+// each other's fields and a full Config.Save cannot interleave publication.
+func updateRawConfig(path string, mutate func(map[string]any)) error {
+	return config.UpdateConfigFile(path, func(existing []byte) ([]byte, error) {
+		root, err := parseRawConfig(path, existing)
+		if err != nil {
+			return nil, err
+		}
+		mutate(root)
+		data, err := yaml.Marshal(root)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal config: %w", err)
+		}
+		return data, nil
+	})
 }
 
 // ensureMap returns the submap at parent[key], creating it (and coercing
@@ -526,15 +519,10 @@ func ensureMap(parent map[string]any, key string) map[string]any {
 // writeFileAtomic writes data to path via a temp file + rename so an
 // interrupted save can't leave a partial config on disk.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
+	if perm.Perm() != 0o600 {
+		return fmt.Errorf("config files must use 0600 permissions")
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return os.WriteFile(path, data, perm)
-	}
-	return nil
+	return config.WriteConfigFile(path, data)
 }
 
 func setupOllama(reader *bufio.Reader) error {

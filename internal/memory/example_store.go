@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -60,6 +60,9 @@ func NewExampleStore(configDir string) (*ExampleStore, error) {
 		examples:  make(map[string]*TaskExample),
 		byType:    make(map[string][]string),
 	}
+	if err := ensureAuxiliaryStoreDir(configDir); err != nil {
+		return nil, err
+	}
 
 	if err := es.load(); err != nil {
 		logging.Debug("failed to load example store", "error", err)
@@ -76,9 +79,9 @@ func (es *ExampleStore) storagePath() string {
 
 // load loads examples from disk.
 func (es *ExampleStore) load() error {
-	data, err := os.ReadFile(es.storagePath())
+	data, err := readAuxiliaryStore(es.storagePath())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -89,7 +92,16 @@ func (es *ExampleStore) load() error {
 		return err
 	}
 
-	es.examples = examples
+	valid := make(map[string]*TaskExample, len(examples))
+	for id, ex := range examples {
+		if id != "" && ex != nil {
+			valid[id] = ex
+		}
+	}
+	es.examples = valid
+	if len(es.examples) > maxGlobalExamples {
+		es.pruneGloballyLocked(maxGlobalExamples)
+	}
 
 	// Rebuild type index
 	es.byType = make(map[string][]string)
@@ -108,12 +120,7 @@ func (es *ExampleStore) saveSnapshot(path string, data []byte) error {
 		exampleStoreSaveIOHookForTest()
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	return fileutil.AtomicWrite(path, data, 0644)
+	return writeAuxiliaryStore(path, data)
 }
 
 func (es *ExampleStore) snapshotLocked() ([]byte, error) {

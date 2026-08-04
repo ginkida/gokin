@@ -172,6 +172,9 @@ func (u *Updater) Download(ctx context.Context, info *UpdateInfo, progress Progr
 	if info == nil {
 		return "", fmt.Errorf("no update info provided")
 	}
+	if err := validateUpdateAssetSize(info.AssetSize); err != nil {
+		return "", err
+	}
 
 	if err := u.beginOperation(); err != nil {
 		return "", err
@@ -295,6 +298,12 @@ func (u *Updater) Update(ctx context.Context, progress ProgressCallback) (*Updat
 // downloadWithChecksum performs download path without operation locking.
 // Used by Update() which already holds operation lock.
 func (u *Updater) downloadWithChecksum(ctx context.Context, info *UpdateInfo, progress ProgressCallback) (string, error) {
+	if info == nil {
+		return "", fmt.Errorf("no update info provided")
+	}
+	if err := validateUpdateAssetSize(info.AssetSize); err != nil {
+		return "", err
+	}
 	// Download the asset
 	downloadedPath, err := u.downloader.Download(ctx, info.AssetURL, progress)
 	if err != nil {
@@ -353,6 +362,16 @@ func (u *Updater) downloadWithChecksum(ctx context.Context, info *UpdateInfo, pr
 		os.Remove(downloadedPath)
 	}
 	return binaryPath, nil
+}
+
+func validateUpdateAssetSize(size int64) error {
+	if size < 0 {
+		return fmt.Errorf("update asset size cannot be negative")
+	}
+	if size > maxUpdateDownloadBytes {
+		return fmt.Errorf("update asset exceeds %d-byte limit", maxUpdateDownloadBytes)
+	}
+	return nil
 }
 
 // Rollback rolls back to the previous version.

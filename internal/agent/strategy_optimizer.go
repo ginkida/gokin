@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -9,9 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
+
+const MaxStrategyMetrics = 1000
 
 // StrategyMetrics tracks performance metrics for a strategy.
 type StrategyMetrics struct {
@@ -56,6 +58,10 @@ func NewStrategyOptimizer(configDir string) *StrategyOptimizer {
 		metrics:   make(map[string]*StrategyMetrics),
 		configDir: configDir,
 	}
+	if err := ensureOptimizerStoreDir(configDir); err != nil {
+		logging.Debug("failed to prepare strategy metrics directory", "error", err)
+		return so
+	}
 
 	// Load existing metrics
 	if err := so.load(); err != nil {
@@ -72,9 +78,9 @@ func (so *StrategyOptimizer) storagePath() string {
 
 // load loads metrics from disk.
 func (so *StrategyOptimizer) load() error {
-	data, err := os.ReadFile(so.storagePath())
+	data, err := readOptimizerStore(so.storagePath())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -85,7 +91,20 @@ func (so *StrategyOptimizer) load() error {
 		return err
 	}
 
-	so.metrics = metrics
+	valid := make(map[string]*StrategyMetrics, len(metrics))
+	for name, metric := range metrics {
+		if name == "" || metric == nil {
+			continue
+		}
+		if metric.TaskTypes == nil {
+			metric.TaskTypes = make(map[string]int)
+		}
+		valid[name] = metric
+	}
+	so.metrics = valid
+	if len(so.metrics) > MaxStrategyMetrics {
+		so.evictOldest(MaxStrategyMetrics)
+	}
 	return nil
 }
 
@@ -101,11 +120,7 @@ func (so *StrategyOptimizer) save() ([]byte, error) {
 
 // writeSnapshot writes pre-serialized data to disk without holding any locks.
 func (so *StrategyOptimizer) writeSnapshot(data []byte) error {
-	dir := filepath.Dir(so.storagePath())
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	return fileutil.AtomicWrite(so.storagePath(), data, 0644)
+	return writeOptimizerStore(so.storagePath(), data)
 }
 
 // RecordExecution records the outcome of a strategy execution.
@@ -133,6 +148,9 @@ func (so *StrategyOptimizer) RecordExecution(strategyName string, taskType strin
 	metrics.AvgDuration = metrics.TotalTime / time.Duration(total)
 	metrics.LastUsed = time.Now()
 	metrics.TaskTypes[taskType]++
+	if len(so.metrics) > MaxStrategyMetrics {
+		so.evictOldest(MaxStrategyMetrics)
+	}
 
 	// Snapshot data under lock, write to disk asynchronously
 	snapshot, err := so.save()
@@ -150,6 +168,26 @@ func (so *StrategyOptimizer) RecordExecution(strategyName string, taskType strin
 			logging.Debug("failed to save strategy metrics", "error", err)
 		}
 	}()
+}
+
+// evictOldest bounds durable strategy cardinality. Caller holds so.mu when
+// mutations are live; load invokes it before the optimizer is published.
+func (so *StrategyOptimizer) evictOldest(maxSize int) {
+	if len(so.metrics) <= maxSize {
+		return
+	}
+	type entry struct {
+		name     string
+		lastUsed time.Time
+	}
+	entries := make([]entry, 0, len(so.metrics))
+	for name, metrics := range so.metrics {
+		entries = append(entries, entry{name: name, lastUsed: metrics.LastUsed})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].lastUsed.Before(entries[j].lastUsed) })
+	for _, victim := range entries[:len(entries)-maxSize] {
+		delete(so.metrics, victim.name)
+	}
 }
 
 // GetSuccessRate returns the success rate for a strategy.

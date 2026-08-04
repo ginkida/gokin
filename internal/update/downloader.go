@@ -7,22 +7,33 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/security"
+)
+
+const (
+	maxChecksumFileBytes    int64 = 1 << 20
+	maxUpdateDownloadBytes  int64 = 1 << 30
+	maxExtractedBinaryBytes int64 = 512 << 20
 )
 
 // Downloader handles downloading update files.
 type Downloader struct {
-	httpClient *http.Client
-	config     *Config
-	tempDir    string
+	httpClient  *http.Client
+	config      *Config
+	tempDir     string
+	validateURL func(string) error
 }
 
 // NewDownloader creates a new downloader.
@@ -32,16 +43,21 @@ func NewDownloader(config *Config, tempDir string) *Downloader {
 	if err != nil {
 		httpClient = &http.Client{Timeout: 10 * time.Minute}
 	}
+	httpClient = security.WithSSRFRedirectProtection(httpClient)
 	return &Downloader{
-		httpClient: httpClient,
-		config:     config,
-		tempDir:    tempDir,
+		httpClient:  httpClient,
+		config:      config,
+		tempDir:     tempDir,
+		validateURL: validateUpdateDownloadURL,
 	}
 }
 
 // Download downloads a file from the given URL with progress reporting.
 // Returns the path to the downloaded file.
 func (d *Downloader) Download(ctx context.Context, url string, progress ProgressCallback) (string, error) {
+	if err := d.validateDownloadURL(url); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrDownloadFailed, err)
+	}
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -51,10 +67,7 @@ func (d *Downloader) Download(ctx context.Context, url string, progress Progress
 	req.Header.Set("User-Agent", "gokin-updater/1.0")
 	req.Header.Set("Accept", "application/octet-stream")
 
-	// Add GitHub token if available
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
+	addGitHubTokenHeader(req)
 
 	// Send request
 	resp, err := d.httpClient.Do(req)
@@ -66,18 +79,33 @@ func (d *Downloader) Download(ctx context.Context, url string, progress Progress
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%w: HTTP %d", ErrDownloadFailed, resp.StatusCode)
 	}
-
-	// Create temp directory if needed
-	if err := os.MkdirAll(d.tempDir, 0755); err != nil {
-		return "", err
+	if resp.ContentLength > maxUpdateDownloadBytes {
+		return "", fmt.Errorf("%w: response exceeds %d-byte limit", ErrDownloadFailed, maxUpdateDownloadBytes)
 	}
 
-	// Create temp file
-	tmpFile, err := os.CreateTemp(d.tempDir, "gokin-update-*")
+	// Create temp directory if needed
+	if err := d.ensureTempDir(); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrDownloadFailed, err)
+	}
+
+	// Preserve only known archive suffixes from the URL. Without this, a
+	// downloaded .tar.gz received a random extensionless name and was later
+	// mistaken for an already-extracted executable.
+	tmpFile, err := os.CreateTemp(d.tempDir, "gokin-update-*"+downloadArchiveSuffix(url))
 	if err != nil {
 		return "", err
 	}
-	defer tmpFile.Close()
+	tmpPath := tmpFile.Name()
+	closed := false
+	committed := false
+	defer func() {
+		if !closed {
+			_ = tmpFile.Close()
+		}
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	// Get total size for progress
 	totalSize := resp.ContentLength
@@ -90,13 +118,11 @@ func (d *Downloader) Download(ctx context.Context, url string, progress Progress
 	}
 
 	// Download with progress
-	written, err := io.Copy(pw, resp.Body)
+	written, err := copyWithByteLimit(pw, resp.Body, maxUpdateDownloadBytes)
 	if err != nil {
-		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("%w: %w", ErrDownloadFailed, err)
 	}
 	if totalSize > 0 && written != totalSize {
-		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("%w: incomplete download (%d/%d bytes)", ErrDownloadFailed, written, totalSize)
 	}
 
@@ -107,21 +133,27 @@ func (d *Downloader) Download(ctx context.Context, url string, progress Progress
 	// clean error message and a removed temp file instead of a corrupt
 	// installed binary.
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpFile.Name())
+		closed = true
 		return "", fmt.Errorf("%w: close: %w", ErrDownloadFailed, err)
 	}
+	closed = true
+	committed = true
 
-	return tmpFile.Name(), nil
+	return tmpPath, nil
 }
 
 // DownloadChecksum downloads and parses a checksum file.
 func (d *Downloader) DownloadChecksum(ctx context.Context, url string) (map[string]string, error) {
+	if err := d.validateDownloadURL(url); err != nil {
+		return nil, fmt.Errorf("failed to download checksum: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	req.Header.Set("User-Agent", "gokin-updater/1.0")
+	addGitHubTokenHeader(req)
 
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
@@ -133,13 +165,63 @@ func (d *Downloader) DownloadChecksum(ctx context.Context, url string) (map[stri
 		return nil, fmt.Errorf("failed to download checksum: HTTP %d", resp.StatusCode)
 	}
 
-	// Limit size of checksum file
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB max
+	// Reject rather than silently truncate an oversized checksum document: a
+	// valid-looking entry in the first MiB must not make ignored trailing data
+	// disappear from the integrity decision.
+	data, err := readBoundedResponseBody(resp.Body, resp.ContentLength, maxChecksumFileBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read checksum file: %w", err)
 	}
 
 	return d.parseChecksumFile(string(data)), nil
+}
+
+func (d *Downloader) validateDownloadURL(rawURL string) error {
+	validator := d.validateURL
+	if validator == nil {
+		validator = validateUpdateDownloadURL
+	}
+	return validator(rawURL)
+}
+
+func validateUpdateDownloadURL(rawURL string) error {
+	result := security.ValidateURLForSSRF(rawURL)
+	if !result.Valid {
+		return fmt.Errorf("unsafe update URL: %s", result.Reason)
+	}
+	return nil
+}
+
+func (d *Downloader) ensureTempDir() error {
+	return ensurePrivateUpdateDir(d.tempDir, "update temp")
+}
+
+func downloadArchiveSuffix(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	lowerPath := strings.ToLower(parsed.Path)
+	for _, suffix := range []string{".tar.gz", ".tgz", ".zip", ".exe"} {
+		if strings.HasSuffix(lowerPath, suffix) {
+			return suffix
+		}
+	}
+	return ""
+}
+
+func copyWithByteLimit(dst io.Writer, src io.Reader, maxBytes int64) (int64, error) {
+	if maxBytes <= 0 {
+		return 0, fmt.Errorf("copy limit must be positive")
+	}
+	written, err := io.Copy(dst, io.LimitReader(src, maxBytes+1))
+	if err != nil {
+		return written, err
+	}
+	if written > maxBytes {
+		return written, fmt.Errorf("content exceeds %d-byte limit", maxBytes)
+	}
+	return written, nil
 }
 
 // parseChecksumFile parses a checksum file in common formats.
@@ -209,6 +291,9 @@ func (d *Downloader) ComputeChecksum(filePath string) (string, error) {
 // ExtractBinary extracts the binary from an archive.
 // Supports: .tar.gz, .tgz, .zip, and raw binaries.
 func (d *Downloader) ExtractBinary(archivePath, binaryName string) (string, error) {
+	if binaryName == "" || path.Base(binaryName) != binaryName || binaryName == "." {
+		return "", fmt.Errorf("invalid binary name %q", binaryName)
+	}
 	ext := strings.ToLower(filepath.Ext(archivePath))
 
 	// Check for .tar.gz
@@ -220,21 +305,44 @@ func (d *Downloader) ExtractBinary(archivePath, binaryName string) (string, erro
 		return d.extractZip(archivePath, binaryName)
 	}
 
-	// Assume it's a raw binary
+	// Assume it's a raw binary, but still reject symlinks/special files and
+	// implausibly large artifacts supplied through the public API.
+	file, err := fileutil.OpenRegularRead(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open raw update binary: %w", err)
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return "", fmt.Errorf("stat raw update binary: %w", statErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close raw update binary: %w", closeErr)
+	}
+	if info.Size() < 0 || info.Size() > maxExtractedBinaryBytes {
+		return "", fmt.Errorf("raw update binary exceeds %d-byte limit", maxExtractedBinaryBytes)
+	}
 	return archivePath, nil
 }
 
 // extractTarGz extracts a binary from a tar.gz archive.
 func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error) {
-	if err := os.MkdirAll(d.tempDir, 0755); err != nil {
+	if err := d.ensureTempDir(); err != nil {
 		return "", err
 	}
 
-	f, err := os.Open(archivePath)
+	f, err := fileutil.OpenRegularRead(archivePath)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	archiveInfo, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if archiveInfo.Size() < 0 || archiveInfo.Size() > maxUpdateDownloadBytes {
+		return "", fmt.Errorf("update archive exceeds %d-byte limit", maxUpdateDownloadBytes)
+	}
 
 	gzr, err := gzip.NewReader(f)
 	if err != nil {
@@ -258,37 +366,14 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 			continue
 		}
 
-		// Look for the binary
-		baseName := filepath.Base(header.Name)
+		// Archive paths always use slash separators, regardless of host OS.
+		baseName := path.Base(strings.ReplaceAll(header.Name, "\\", "/"))
 		if baseName == binaryName || baseName == binaryName+".exe" {
-			if header.Typeflag == tar.TypeReg {
-				// Extract to unique temp file
-				outFile, err := os.CreateTemp(d.tempDir, "gokin-bin-*")
-				if err != nil {
-					return "", err
+			if header.FileInfo().Mode().IsRegular() {
+				if header.Size < 0 || header.Size > maxExtractedBinaryBytes {
+					return "", fmt.Errorf("extracted binary exceeds %d-byte limit", maxExtractedBinaryBytes)
 				}
-				outPath := outFile.Name()
-
-				if _, err := io.Copy(outFile, tr); err != nil {
-					_ = outFile.Close()
-					os.Remove(outPath)
-					return "", err
-				}
-				// Close error matters here: on a full filesystem the kernel may
-				// defer the write failure until close. Ignoring it would
-				// silently produce a truncated binary that passes the rest of
-				// the install path (chmod doesn't validate content) and then
-				// fails at /restart with a confusing exec error.
-				if err := outFile.Close(); err != nil {
-					os.Remove(outPath)
-					return "", fmt.Errorf("close extracted binary: %w", err)
-				}
-				if err := os.Chmod(outPath, os.FileMode(header.Mode)); err != nil {
-					os.Remove(outPath)
-					return "", err
-				}
-
-				return outPath, nil
+				return d.writeExtractedBinary(tr, header.Size)
 			}
 		}
 	}
@@ -298,15 +383,26 @@ func (d *Downloader) extractTarGz(archivePath, binaryName string) (string, error
 
 // extractZip extracts a binary from a zip archive.
 func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) {
-	if err := os.MkdirAll(d.tempDir, 0755); err != nil {
+	if err := d.ensureTempDir(); err != nil {
 		return "", err
 	}
 
-	r, err := zip.OpenReader(archivePath)
+	archiveFile, err := fileutil.OpenRegularRead(archivePath)
 	if err != nil {
 		return "", err
 	}
-	defer r.Close()
+	defer archiveFile.Close()
+	archiveInfo, err := archiveFile.Stat()
+	if err != nil {
+		return "", err
+	}
+	if archiveInfo.Size() < 0 || archiveInfo.Size() > maxUpdateDownloadBytes {
+		return "", fmt.Errorf("update archive exceeds %d-byte limit", maxUpdateDownloadBytes)
+	}
+	r, err := zip.NewReader(archiveFile, archiveInfo.Size())
+	if err != nil {
+		return "", err
+	}
 
 	for _, f := range r.File {
 		// Skip symlinks to prevent path traversal attacks
@@ -314,42 +410,25 @@ func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) 
 			continue
 		}
 
-		baseName := filepath.Base(f.Name)
+		baseName := path.Base(strings.ReplaceAll(f.Name, "\\", "/"))
 		if baseName == binaryName || baseName == binaryName+".exe" {
-			if !f.FileInfo().IsDir() {
+			if f.FileInfo().Mode().IsRegular() {
+				if f.UncompressedSize64 > uint64(maxExtractedBinaryBytes) {
+					return "", fmt.Errorf("extracted binary exceeds %d-byte limit", maxExtractedBinaryBytes)
+				}
 				rc, err := f.Open()
 				if err != nil {
 					return "", err
 				}
-
-				outFile, err := os.CreateTemp(d.tempDir, "gokin-bin-*")
-				if err != nil {
-					_ = rc.Close()
-					return "", err
+				outPath, extractErr := d.writeExtractedBinary(rc, int64(f.UncompressedSize64))
+				closeErr := rc.Close()
+				if extractErr != nil {
+					return "", extractErr
 				}
-				outPath := outFile.Name()
-
-				if _, err := io.Copy(outFile, rc); err != nil {
-					_ = outFile.Close()
-					os.Remove(outPath)
-					_ = rc.Close()
-					return "", err
+				if closeErr != nil {
+					_ = os.Remove(outPath)
+					return "", fmt.Errorf("close zip entry: %w", closeErr)
 				}
-
-				// See extractTarGz: a deferred-flush failure on close would
-				// produce a corrupt binary that silently installs.
-				if err := outFile.Close(); err != nil {
-					os.Remove(outPath)
-					_ = rc.Close()
-					return "", fmt.Errorf("close extracted binary: %w", err)
-				}
-				if err := os.Chmod(outPath, f.Mode()); err != nil {
-					os.Remove(outPath)
-					_ = rc.Close()
-					return "", err
-				}
-				_ = rc.Close()
-
 				return outPath, nil
 			}
 		}
@@ -358,12 +437,85 @@ func (d *Downloader) extractZip(archivePath, binaryName string) (string, error) 
 	return "", fmt.Errorf("binary %q not found in archive", binaryName)
 }
 
+func (d *Downloader) writeExtractedBinary(reader io.Reader, expectedSize int64) (string, error) {
+	if expectedSize < 0 || expectedSize > maxExtractedBinaryBytes {
+		return "", fmt.Errorf("extracted binary exceeds %d-byte limit", maxExtractedBinaryBytes)
+	}
+	outFile, err := os.CreateTemp(d.tempDir, "gokin-bin-*")
+	if err != nil {
+		return "", err
+	}
+	outPath := outFile.Name()
+	closed := false
+	committed := false
+	defer func() {
+		if !closed {
+			_ = outFile.Close()
+		}
+		if !committed {
+			_ = os.Remove(outPath)
+		}
+	}()
+
+	written, err := copyWithByteLimit(outFile, reader, maxExtractedBinaryBytes)
+	if err != nil {
+		return "", err
+	}
+	if written != expectedSize {
+		return "", fmt.Errorf("extracted binary size mismatch: expected %d, got %d", expectedSize, written)
+	}
+	// Release archives do not get to select setuid/sticky or non-executable
+	// modes. The installer only needs an owner-readable executable artifact.
+	if err := outFile.Chmod(0o755); err != nil {
+		return "", err
+	}
+	if err := outFile.Sync(); err != nil {
+		return "", fmt.Errorf("sync extracted binary: %w", err)
+	}
+	if err := outFile.Close(); err != nil {
+		closed = true
+		return "", fmt.Errorf("close extracted binary: %w", err)
+	}
+	closed = true
+	committed = true
+	return outPath, nil
+}
+
 // Cleanup removes temporary files.
 func (d *Downloader) Cleanup() error {
 	if d.tempDir == "" {
 		return nil
 	}
-	return os.RemoveAll(d.tempDir)
+	info, err := os.Lstat(d.tempDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("update temp path is not a real directory")
+	}
+	if err := d.ensureTempDir(); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(d.tempDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !isManagedUpdateTempName(entry.Name()) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(d.tempDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove update temp file: %w", err)
+		}
+	}
+	return nil
+}
+
+func isManagedUpdateTempName(name string) bool {
+	return strings.HasPrefix(name, "gokin-update-") || strings.HasPrefix(name, "gokin-bin-")
 }
 
 // progressWriter wraps an io.Writer to report progress.

@@ -129,6 +129,33 @@ func TestRedactMapNil(t *testing.T) {
 	}
 }
 
+func TestRedactMapUsesSensitiveFieldNamesForOpaqueValues(t *testing.T) {
+	r := NewSecretRedactor()
+	input := map[string]any{
+		"token":           "opaque-value-with-no-vendor-prefix",
+		"client-secret":   "short",
+		"Authorization":   "custom credential",
+		"token_usage_pct": 42.5,
+		"input_tokens":    123,
+	}
+
+	got := r.RedactMap(input)
+	for _, key := range []string{"token", "client-secret", "Authorization"} {
+		if got[key] != "[REDACTED]" {
+			t.Errorf("sensitive field %q was not redacted: %v", key, got[key])
+		}
+	}
+	if got["token_usage_pct"] != 42.5 {
+		t.Errorf("diagnostic token percentage was over-redacted: %v", got["token_usage_pct"])
+	}
+	if got["input_tokens"] != 123 {
+		t.Errorf("token count was over-redacted: %v", got["input_tokens"])
+	}
+	if input["token"] == "[REDACTED]" {
+		t.Fatal("RedactMap mutated its input")
+	}
+}
+
 func TestRedactAnyNil(t *testing.T) {
 	r := NewSecretRedactor()
 	if got := r.RedactAny(nil); got != nil {

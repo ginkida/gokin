@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"gokin/internal/securefs"
 )
 
 var ErrWorkerLeaseBusy = errors.New("background worker lease is busy")
@@ -51,7 +53,7 @@ func (s *Store) AcquireWorkerLeaseWithin(id string, timeout time.Duration) (*Wor
 }
 
 func acquireLeaseAt(path string) (*WorkerLease, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := securefs.OpenPrivateReadWrite(path)
 	if err != nil {
 		return nil, err
 	}

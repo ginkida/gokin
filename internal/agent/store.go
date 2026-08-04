@@ -33,10 +33,7 @@ const maxPersistedRecoveryFileBytes int64 = 128 << 20
 // configDir should be the base config directory (e.g., ~/.config/gokin).
 func NewAgentStore(configDir string) (*AgentStore, error) {
 	dir := filepath.Join(configDir, "agents")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create agents directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := fileutil.EnsurePrivateDir(dir); err != nil {
 		return nil, fmt.Errorf("failed to secure agents directory: %w", err)
 	}
 
@@ -390,10 +387,7 @@ func (s *AgentStore) SaveCheckpoint(cp *AgentCheckpoint) error {
 
 	// Create checkpoints subdirectory
 	checkpointsDir := filepath.Join(s.dir, "checkpoints")
-	if err := os.MkdirAll(checkpointsDir, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoints directory: %w", err)
-	}
-	if err := os.Chmod(checkpointsDir, 0700); err != nil {
+	if err := fileutil.EnsurePrivateDir(checkpointsDir); err != nil {
 		return fmt.Errorf("failed to secure checkpoints directory: %w", err)
 	}
 

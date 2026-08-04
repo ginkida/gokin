@@ -193,6 +193,48 @@ func TestSessionWriterLeaseHardensExistingStorageAndRejectsUnsafeLock(t *testing
 	}
 }
 
+func TestSessionWriterLeaseProbeFailsClosedOnSymlinkWithoutCreatingMissingLock(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sessions")
+	lockDir := filepath.Join(dir, sessionWriterLockDirName)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if sessionWriterLeaseHeld(dir, "never-leased") {
+		t.Fatal("missing writer lock was reported held")
+	}
+	missingPath := sessionWriterLockPathForTest(lockDir, "never-leased")
+	if _, err := os.Lstat(missingPath); !os.IsNotExist(err) {
+		t.Fatalf("writer-lock probe created a file: %v", err)
+	}
+
+	target := filepath.Join(t.TempDir(), "external")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(target, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := sessionWriterLockPathForTest(lockDir, "unsafe-probe")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if !sessionWriterLeaseHeld(dir, "unsafe-probe") {
+		t.Fatal("symlinked writer lock was treated as safely unheld")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep" {
+		t.Fatalf("symlink target changed: %q", data)
+	}
+	if runtime.GOOS != "windows" {
+		assertPathMode(t, target, 0o644)
+	}
+}
+
 func TestSessionWriterLeaseRejectsSamePhysicalLockThroughAlias(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "sessions")
 	first, err := acquireSessionWriterLeaseAt(dir, "alias-one")

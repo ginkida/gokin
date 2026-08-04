@@ -77,10 +77,7 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 	// copied from source code. Keep its namespace owner-only and repair older
 	// installs that created this directory as 0755.
 	memDir := filepath.Join(configDir, "memory")
-	if err := os.MkdirAll(memDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create memory directory: %w", err)
-	}
-	if err := os.Chmod(memDir, 0700); err != nil {
+	if err := fileutil.EnsurePrivateDir(memDir); err != nil {
 		return nil, fmt.Errorf("failed to secure memory directory: %w", err)
 	}
 
@@ -108,7 +105,7 @@ func NewStore(configDir, projectPath string, maxEntries int) (*Store, error) {
 		store.archiveStoragePath(),
 		store.globalArchivePath(),
 	} {
-		if err := os.Chmod(path, 0600); err != nil && !os.IsNotExist(err) {
+		if err := fileutil.SecurePrivateFile(path); err != nil {
 			return nil, fmt.Errorf("failed to secure memory file %s: %w", path, err)
 		}
 	}

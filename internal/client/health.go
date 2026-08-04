@@ -6,8 +6,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"gokin/internal/fileutil"
 )
 
 type providerHealth struct {
@@ -16,6 +21,13 @@ type providerHealth struct {
 	LastSuccess   time.Time
 	FailureStreak int
 }
+
+const (
+	maxProviderHealthFileBytes int64 = 1 << 20
+	maxPersistedProviders            = 128
+	maxProviderNameBytes             = 128
+	maxFailureStreak                 = 1_000_000
+)
 
 var (
 	healthMu      sync.RWMutex
@@ -33,7 +45,7 @@ func ensureHealthLoadedLocked() {
 	if err != nil {
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := fileutil.ReadPrivateFile(path, maxProviderHealthFileBytes)
 	if err != nil {
 		return
 	}
@@ -42,9 +54,27 @@ func ensureHealthLoadedLocked() {
 	if err := json.Unmarshal(data, &stored); err != nil {
 		return
 	}
-	if stored != nil {
-		providerStats = stored
+	if len(stored) > maxPersistedProviders {
+		return
 	}
+	clean := make(map[string]*providerHealth, len(stored))
+	for name, stats := range stored {
+		if !validPersistedProviderName(name) || stats == nil {
+			continue
+		}
+		copy := *stats
+		copy.Score = min(8, max(-20, copy.Score))
+		copy.FailureStreak = min(maxFailureStreak, max(0, copy.FailureStreak))
+		clean[name] = &copy
+	}
+	providerStats = clean
+}
+
+func validPersistedProviderName(name string) bool {
+	if name == "" || len(name) > maxProviderNameBytes || !utf8.ValidString(name) || strings.TrimSpace(name) != name {
+		return false
+	}
+	return strings.IndexFunc(name, unicode.IsControl) < 0
 }
 
 func persistHealthLocked() {
@@ -52,18 +82,22 @@ func persistHealthLocked() {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	dir := filepath.Dir(path)
+	if os.Getenv("GOKIN_PROVIDER_HEALTH_FILE") != "" {
+		// The ops/test override may deliberately point into a shared parent
+		// such as /tmp. Create missing parents privately, but never chmod an
+		// existing caller-selected directory.
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return
+		}
+	} else if err := fileutil.EnsurePrivateDir(dir); err != nil {
 		return
 	}
 	data, err := json.MarshalIndent(providerStats, "", "  ")
 	if err != nil {
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, path)
+	_ = fileutil.AtomicWrite(path, data, 0600)
 }
 
 func healthFilePath() (string, error) {

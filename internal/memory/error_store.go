@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -43,12 +43,13 @@ type ErrorStore struct {
 
 var errorStoreSaveDebounceInterval = 2 * time.Second
 
+const maxLearnedErrorEntries = 5000
+
 var errorStoreSaveIOHookForTest func()
 
 // NewErrorStore creates a new error store.
 func NewErrorStore(configDir string) (*ErrorStore, error) {
-	errDir := filepath.Join(configDir, "memory")
-	if err := os.MkdirAll(errDir, 0755); err != nil {
+	if err := ensureAuxiliaryStoreDir(configDir); err != nil {
 		return nil, fmt.Errorf("failed to create error store directory: %w", err)
 	}
 
@@ -75,9 +76,9 @@ func (es *ErrorStore) storagePath() string {
 
 // load loads entries from disk.
 func (es *ErrorStore) load() error {
-	data, err := os.ReadFile(es.storagePath())
+	data, err := readAuxiliaryStore(es.storagePath())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -88,9 +89,23 @@ func (es *ErrorStore) load() error {
 		return err
 	}
 
+	valid := make([]*ErrorEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.ID == "" {
+			continue
+		}
+		valid = append(valid, entry)
+	}
+	sort.Slice(valid, func(i, j int) bool { return valid[i].LastUsed.After(valid[j].LastUsed) })
+	if len(valid) > maxLearnedErrorEntries {
+		valid = valid[:maxLearnedErrorEntries]
+	}
+
 	es.mu.Lock()
 	defer es.mu.Unlock()
-	for _, entry := range entries {
+	es.entries = make(map[string]*ErrorEntry, len(valid))
+	es.byType = make(map[string][]string)
+	for _, entry := range valid {
 		es.entries[entry.ID] = entry
 		es.byType[entry.ErrorType] = append(es.byType[entry.ErrorType], entry.ID)
 	}
@@ -110,7 +125,7 @@ func (es *ErrorStore) save() error {
 		return err
 	}
 
-	return fileutil.AtomicWrite(es.storagePath(), data, 0644)
+	return writeAuxiliaryStore(es.storagePath(), data)
 }
 
 // scheduleSave schedules a debounced save operation.
@@ -151,7 +166,7 @@ func (es *ErrorStore) scheduleSave() {
 		if errorStoreSaveIOHookForTest != nil {
 			errorStoreSaveIOHookForTest()
 		}
-		if err := fileutil.AtomicWrite(es.storagePath(), data, 0644); err != nil {
+		if err := writeAuxiliaryStore(es.storagePath(), data); err != nil {
 			logging.Warn("failed to save error store", "path", es.storagePath(), "error", err)
 			es.mu.Lock()
 			es.dirty = true
@@ -219,10 +234,33 @@ func (es *ErrorStore) LearnError(errorType, pattern, solution string, tags []str
 
 	es.entries[entry.ID] = entry
 	es.byType[errorType] = append(es.byType[errorType], entry.ID)
+	if len(es.entries) > maxLearnedErrorEntries {
+		es.pruneToLimitLocked(maxLearnedErrorEntries)
+	}
 
 	es.dirty = true
 	es.scheduleSave()
 	return nil
+}
+
+func (es *ErrorStore) pruneToLimitLocked(limit int) {
+	if len(es.entries) <= limit {
+		return
+	}
+	ids := make([]string, 0, len(es.entries))
+	for id := range es.entries {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return es.entries[ids[i]].LastUsed.Before(es.entries[ids[j]].LastUsed)
+	})
+	for _, id := range ids[:len(ids)-limit] {
+		delete(es.entries, id)
+	}
+	es.byType = make(map[string][]string)
+	for id, entry := range es.entries {
+		es.byType[entry.ErrorType] = append(es.byType[entry.ErrorType], id)
+	}
 }
 
 // GetLearnedErrors finds error entries matching the given error message.

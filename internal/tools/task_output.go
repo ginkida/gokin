@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/tasks"
 
 	"google.golang.org/genai"
@@ -412,7 +413,7 @@ func (t *TaskOutputTool) readShellOutputFromFile(info tasks.Info, offset int64) 
 // This enables incremental reads for long-running agents without loading
 // the entire output into memory.
 func (t *TaskOutputTool) readAgentOutputFromFile(result AgentResult, offset int64) (ToolResult, error) {
-	f, err := os.Open(result.OutputFile)
+	f, err := fileutil.OpenPrivateRead(result.OutputFile)
 	if err != nil {
 		// Fall back to in-memory output
 		return t.formatAgentResult(result), nil

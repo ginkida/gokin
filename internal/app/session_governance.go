@@ -3,8 +3,6 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +17,8 @@ const (
 	sessionGovernanceKeepTail  = 65
 )
 
+var sessionArchiveBeforeAppendForTest func()
+
 type sessionArchiveRecord struct {
 	Timestamp       time.Time                `json:"ts"`
 	SessionID       string                   `json:"session_id"`
@@ -32,19 +32,50 @@ func (a *App) enforceSessionMemoryGovernance(reason string) {
 	if a == nil || a.session == nil {
 		return
 	}
-	history := a.session.GetHistory()
-	if len(history) <= sessionGovernanceSoftLimit {
+	a.sessionLeaseMu.Lock()
+	a.sessionGovernanceMu.Lock()
+	archiveCount, stale, err := a.archiveSessionHistoryLocked(reason)
+	a.sessionGovernanceMu.Unlock()
+	a.sessionLeaseMu.Unlock()
+
+	if err != nil {
+		a.journalEvent("session_archive_failed", map[string]any{
+			"error": err.Error(),
+		})
 		return
 	}
-	archiveCount := len(history) - sessionGovernanceKeepTail
-	if archiveCount <= 0 {
+	if stale {
+		a.journalEvent("session_archive_stale_snapshot", map[string]any{
+			"archived_messages": archiveCount,
+			"reason":            reason,
+		})
 		return
+	}
+	if archiveCount == 0 {
+		return
+	}
+	a.journalSessionArchive(archiveCount, reason)
+	a.safeSendToProgram(ui.StreamTextMsg(fmt.Sprintf(
+		"\n🗄️ Session governance archived %d old messages to keep context stable.\n",
+		archiveCount)))
+}
+
+// archiveSessionHistoryLocked durably archives and then conditionally trims one
+// session snapshot. Caller holds sessionLeaseMu and sessionGovernanceMu.
+func (a *App) archiveSessionHistoryLocked(reason string) (archiveCount int, stale bool, err error) {
+	history, sessionVersion := a.session.GetHistoryWithVersion()
+	if len(history) <= sessionGovernanceSoftLimit {
+		return 0, false, nil
+	}
+	archiveCount = len(history) - sessionGovernanceKeepTail
+	if archiveCount <= 0 {
+		return 0, false, nil
 	}
 
 	// Adjust boundary so FunctionCall/FunctionResponse pairs are not split
 	archiveCount = ctxutil.AdjustBoundaryForToolPairs(history, archiveCount)
 	if archiveCount <= 0 {
-		return
+		return 0, false, nil
 	}
 
 	toArchive := history[:archiveCount]
@@ -58,7 +89,7 @@ func (a *App) enforceSessionMemoryGovernance(reason string) {
 
 	record := sessionArchiveRecord{
 		Timestamp:       time.Now(),
-		SessionID:       a.session.ID,
+		SessionID:       a.session.GetID(),
 		Reason:          reason,
 		ArchivedCount:   len(serialized),
 		ArchivedSummary: summarizeArchivedMessages(toArchive),
@@ -66,36 +97,27 @@ func (a *App) enforceSessionMemoryGovernance(reason string) {
 	}
 
 	if err := a.appendSessionArchive(record); err != nil {
-		a.journalEvent("session_archive_failed", map[string]any{
-			"error": err.Error(),
-		})
-		return
+		return archiveCount, false, err
 	}
 
-	a.session.SetHistory(history[archiveCount:])
-	a.journalSessionArchive(archiveCount, reason)
-	a.safeSendToProgram(ui.StreamTextMsg(fmt.Sprintf(
-		"\n🗄️ Session governance archived %d old messages to keep context stable.\n",
-		archiveCount)))
+	if !a.session.SetHistoryIfVersion(history[archiveCount:], sessionVersion) {
+		return archiveCount, true, nil
+	}
+	return archiveCount, false, nil
 }
 
 func (a *App) appendSessionArchive(rec sessionArchiveRecord) error {
-	dir := filepath.Join(a.workDir, ".gokin", "session_archives")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	path := filepath.Join(dir, rec.SessionID+".jsonl")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(append(b, '\n'))
-	return err
+	b = append(b, '\n')
+	a.sessionArchiveMu.Lock()
+	defer a.sessionArchiveMu.Unlock()
+	if sessionArchiveBeforeAppendForTest != nil {
+		sessionArchiveBeforeAppendForTest()
+	}
+	return appendSessionArchiveData(a.workDir, rec.SessionID, b)
 }
 
 func summarizeArchivedMessages(contents []*genai.Content) string {

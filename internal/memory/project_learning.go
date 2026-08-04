@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 	"gopkg.in/yaml.v3"
 )
@@ -86,14 +86,12 @@ type LearnedFileType struct {
 
 // NewProjectLearning creates a new project learning store.
 func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
-	// Create .gokin directory if it doesn't exist
 	gokinDir := filepath.Join(projectRoot, ".gokin")
-	if err := os.MkdirAll(gokinDir, 0755); err != nil {
-		return nil, err
-	}
-
 	path := filepath.Join(gokinDir, "learning.yaml")
 	markdownPath := filepath.Join(gokinDir, "project-memory.md")
+	if err := ensureProjectLearningStorage(gokinDir, path, markdownPath); err != nil {
+		return nil, err
+	}
 
 	pl := &ProjectLearning{
 		path:         path,
@@ -104,7 +102,11 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 	}
 
 	// Load existing data
-	if err := pl.load(); err != nil && !os.IsNotExist(err) {
+	if err := pl.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		var storageErr *projectLearningStorageError
+		if errors.As(err, &storageErr) {
+			return nil, err
+		}
 		// Non-fatal: start fresh if load fails
 		pl.data = &ProjectData{
 			Preferences: make(map[string]string),
@@ -144,14 +146,14 @@ func NewProjectLearning(projectRoot string) (*ProjectLearning, error) {
 			if projectLearningSaveIOHookForTest != nil {
 				projectLearningSaveIOHookForTest()
 			}
-			if err := fileutil.AtomicWrite(pl.path, data, 0644); err != nil {
+			if err := writeProjectLearningFile(pl.path, data); err != nil {
 				logging.Warn("failed to save project learning", "path", pl.path, "error", err)
 				pl.mu.Lock()
 				pl.dirty = true
 				pl.mu.Unlock()
 				return
 			}
-			if err := fileutil.AtomicWrite(pl.markdownPath, []byte(markdown), 0644); err != nil {
+			if err := writeProjectLearningFile(pl.markdownPath, []byte(markdown)); err != nil {
 				logging.Warn("failed to save project memory markdown", "path", pl.markdownPath, "error", err)
 				pl.mu.Lock()
 				pl.dirty = true
@@ -198,7 +200,7 @@ func normalizeProjectRoot(projectRoot string) string {
 
 // load reads data from the YAML file.
 func (pl *ProjectLearning) load() error {
-	data, err := os.ReadFile(pl.path)
+	data, err := readProjectLearningFile(pl.path)
 	if err != nil {
 		return err
 	}
@@ -208,10 +210,8 @@ func (pl *ProjectLearning) load() error {
 		return err
 	}
 
+	sanitizeProjectData(&loaded)
 	pl.data = &loaded
-	if pl.data.Preferences == nil {
-		pl.data.Preferences = make(map[string]string)
-	}
 
 	return nil
 }
@@ -223,10 +223,10 @@ func (pl *ProjectLearning) save() error {
 		return err
 	}
 
-	if err := fileutil.AtomicWrite(pl.path, data, 0644); err != nil {
+	if err := writeProjectLearningFile(pl.path, data); err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(pl.markdownPath, []byte(markdown), 0644)
+	return writeProjectLearningFile(pl.markdownPath, []byte(markdown))
 }
 
 func (pl *ProjectLearning) snapshotLocked() ([]byte, string, error) {
@@ -244,6 +244,9 @@ func (pl *ProjectLearning) snapshotLocked() ([]byte, string, error) {
 func (pl *ProjectLearning) LearnCommand(cmd, desc string, success bool, durationMs float64) {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
+	if cmd == "" {
+		return
+	}
 
 	// Find or create command entry
 	var command *LearnedCommand
@@ -288,6 +291,9 @@ func (pl *ProjectLearning) LearnCommand(cmd, desc string, success bool, duration
 			command.AvgDuration = alpha*durationMs + (1-alpha)*command.AvgDuration
 		}
 	}
+	if len(pl.data.Commands) > maxProjectLearningCommands {
+		pl.data.Commands = sanitizeLearnedCommands(pl.data.Commands)
+	}
 
 	pl.dirty = true
 	pl.saveFunc()
@@ -297,6 +303,9 @@ func (pl *ProjectLearning) LearnCommand(cmd, desc string, success bool, duration
 func (pl *ProjectLearning) LearnPattern(name, description string, examples []string, tags []string) {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
+	if name == "" {
+		return
+	}
 
 	// Find or create pattern
 	var pattern *LearnedPattern
@@ -311,8 +320,8 @@ func (pl *ProjectLearning) LearnPattern(name, description string, examples []str
 		pl.data.Patterns = append(pl.data.Patterns, LearnedPattern{
 			Name:        name,
 			Description: description,
-			Examples:    examples,
-			Tags:        tags,
+			Examples:    uniqueStringTail(examples, maxProjectLearningExamples),
+			Tags:        uniqueStringHead(tags, maxProjectLearningTags),
 		})
 		pattern = &pl.data.Patterns[len(pl.data.Patterns)-1]
 	}
@@ -327,14 +336,18 @@ func (pl *ProjectLearning) LearnPattern(name, description string, examples []str
 		existingExamples[ex] = true
 	}
 	for _, ex := range examples {
-		if !existingExamples[ex] {
+		if ex != "" && !existingExamples[ex] {
 			pattern.Examples = append(pattern.Examples, ex)
+			existingExamples[ex] = true
 		}
 	}
 
 	// Limit examples
-	if len(pattern.Examples) > 5 {
-		pattern.Examples = pattern.Examples[len(pattern.Examples)-5:]
+	if len(pattern.Examples) > maxProjectLearningExamples {
+		pattern.Examples = uniqueStringTail(pattern.Examples, maxProjectLearningExamples)
+	}
+	if len(pl.data.Patterns) > maxProjectLearningPatterns {
+		pl.data.Patterns = sanitizeLearnedPatterns(pl.data.Patterns)
 	}
 
 	pl.dirty = true
@@ -345,6 +358,9 @@ func (pl *ProjectLearning) LearnPattern(name, description string, examples []str
 func (pl *ProjectLearning) LearnFileType(ext string, conventions []string) {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
+	if ext == "" {
+		return
+	}
 
 	var fileType *LearnedFileType
 	for i := range pl.data.FileTypes {
@@ -369,9 +385,14 @@ func (pl *ProjectLearning) LearnFileType(ext string, conventions []string) {
 		existing[c] = true
 	}
 	for _, c := range conventions {
-		if !existing[c] {
+		if c != "" && !existing[c] {
 			fileType.Conventions = append(fileType.Conventions, c)
+			existing[c] = true
 		}
+	}
+	fileType.Conventions = uniqueStringTail(fileType.Conventions, maxProjectLearningConventions)
+	if len(pl.data.FileTypes) > maxProjectLearningFileTypes {
+		pl.data.FileTypes = sanitizeLearnedFileTypes(pl.data.FileTypes)
 	}
 
 	pl.dirty = true
@@ -382,6 +403,13 @@ func (pl *ProjectLearning) LearnFileType(ext string, conventions []string) {
 func (pl *ProjectLearning) SetPreference(key, value string) {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
+	if key == "" {
+		return
+	}
+	if _, exists := pl.data.Preferences[key]; !exists && len(pl.data.Preferences) >= maxProjectLearningPreferences {
+		logging.Warn("project learning preference limit reached", "limit", maxProjectLearningPreferences)
+		return
+	}
 
 	pl.data.Preferences[key] = value
 	pl.dirty = true
@@ -752,6 +780,6 @@ func (pl *ProjectLearning) HasContent() bool {
 
 // Exists returns true if the learning file exists.
 func (pl *ProjectLearning) Exists() bool {
-	_, err := os.Stat(pl.path)
-	return err == nil
+	info, err := os.Lstat(pl.path)
+	return err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0
 }

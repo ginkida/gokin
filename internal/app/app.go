@@ -427,7 +427,7 @@ type App struct {
 	lastErrorTime time.Time // When the last error occurred
 
 	// Lock ordering (must be acquired in this order to prevent deadlock):
-	//   0. mcpMutationMu / sessionModeCycleMu (independent outer transactions;
+	//   0. mcpMutationMu / sessionModeCycleMu / sessionGovernanceMu (independent outer transactions;
 	//      neither is ever acquired under mu)
 	//   1. mu
 	//   2. processingMu
@@ -505,6 +505,7 @@ type App struct {
 	journal *ExecutionJournal
 
 	// Session memory governance
+	sessionGovernanceMu      sync.Mutex
 	sessionArchiveMu         sync.Mutex
 	sessionArchivedMessages  int
 	sessionArchiveOperations int

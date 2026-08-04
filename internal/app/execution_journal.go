@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,11 @@ import (
 
 	"gokin/internal/fileutil"
 	"gokin/internal/security"
+)
+
+const (
+	maxRecoverySnapshotBytes int64 = 8 << 20
+	maxJournalEntryBytes           = 1 << 20
 )
 
 type JournalEntry struct {
@@ -43,14 +49,20 @@ type ExecutionJournal struct {
 
 func NewExecutionJournal(workDir string) (*ExecutionJournal, error) {
 	dir := filepath.Join(workDir, ".gokin")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create journal dir: %w", err)
+	if err := fileutil.EnsurePrivateDir(dir); err != nil {
+		return nil, fmt.Errorf("secure journal dir: %w", err)
 	}
-	return &ExecutionJournal{
+	journal := &ExecutionJournal{
 		journalPath:  filepath.Join(dir, "execution_journal.jsonl"),
 		recoveryPath: filepath.Join(dir, "recovery_snapshot.json"),
 		redactor:     security.NewSecretRedactor(),
-	}, nil
+	}
+	for _, path := range []string{journal.journalPath, journal.recoveryPath} {
+		if err := fileutil.SecurePrivateFile(path); err != nil {
+			return nil, fmt.Errorf("secure journal file %q: %w", path, err)
+		}
+	}
+	return journal, nil
 }
 
 func (j *ExecutionJournal) Append(event string, details map[string]any) error {
@@ -65,12 +77,6 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) error {
 		details = j.redactor.RedactMap(details)
 	}
 
-	f, err := os.OpenFile(j.journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fmt.Errorf("open execution journal %q: %w", j.journalPath, err)
-	}
-	defer f.Close()
-
 	entry := JournalEntry{
 		Timestamp: time.Now(),
 		Event:     event,
@@ -80,6 +86,16 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("marshal execution journal event %q: %w", event, err)
 	}
+	if len(b)+1 > maxJournalEntryBytes {
+		return fmt.Errorf("execution journal event %q exceeds %d-byte limit", event, maxJournalEntryBytes)
+	}
+
+	f, err := fileutil.OpenPrivateAppend(j.journalPath)
+	if err != nil {
+		return fmt.Errorf("open execution journal %q: %w", j.journalPath, err)
+	}
+	defer f.Close()
+
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write execution journal %q event %q: %w",
 			j.journalPath, event, err)
@@ -111,6 +127,12 @@ func (j *ExecutionJournal) SaveRecovery(snapshot RecoverySnapshot) error {
 	if err != nil {
 		return fmt.Errorf("marshal recovery snapshot: %w", err)
 	}
+	if int64(len(b)) > maxRecoverySnapshotBytes {
+		return fmt.Errorf("recovery snapshot exceeds %d-byte limit", maxRecoverySnapshotBytes)
+	}
+	if err := fileutil.SecurePrivateFile(j.recoveryPath); err != nil {
+		return fmt.Errorf("secure recovery snapshot %q: %w", j.recoveryPath, err)
+	}
 	if err := fileutil.AtomicWrite(j.recoveryPath, b, 0o600); err != nil {
 		return fmt.Errorf("write recovery snapshot %q: %w", j.recoveryPath, err)
 	}
@@ -123,9 +145,9 @@ func (j *ExecutionJournal) LoadRecovery() (*RecoverySnapshot, error) {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	b, err := os.ReadFile(j.recoveryPath)
+	b, err := fileutil.ReadPrivateFile(j.recoveryPath, maxRecoverySnapshotBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -147,9 +169,9 @@ func (j *ExecutionJournal) Tail(n int) ([]JournalEntry, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	f, err := os.Open(j.journalPath)
+	f, err := fileutil.OpenPrivateRead(j.journalPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -158,6 +180,7 @@ func (j *ExecutionJournal) Tail(n int) ([]JournalEntry, error) {
 
 	var lines []string
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), maxJournalEntryBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {

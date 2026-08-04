@@ -985,8 +985,7 @@ func (p *CommandPalette) Execute() *EnhancedPaletteCommand {
 	return cmd
 }
 
-// Flush synchronously saves command history to disk.
-// Call during app shutdown to ensure pending async saves complete.
+// Flush synchronously persists the latest command-history revision.
 func (p *CommandPalette) Flush() error {
 	if p.history != nil {
 		return p.history.Flush()

@@ -2,14 +2,13 @@ package plan
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
-
-	"gokin/internal/fileutil"
 )
 
 // PlanStore provides persistent storage for plan states.
@@ -37,10 +36,10 @@ type PlanInfo struct {
 // configDir should be the base config directory (e.g., ~/.config/gokin).
 func NewPlanStore(configDir string) (*PlanStore, error) {
 	dir := filepath.Join(configDir, "plans")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create plans directory: %w", err)
+	_, err := inspectStoredPlanFiles(dir, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare plans directory: %w", err)
 	}
-
 	return &PlanStore{
 		dir: dir,
 	}, nil
@@ -55,6 +54,14 @@ func (s *PlanStore) Save(plan *Plan) error {
 	// Snapshot plan data under plan's lock to prevent data races
 	// with concurrent CompleteStep/FailStep/StartStep calls.
 	plan.mu.RLock()
+	if err := validatePlanID(plan.ID); err != nil {
+		plan.mu.RUnlock()
+		return err
+	}
+	if err := validatePlanStructure(plan); err != nil {
+		plan.mu.RUnlock()
+		return err
+	}
 	data, err := json.MarshalIndent(plan, "", "  ")
 	planID := plan.ID
 	plan.mu.RUnlock()
@@ -65,8 +72,22 @@ func (s *PlanStore) Save(plan *Plan) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	filePath := filepath.Join(s.dir, planID+".json")
-	if err := fileutil.AtomicWrite(filePath, data, 0644); err != nil {
+	filePath, err := planPath(s.dir, planID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(filePath); os.IsNotExist(err) {
+		files, inspectErr := inspectStoredPlanFiles(s.dir, false)
+		if inspectErr != nil {
+			return fmt.Errorf("failed to inspect plan store: %w", inspectErr)
+		}
+		if len(files) >= maxStoredPlans {
+			return fmt.Errorf("plan store reached %d-file limit", maxStoredPlans)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to inspect plan path: %w", err)
+	}
+	if err := writePrivatePlanFile(filePath, data); err != nil {
 		return fmt.Errorf("failed to write plan: %w", err)
 	}
 
@@ -78,10 +99,16 @@ func (s *PlanStore) Load(planID string) (*Plan, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	filePath := filepath.Join(s.dir, planID+".json")
-	data, err := os.ReadFile(filePath)
+	filePath, err := planPath(s.dir, planID)
 	if err != nil {
-		if os.IsNotExist(err) {
+		return nil, err
+	}
+	data, err := readPrivatePlanFile(filePath)
+	if err != nil {
+		// errors.Is, not os.IsNotExist: readPrivatePlanFile wraps its errors, so
+		// this branch was dead and a deleted plan surfaced an absolute filesystem
+		// path instead of the intended "plan not found".
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("plan not found: %s", planID)
 		}
 		return nil, fmt.Errorf("failed to read plan: %w", err)
@@ -91,7 +118,9 @@ func (s *PlanStore) Load(planID string) (*Plan, error) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal plan: %w", err)
 	}
-	plan.EnsureStepContracts()
+	if err := sanitizeLoadedPlan(&plan, planID); err != nil {
+		return nil, err
+	}
 
 	return &plan, nil
 }
@@ -102,7 +131,7 @@ func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entries, err := os.ReadDir(s.dir)
+	files, err := inspectStoredPlanFiles(s.dir, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plans directory: %w", err)
 	}
@@ -110,13 +139,8 @@ func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 	var latestPlan *Plan
 	var latestTime time.Time
 
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		filePath := filepath.Join(s.dir, entry.Name())
-		data, err := os.ReadFile(filePath)
+	for _, file := range files {
+		data, err := readPrivatePlanFile(file.path)
 		if err != nil {
 			continue
 		}
@@ -125,7 +149,9 @@ func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 		if err := json.Unmarshal(data, plan); err != nil {
 			continue
 		}
-		plan.EnsureStepContracts()
+		if err := sanitizeLoadedPlan(plan, file.id); err != nil {
+			continue
+		}
 
 		// Only consider resumable plans (paused or in_progress with pending steps)
 		if !s.isResumable(plan) {
@@ -148,7 +174,6 @@ func (s *PlanStore) LoadLast(workDir string) (*Plan, error) {
 		return nil, fmt.Errorf("no resumable plan found")
 	}
 
-	latestPlan.EnsureStepContracts()
 	return latestPlan, nil
 }
 
@@ -189,25 +214,23 @@ func (s *PlanStore) List() ([]PlanInfo, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entries, err := os.ReadDir(s.dir)
+	files, err := inspectStoredPlanFiles(s.dir, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plans directory: %w", err)
 	}
 
 	var plans []PlanInfo
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		filePath := filepath.Join(s.dir, entry.Name())
-		data, err := os.ReadFile(filePath)
+	for _, file := range files {
+		data, err := readPrivatePlanFile(file.path)
 		if err != nil {
 			continue
 		}
 
 		var plan Plan
 		if err := json.Unmarshal(data, &plan); err != nil {
+			continue
+		}
+		if err := sanitizeLoadedPlan(&plan, file.id); err != nil {
 			continue
 		}
 
@@ -266,8 +289,11 @@ func (s *PlanStore) Delete(planID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	filePath := filepath.Join(s.dir, planID+".json")
-	if err := os.Remove(filePath); err != nil {
+	filePath, err := planPath(s.dir, planID)
+	if err != nil {
+		return err
+	}
+	if err := removePrivatePlanFile(filePath); err != nil {
 		if os.IsNotExist(err) {
 			return nil // Already deleted
 		}
@@ -280,10 +306,13 @@ func (s *PlanStore) Delete(planID string) error {
 // Cleanup removes plans older than the specified duration.
 // Completed plans are removed after maxAge, paused plans are kept longer.
 func (s *PlanStore) Cleanup(maxAge time.Duration) (int, error) {
+	if maxAge < 0 {
+		return 0, fmt.Errorf("cleanup max age must be non-negative")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := os.ReadDir(s.dir)
+	files, err := inspectStoredPlanFiles(s.dir, true)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read plans directory: %w", err)
 	}
@@ -292,19 +321,17 @@ func (s *PlanStore) Cleanup(maxAge time.Duration) (int, error) {
 	pausedCutoff := time.Now().Add(-maxAge * 3) // Keep paused plans 3x longer
 	cleaned := 0
 
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		filePath := filepath.Join(s.dir, entry.Name())
-		data, err := os.ReadFile(filePath)
+	for _, file := range files {
+		data, err := readPrivatePlanFile(file.path)
 		if err != nil {
 			continue
 		}
 
 		var plan Plan
 		if err := json.Unmarshal(data, &plan); err != nil {
+			continue
+		}
+		if err := sanitizeLoadedPlan(&plan, file.id); err != nil {
 			continue
 		}
 
@@ -315,7 +342,7 @@ func (s *PlanStore) Cleanup(maxAge time.Duration) (int, error) {
 		}
 
 		if plan.UpdatedAt.Before(effectiveCutoff) {
-			if err := os.Remove(filePath); err == nil {
+			if err := removePrivatePlanFile(file.path); err == nil {
 				cleaned++
 			}
 		}
@@ -329,9 +356,11 @@ func (s *PlanStore) Exists(planID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	filePath := filepath.Join(s.dir, planID+".json")
-	_, err := os.Stat(filePath)
-	return err == nil
+	filePath, err := planPath(s.dir, planID)
+	if err != nil {
+		return false
+	}
+	return privatePlanFileExists(filePath)
 }
 
 // truncateString truncates a string to maxLen runes with ellipsis.

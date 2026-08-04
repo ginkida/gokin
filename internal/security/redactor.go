@@ -302,9 +302,49 @@ func (r *SecretRedactor) RedactMap(m map[string]any) map[string]any {
 	}
 	redacted := make(map[string]any)
 	for k, v := range m {
+		if isSensitiveFieldName(k) && v != nil {
+			// Secret values do not always have a recognizable vendor prefix.
+			// Field names are stronger evidence than value heuristics, so fail
+			// closed for explicit credential fields (including short passwords
+			// and opaque, application-specific tokens).
+			redacted[k] = "[REDACTED]"
+			continue
+		}
 		redacted[k] = r.RedactAny(v)
 	}
 	return redacted
+}
+
+// isSensitiveFieldName recognizes exact credential field names while avoiding
+// broad substring matches: diagnostic fields such as token_usage_pct and
+// input_tokens must remain useful. Separators and casing are ignored so JSON,
+// YAML and Go naming conventions receive the same treatment.
+func isSensitiveFieldName(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(normalized)
+
+	switch normalized {
+	case "apikey",
+		"accesstoken",
+		"authtoken",
+		"bearertoken",
+		"refreshtoken",
+		"token",
+		"secret",
+		"secretkey",
+		"clientsecret",
+		"webhooksecret",
+		"password",
+		"passwd",
+		"pwd",
+		"authorization",
+		"credential",
+		"credentials",
+		"privatekey":
+		return true
+	default:
+		return false
+	}
 }
 
 // RedactAny redacts secrets in values of any type.

@@ -1,9 +1,14 @@
 package logging
 
 import (
+	"errors"
 	"os"
 	"sync"
+
+	"gokin/internal/securefs"
 )
+
+var errLogFileUnavailable = errors.New("log file became unavailable during rotation")
 
 // rotatingFileWriter bounds a diagnostic log DURING a run.
 //
@@ -41,36 +46,57 @@ func (w *rotatingFileWriter) Write(p []byte) (int, error) {
 	if w.size > 0 && w.size+int64(len(p)) > w.limit {
 		w.rotateLocked()
 	}
+	if w.file == nil {
+		return 0, errLogFileUnavailable
+	}
 	written, err := w.file.Write(p)
 	w.size += int64(written)
 	return written, err
 }
 
-// rotateLocked is best effort: a failed rename or reopen leaves the current
-// file in place and logging continues. Losing diagnostics is worse than an
-// oversized file.
+// rotateLocked is best effort: only the RENAME is skipped when the path cannot
+// be proven to still be the file we were writing to. The reopen is always
+// attempted, because OpenPrivateAppend re-validates the path itself — a hostile
+// swap still fails closed there, while a benign external rotation (a second
+// Gokin process, logrotate, a manual mv of the shared gokin.log) reattaches
+// instead of killing diagnostics for the rest of the run.
+//
+// Returning early from every unverifiable branch was the bug this replaced: it
+// left w.file nil, and Write then discarded every later record — in exactly the
+// long-running detached case this rotator exists for.
 func (w *rotatingFileWriter) rotateLocked() {
 	if w.file == nil || w.path == "" {
 		return
 	}
+	expected, statErr := w.file.Stat()
 	backup := w.path + ".old"
 	if err := w.file.Close(); err != nil {
 		// The descriptor is unusable either way; fall through and try to reopen.
 		_ = err
 	}
-	_ = os.Remove(backup)
-	if err := os.Rename(w.path, backup); err == nil {
-		_ = os.Chmod(backup, 0o600)
+	w.file = nil
+
+	current, pathErr := os.Lstat(w.path)
+	ours := statErr == nil && pathErr == nil &&
+		current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+		os.SameFile(expected, current)
+	if ours {
+		_ = os.Remove(backup)
+		if err := os.Rename(w.path, backup); err == nil {
+			_ = securefs.SecurePrivateFile(backup)
+		}
 	}
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := securefs.OpenPrivateAppend(w.path)
 	if err != nil {
-		w.file = nil
 		w.size = 0
 		return
 	}
-	_ = file.Chmod(0o600)
 	w.file = file
-	w.size = 0
+	if info, err := file.Stat(); err == nil {
+		w.size = info.Size()
+	} else {
+		w.size = 0
+	}
 }
 
 func (w *rotatingFileWriter) Close() error {

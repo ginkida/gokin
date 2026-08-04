@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,8 @@ type Logger struct {
 	saveMu    sync.Mutex
 }
 
+const maxAuditLogFileBytes int64 = 128 << 20
+
 // Config holds audit logger configuration.
 type Config struct {
 	Enabled       bool
@@ -56,11 +59,17 @@ func NewLogger(configDir, sessionID string, cfg Config) (*Logger, error) {
 	if !cfg.Enabled {
 		return &Logger{enabled: false, redactor: security.NewSecretRedactor()}, nil
 	}
+	if cfg.MaxEntries < 0 || cfg.MaxResultLen < 0 || cfg.RetentionDays < 0 {
+		return nil, fmt.Errorf("audit limits must be non-negative")
+	}
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
+	}
 
 	auditDir := filepath.Join(configDir, "audit")
 	// Use 0700 to restrict access to owner only (contains sensitive data)
-	if err := os.MkdirAll(auditDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create audit directory: %w", err)
+	if err := fileutil.EnsurePrivateDir(auditDir); err != nil {
+		return nil, fmt.Errorf("failed to secure audit directory: %w", err)
 	}
 
 	logger := &Logger{
@@ -81,6 +90,20 @@ func NewLogger(configDir, sessionID string, cfg Config) (*Logger, error) {
 	}
 
 	return logger, nil
+}
+
+// validateSessionID keeps an externally supplied session identity from
+// escaping the flat audit directory on any supported platform.
+func validateSessionID(id string) error {
+	if id == "" || id == "." || id == ".." || len(id) > 240 || strings.ContainsAny(id, `<>:"/\|?*`) {
+		return fmt.Errorf("invalid audit session ID %q", id)
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid audit session ID %q", id)
+		}
+	}
+	return nil
 }
 
 // Log records a new audit entry.
@@ -319,7 +342,7 @@ func (l *Logger) getFilePath() string {
 // load loads existing entries from disk.
 func (l *Logger) load() error {
 	filePath := l.getFilePath()
-	data, err := os.ReadFile(filePath)
+	data, err := fileutil.ReadPrivateFile(filePath, maxAuditLogFileBytes)
 	if err != nil {
 		return err
 	}
@@ -329,7 +352,16 @@ func (l *Logger) load() error {
 		return err
 	}
 
-	l.entries = entries
+	valid := entries[:0]
+	for _, entry := range entries {
+		if entry != nil {
+			valid = append(valid, entry)
+		}
+	}
+	if l.maxEntries >= 0 && len(valid) > l.maxEntries {
+		valid = valid[len(valid)-l.maxEntries:]
+	}
+	l.entries = valid
 	return nil
 }
 
@@ -341,6 +373,9 @@ func (l *Logger) save() error {
 
 	if err != nil {
 		return err
+	}
+	if int64(len(data)) > maxAuditLogFileBytes {
+		return fmt.Errorf("audit log exceeds %d-byte persisted limit", maxAuditLogFileBytes)
 	}
 
 	filePath := l.getFilePath()

@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -42,6 +43,8 @@ func NewManager(workDir string) *Manager {
 // writes its log continuously, keeping mtime fresh, so it is never touched.
 const staleTaskOutputMaxAge = 48 * time.Hour
 
+var managedTaskOutputName = regexp.MustCompile(`^task_[0-9]+_[0-9]+(?:_[0-9]+)?\.log$`)
+
 // sweepStaleTaskOutputFiles removes orphaned task-output logs. Cleanup only
 // reaps tasks tracked by the CURRENT process's map, so .gokin/task-output
 // files from crashed or exited runs used to accumulate on disk forever.
@@ -49,7 +52,20 @@ func sweepStaleTaskOutputFiles(workDir string) int {
 	if workDir == "" {
 		return 0
 	}
+	gokinDir := filepath.Join(workDir, ".gokin")
 	dir := filepath.Join(workDir, ".gokin", "task-output")
+	if _, err := os.Lstat(gokinDir); err != nil {
+		return 0
+	}
+	if err := fileutil.EnsurePrivateDir(gokinDir); err != nil {
+		return 0
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		return 0
+	}
+	if err := fileutil.EnsurePrivateDir(dir); err != nil {
+		return 0
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
@@ -57,14 +73,14 @@ func sweepStaleTaskOutputFiles(workDir string) int {
 	cutoff := time.Now().Add(-staleTaskOutputMaxAge)
 	removed := 0
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !managedTaskOutputName.MatchString(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
+		if info.Mode().IsRegular() && info.ModTime().Before(cutoff) {
 			if os.Remove(filepath.Join(dir, entry.Name())) == nil {
 				removed++
 			}
@@ -105,7 +121,7 @@ func (m *Manager) taskDirLocked(dir string) string {
 func (m *Manager) StartInDir(ctx context.Context, dir, command string) (string, error) {
 	m.mu.Lock()
 	m.counter++
-	id := fmt.Sprintf("task_%d_%d", time.Now().Unix(), m.counter)
+	id := fmt.Sprintf("task_%d_%d_%d", time.Now().UnixNano(), os.Getpid(), m.counter)
 
 	task := NewTask(id, command, m.taskDirLocked(dir))
 	m.tasks[id] = task
@@ -137,7 +153,7 @@ func (m *Manager) StartWithArgs(ctx context.Context, program string, args []stri
 func (m *Manager) StartWithArgsInDir(ctx context.Context, dir, program string, args []string) (string, error) {
 	m.mu.Lock()
 	m.counter++
-	id := fmt.Sprintf("task_%d_%d", time.Now().Unix(), m.counter)
+	id := fmt.Sprintf("task_%d_%d_%d", time.Now().UnixNano(), os.Getpid(), m.counter)
 
 	task := NewTaskWithArgs(id, program, args, m.taskDirLocked(dir))
 	m.tasks[id] = task

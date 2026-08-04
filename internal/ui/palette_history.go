@@ -2,19 +2,24 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
 const (
-	maxHistoryEntries = 100
-	historyFileName   = "command_history.json"
+	maxHistoryEntries          = 100
+	maxHistoryLoadEntries      = 1000
+	maxCommandHistoryFileBytes = 1 << 20
+	maxCommandHistoryNameBytes = 4 << 10
+	historyFileName            = "command_history.json"
 )
 
 // HistoryEntry represents a single command usage entry.
@@ -29,6 +34,13 @@ type CommandHistory struct {
 	entries  map[string]*HistoryEntry
 	filePath string
 	mu       sync.RWMutex
+	saveMu   sync.Mutex
+	revision uint64
+	savedRev uint64
+	saved    bool
+	// saveScheduled is guarded by mu and keeps bursts of palette activity from
+	// spawning one filesystem-writing goroutine per command invocation.
+	saveScheduled bool
 }
 
 // NewCommandHistory creates a new CommandHistory.
@@ -64,13 +76,17 @@ func getConfigDir() (string, error) {
 
 // RecordUsage records that a command was used.
 func (ch *CommandHistory) RecordUsage(command string) {
+	if command == "" || len(command) > maxCommandHistoryNameBytes {
+		return
+	}
 	ch.mu.Lock()
-	defer ch.mu.Unlock()
 
 	entry, exists := ch.entries[command]
 	if exists {
 		entry.Timestamp = time.Now()
-		entry.Count++
+		if entry.Count < math.MaxInt {
+			entry.Count++
+		}
 	} else {
 		ch.entries[command] = &HistoryEntry{
 			Command:   command,
@@ -83,13 +99,47 @@ func (ch *CommandHistory) RecordUsage(command string) {
 	if len(ch.entries) > maxHistoryEntries {
 		ch.pruneOldest()
 	}
+	ch.revision++
+	launchSave := !ch.saveScheduled
+	if launchSave {
+		ch.saveScheduled = true
+	}
+	ch.mu.Unlock()
 
-	// Save asynchronously
-	go ch.save()
+	if launchSave {
+		go ch.runSaveLoop()
+	}
+}
+
+func (ch *CommandHistory) runSaveLoop() {
+	for {
+		ch.mu.RLock()
+		targetRevision := ch.revision
+		ch.mu.RUnlock()
+
+		if err := ch.save(); err != nil {
+			ch.mu.Lock()
+			ch.saveScheduled = false
+			ch.mu.Unlock()
+			logging.Debug("failed to save command history", "error", err)
+			return
+		}
+
+		ch.mu.Lock()
+		if ch.revision == targetRevision {
+			ch.saveScheduled = false
+			ch.mu.Unlock()
+			return
+		}
+		ch.mu.Unlock()
+	}
 }
 
 // GetRecentCommands returns the most recently used commands.
 func (ch *CommandHistory) GetRecentCommands(limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
 	ch.mu.RLock()
 	defer ch.mu.RUnlock()
 
@@ -176,37 +226,65 @@ func (ch *CommandHistory) load() error {
 		return nil
 	}
 
-	data, err := os.ReadFile(ch.filePath)
+	data, err := readPrivateHistoryFile(ch.filePath, maxCommandHistoryFileBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// errors.Is, not os.IsNotExist: the history reader wraps its errors, and
+		// os.IsNotExist does not unwrap — a fresh install reported "read failed"
+		// for a file that simply does not exist yet.
+		if errors.Is(err, os.ErrNotExist) {
+			ch.saved = true
 			return nil
 		}
 		return err
 	}
 
-	var entries []*HistoryEntry
+	var entries []HistoryEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return err
 	}
-
-	for _, e := range entries {
-		ch.entries[e.Command] = e
+	if len(entries) > maxHistoryLoadEntries {
+		return fmt.Errorf("command history exceeds %d-entry limit", maxHistoryLoadEntries)
 	}
+
+	for i := range entries {
+		e := entries[i]
+		if e.Command == "" || len(e.Command) > maxCommandHistoryNameBytes {
+			continue
+		}
+		if e.Count <= 0 {
+			e.Count = 1
+		}
+		entry := e
+		ch.entries[e.Command] = &entry
+	}
+	if len(ch.entries) > maxHistoryEntries {
+		ch.pruneOldest()
+	}
+	ch.saved = true
 
 	return nil
 }
 
-// Flush synchronously saves the command history to disk.
-// Call during shutdown to ensure no history is lost from async saves.
+// Flush synchronously persists the latest command-history revision. Any queued
+// asynchronous worker subsequently observes that revision and performs no
+// stale overwrite.
 func (ch *CommandHistory) Flush() error {
 	return ch.save()
 }
 
 // save saves the history to disk.
 func (ch *CommandHistory) save() error {
+	ch.saveMu.Lock()
+	defer ch.saveMu.Unlock()
+
 	ch.mu.RLock()
 	filePath := ch.filePath
 	if filePath == "" {
+		ch.mu.RUnlock()
+		return nil
+	}
+	revision := ch.revision
+	if ch.saved && ch.savedRev == revision {
 		ch.mu.RUnlock()
 		return nil
 	}
@@ -222,6 +300,12 @@ func (ch *CommandHistory) save() error {
 		entries = append(entries, *e)
 	}
 	ch.mu.RUnlock()
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Timestamp.Equal(entries[j].Timestamp) {
+			return entries[i].Command < entries[j].Command
+		}
+		return entries[i].Timestamp.After(entries[j].Timestamp)
+	})
 
 	// Marshal and write outside lock — disk I/O no longer blocks readers/writers
 	data, err := json.MarshalIndent(entries, "", "  ")
@@ -229,10 +313,10 @@ func (ch *CommandHistory) save() error {
 		return err
 	}
 
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := writePrivateHistoryFile(filePath, data, maxCommandHistoryFileBytes); err != nil {
 		return err
 	}
-
-	return fileutil.AtomicWrite(filePath, data, 0644)
+	ch.savedRev = revision
+	ch.saved = true
+	return nil
 }

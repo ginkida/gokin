@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"gokin/internal/fileutil"
+	"gokin/internal/securefs"
 
 	"github.com/google/uuid"
 )
@@ -105,7 +106,7 @@ func NewStoreAt(root string) (*Store, error) {
 	}
 	store := &Store{root: filepath.Clean(absolute)}
 	for _, dir := range []string{store.root, store.jobsDir(), store.logsDir(), store.locksDir(), store.inboxDir()} {
-		if err := ensurePrivateDir(dir); err != nil {
+		if err := securefs.EnsurePrivateDir(dir); err != nil {
 			return nil, fmt.Errorf("prepare background store %q: %w", dir, err)
 		}
 	}
@@ -216,32 +217,6 @@ func dataRoot() (string, error) {
 	return filepath.Join(home, ".local", "share", "gokin", "background"), nil
 }
 
-func ensurePrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
-	}
-	before, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("path is not a real directory")
-	}
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	after, err := dir.Stat()
-	if err != nil {
-		return err
-	}
-	if !after.IsDir() || !os.SameFile(before, after) {
-		return fmt.Errorf("directory identity changed while opening")
-	}
-	return dir.Chmod(0o700)
-}
-
 func NewJobID() string { return uuid.NewString() }
 
 func ValidateJobID(id string) error {
@@ -320,7 +295,7 @@ func (s *Store) Create(job Job) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := ensurePrivateDir(filepath.Join(s.inboxDir(), job.ID)); err != nil {
+	if err := securefs.EnsurePrivateDir(filepath.Join(s.inboxDir(), job.ID)); err != nil {
 		return fmt.Errorf("prepare background job inbox: %w", err)
 	}
 	return s.write(job)
@@ -377,7 +352,7 @@ func (s *Store) EnqueueControl(jobID, message string) (Control, error) {
 	if err != nil {
 		return Control{}, err
 	}
-	if err := ensurePrivateDir(controlDir); err != nil {
+	if err := securefs.EnsurePrivateDir(controlDir); err != nil {
 		return Control{}, err
 	}
 	controls, err := s.loadControlsLocked(jobID)
@@ -419,7 +394,7 @@ func (s *Store) ClaimNextControl(jobID string) (*Control, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensurePrivateDir(controlDir); err != nil {
+	if err := securefs.EnsurePrivateDir(controlDir); err != nil {
 		return nil, err
 	}
 	controls, err := s.loadControlsLocked(jobID)
@@ -776,7 +751,7 @@ func (s *Store) setControlCountsLocked(job *Job) error {
 	if err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(dir); err != nil {
+	if err := securefs.EnsurePrivateDir(dir); err != nil {
 		return err
 	}
 	controls, err := s.loadControlsLocked(job.ID)

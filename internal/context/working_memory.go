@@ -1,6 +1,7 @@
 package context
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,7 +9,6 @@ import (
 	"strings"
 	"sync"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -20,6 +20,8 @@ const (
 )
 
 var workingMemoryMarkdownLinkPattern = regexp.MustCompile(`\[(.*?)\]\([^)]+\)`)
+
+var workingMemoryBeforeDiskWriteForTest func()
 
 // WorkingMemoryTurn is the compact turn-level evidence used to refresh the
 // persistent working memory snapshot between requests.
@@ -42,8 +44,11 @@ type WorkingMemoryProvider interface {
 type WorkingMemoryManager struct {
 	workDir string
 	content string
+	writeMu sync.Mutex
 	mu      sync.RWMutex
 }
+
+const workingMemoryFilename = ".working-memory.md"
 
 // NewWorkingMemoryManager creates a new persistent working memory manager.
 func NewWorkingMemoryManager(workDir string) *WorkingMemoryManager {
@@ -53,11 +58,13 @@ func NewWorkingMemoryManager(workDir string) *WorkingMemoryManager {
 // UpdateFromTurn refreshes the working memory from the latest successful turn.
 // Returns true when content changed and was persisted.
 func (w *WorkingMemoryManager) UpdateFromTurn(turn WorkingMemoryTurn) bool {
-	content := renderWorkingMemory(turn)
+	content := boundContextMemoryContent(renderWorkingMemory(turn), maxWorkingMemoryFileBytes)
 	if content == "" {
 		return false
 	}
 
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 	w.mu.Lock()
 	if content == w.content {
 		w.mu.Unlock()
@@ -66,7 +73,7 @@ func (w *WorkingMemoryManager) UpdateFromTurn(turn WorkingMemoryTurn) bool {
 	w.content = content
 	w.mu.Unlock()
 
-	w.writeToDisk()
+	w.writeToDiskLocked()
 	return true
 }
 
@@ -79,8 +86,13 @@ func (w *WorkingMemoryManager) GetContent() string {
 
 // LoadFromDisk restores previously persisted working memory.
 func (w *WorkingMemoryManager) LoadFromDisk() {
-	data, err := os.ReadFile(w.filePath())
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	data, err := readContextMemoryFile(w.workDir, workingMemoryFilename, maxWorkingMemoryFileBytes)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logging.Debug("failed to load working memory", "path", w.filePath(), "error", err)
+		}
 		return
 	}
 
@@ -92,34 +104,41 @@ func (w *WorkingMemoryManager) LoadFromDisk() {
 
 // Clear removes the persisted working memory snapshot.
 func (w *WorkingMemoryManager) Clear() {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 	w.mu.Lock()
 	w.content = ""
 	w.mu.Unlock()
-	_ = os.Remove(w.filePath())
+	if err := removeContextMemoryFile(w.workDir, workingMemoryFilename); err != nil {
+		logging.Debug("failed to remove working memory", "error", err)
+	}
 }
 
 func (w *WorkingMemoryManager) filePath() string {
-	dir := filepath.Join(w.workDir, ".gokin")
-	return filepath.Join(dir, ".working-memory.md")
+	return filepath.Join(contextMemoryDir(w.workDir), workingMemoryFilename)
 }
 
 func (w *WorkingMemoryManager) writeToDisk() {
-	dir := filepath.Join(w.workDir, ".gokin")
-	// Owner-only (0700/0600): the working memory snapshot summarizes
-	// what the agent learned during the session — file paths, code
-	// fragments, partial results — same sensitivity class as the
-	// chat history (also 0600). Group-readable was the prior default
-	// but is overly permissive on shared/multi-user systems.
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		logging.Debug("failed to create .gokin dir for working memory", "error", err)
-		return
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	w.writeToDiskLocked()
+}
+
+func (w *WorkingMemoryManager) writeToDiskLocked() {
+	w.mu.RLock()
+	content := boundContextMemoryContent(w.content, maxWorkingMemoryFileBytes)
+	w.mu.RUnlock()
+	if workingMemoryBeforeDiskWriteForTest != nil {
+		workingMemoryBeforeDiskWriteForTest()
 	}
 
-	w.mu.RLock()
-	content := w.content
-	w.mu.RUnlock()
-
-	if err := fileutil.AtomicWrite(w.filePath(), []byte(content), 0600); err != nil {
+	if strings.TrimSpace(content) == "" {
+		if err := removeContextMemoryFile(w.workDir, workingMemoryFilename); err != nil {
+			logging.Debug("failed to remove empty working memory", "error", err)
+		}
+		return
+	}
+	if err := writeContextMemoryFile(w.workDir, workingMemoryFilename, []byte(content), maxWorkingMemoryFileBytes); err != nil {
 		logging.Debug("failed to write working memory", "error", err)
 	}
 }

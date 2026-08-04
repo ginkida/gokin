@@ -2,13 +2,13 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -69,6 +69,10 @@ func NewDelegationMetrics(configDir string) *DelegationMetrics {
 		RuleWeights: make(map[string]float64),
 		configDir:   configDir,
 	}
+	if err := ensureOptimizerStoreDir(configDir); err != nil {
+		logging.Debug("failed to prepare delegation metrics directory", "error", err)
+		return dm
+	}
 
 	// Load existing metrics
 	if err := dm.load(); err != nil {
@@ -85,9 +89,9 @@ func (dm *DelegationMetrics) storagePath() string {
 
 // load loads metrics from disk.
 func (dm *DelegationMetrics) load() error {
-	data, err := os.ReadFile(dm.storagePath())
+	data, err := readOptimizerStore(dm.storagePath())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -98,8 +102,25 @@ func (dm *DelegationMetrics) load() error {
 		return err
 	}
 
-	dm.PathMetrics = loaded.PathMetrics
-	dm.RuleWeights = loaded.RuleWeights
+	dm.PathMetrics = make(map[string]*PathStats, len(loaded.PathMetrics))
+	for key, stats := range loaded.PathMetrics {
+		if key == "" || stats == nil {
+			continue
+		}
+		if len(stats.RecentResults) > MaxRecentResults {
+			stats.RecentResults = stats.RecentResults[len(stats.RecentResults)-MaxRecentResults:]
+		}
+		dm.PathMetrics[key] = stats
+	}
+	if len(dm.PathMetrics) > MaxDelegationPaths {
+		dm.evictOldest(MaxDelegationPaths)
+	}
+	dm.RuleWeights = make(map[string]float64, len(dm.PathMetrics))
+	for key := range dm.PathMetrics {
+		if weight, ok := loaded.RuleWeights[key]; ok {
+			dm.RuleWeights[key] = weight
+		}
+	}
 	dm.UpdatedAt = loaded.UpdatedAt
 
 	return nil
@@ -120,11 +141,7 @@ func (dm *DelegationMetrics) save() ([]byte, error) {
 
 // writeSnapshot writes pre-serialized data to disk without holding any locks.
 func (dm *DelegationMetrics) writeSnapshot(data []byte) error {
-	dir := filepath.Dir(dm.storagePath())
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	return fileutil.AtomicWrite(dm.storagePath(), data, 0644)
+	return writeOptimizerStore(dm.storagePath(), data)
 }
 
 // RecordExecution records the outcome of a delegation.

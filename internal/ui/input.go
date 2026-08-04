@@ -2,6 +2,8 @@ package ui
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,9 +33,13 @@ func defaultKeyProviderNames() []string { return config.KeyProviderNames() }
 func defaultAllProviderNames() []string { return config.AllProviderNames() }
 
 const (
-	maxHistorySize   = 100
-	maxComposerLines = 6
-	historyFile      = "input_history"
+	maxHistorySize             = 100
+	maxComposerLines           = 6
+	maxInputHistoryEntryBytes  = 1 << 20
+	maxInputHistoryRecordBytes = 4*maxInputHistoryEntryBytes + 32
+	maxInputHistoryFileBytes   = 16 << 20
+	maxInputHistoryRecords     = 10000
+	historyFile                = "input_history"
 )
 
 // ArgInfo describes a command argument for autocomplete hints.
@@ -2618,7 +2624,7 @@ func (m InputModel) auxiliaryRowBudget() int {
 // AddToHistory adds a command to the history.
 func (m *InputModel) AddToHistory(cmd string) {
 	cmd = sanitizeHistoryEntry(cmd)
-	if cmd == "" {
+	if cmd == "" || len(cmd) > maxInputHistoryEntryBytes {
 		return
 	}
 
@@ -2629,10 +2635,7 @@ func (m *InputModel) AddToHistory(cmd string) {
 
 	m.history = append(m.history, cmd)
 
-	// Trim history if too large
-	if len(m.history) > maxHistorySize {
-		m.history = m.history[len(m.history)-maxHistorySize:]
-	}
+	m.history = boundInputHistory(m.history)
 }
 
 func sanitizeHistoryEntry(entry string) string {
@@ -2716,16 +2719,30 @@ func (m *InputModel) GetHistory() []string {
 func (m *InputModel) SetHistory(history []string) {
 	m.history = make([]string, 0, min(len(history), maxHistorySize))
 	for _, entry := range history {
-		if entry = sanitizeHistoryEntry(entry); entry != "" {
+		if entry = sanitizeHistoryEntry(entry); entry != "" && len(entry) <= maxInputHistoryEntryBytes {
 			m.history = append(m.history, entry)
 		}
 	}
-	if len(m.history) > maxHistorySize {
-		m.history = append([]string(nil), m.history[len(m.history)-maxHistorySize:]...)
-	}
+	m.history = boundInputHistory(m.history)
 	m.historyIndex = -1
 	m.savedInput = ""
 	m.savedPasteSpans = nil
+}
+
+// boundInputHistory retains the newest contiguous suffix that can always be
+// serialized within both the entry-count and durable file-size limits.
+func boundInputHistory(history []string) []string {
+	start := len(history)
+	totalBytes := 0
+	for start > 0 && len(history)-start < maxHistorySize {
+		recordBytes := len("q:") + len(strconv.Quote(history[start-1])) + 1
+		if recordBytes > maxInputHistoryRecordBytes || totalBytes > maxInputHistoryFileBytes-recordBytes {
+			break
+		}
+		totalBytes += recordBytes
+		start--
+	}
+	return append([]string(nil), history[start:]...)
 }
 
 // LoadHistory loads command history from file.
@@ -2735,25 +2752,34 @@ func (m *InputModel) LoadHistory() error {
 		return err
 	}
 
-	file, err := os.Open(histPath)
+	data, err := readPrivateHistoryFile(histPath, maxInputHistoryFileBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// errors.Is, not os.IsNotExist: the history reader wraps its errors and
+		// os.IsNotExist cannot unwrap them, so this "no history yet" branch was
+		// dead and a fresh install logged a spurious failure.
+		if errors.Is(err, os.ErrNotExist) {
 			return nil // No history file yet, that's fine
 		}
 		return err
 	}
-	defer file.Close()
-
 	var history []string
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 64<<10), maxInputHistoryRecordBytes)
+	records := 0
 	for scanner.Scan() {
+		records++
+		if records > maxInputHistoryRecords {
+			return fmt.Errorf("input history exceeds %d-record limit", maxInputHistoryRecords)
+		}
 		line := scanner.Text()
 		if encoded, ok := strings.CutPrefix(line, "q:"); ok {
 			if unquoted, unquoteErr := strconv.Unquote(encoded); unquoteErr == nil {
 				line = unquoted
 			}
 		}
-		if entry := sanitizeHistoryEntry(line); entry != "" {
+		if entry := sanitizeHistoryEntry(line); len(entry) > maxInputHistoryEntryBytes {
+			return fmt.Errorf("input history entry exceeds %d-byte limit", maxInputHistoryEntryBytes)
+		} else if entry != "" {
 			history = append(history, entry)
 		}
 	}
@@ -2778,28 +2804,22 @@ func (m *InputModel) SaveHistory() error {
 		return err
 	}
 
-	// Ensure directory exists
-	dir := filepath.Dir(histPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	file, err := os.OpenFile(histPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	if err := file.Chmod(0o600); err != nil {
-		return err
-	}
-
+	var data strings.Builder
 	for _, cmd := range m.history {
-		if _, err := file.WriteString("q:" + strconv.Quote(sanitizeHistoryEntry(cmd)) + "\n"); err != nil {
-			return err
+		entry := sanitizeHistoryEntry(cmd)
+		if len(entry) > maxInputHistoryEntryBytes {
+			return fmt.Errorf("input history entry exceeds %d-byte limit", maxInputHistoryEntryBytes)
 		}
+		record := "q:" + strconv.Quote(entry) + "\n"
+		if len(record) > maxInputHistoryRecordBytes {
+			return fmt.Errorf("encoded input history entry exceeds %d-byte limit", maxInputHistoryRecordBytes)
+		}
+		if data.Len() > maxInputHistoryFileBytes-len(record) {
+			return fmt.Errorf("input history exceeds %d-byte limit", maxInputHistoryFileBytes)
+		}
+		data.WriteString(record)
 	}
-
-	return nil
+	return writePrivateHistoryFile(histPath, []byte(data.String()), maxInputHistoryFileBytes)
 }
 
 // getHistoryPath returns the path to the history file.

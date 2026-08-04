@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"gokin/internal/client"
-	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 
@@ -98,6 +98,8 @@ type SessionMemoryManager struct {
 }
 
 var sessionMemoryBeforeDiskWriteForTest func()
+
+const sessionMemoryFilename = ".session-memory.md"
 
 // SetOnUpdate sets a callback invoked after each successful session memory extraction.
 func (s *SessionMemoryManager) SetOnUpdate(cb func()) {
@@ -295,7 +297,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 		builder.WriteString("\n")
 	}
 
-	heuristicContent := builder.String()
+	heuristicContent := boundContextMemoryContent(builder.String(), maxSessionMemoryFileBytes)
 
 	durableLearnings := extractDurableSessionLearnings(history)
 
@@ -391,6 +393,7 @@ func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback
 Be concise. Each section should be 1-5 bullet points maximum.`
 
 	summary, err := s.summarizer.Summarize(ctx, history, prompt)
+	summary = boundContextMemoryContent(summary, maxSessionMemoryFileBytes)
 	if err != nil || summary == "" {
 		logging.Debug("LLM session memory extraction failed, using heuristic", "error", err)
 		s.mu.Lock()
@@ -474,9 +477,14 @@ func (s *SessionMemoryManager) GetContent() string {
 
 // LoadFromDisk loads previously saved session memory.
 func (s *SessionMemoryManager) LoadFromDisk() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	path := s.filePath()
-	data, err := os.ReadFile(path)
+	data, err := readContextMemoryFile(s.workDir, sessionMemoryFilename, maxSessionMemoryFileBytes)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logging.Debug("failed to load session memory", "path", path, "error", err)
+		}
 		return // File doesn't exist yet
 	}
 	s.mu.Lock()
@@ -499,12 +507,13 @@ func (s *SessionMemoryManager) Clear() {
 	s.toolCallsSinceUpdate = 0
 	s.extractionCount = 0
 	s.mu.Unlock()
-	_ = os.Remove(s.filePath())
+	if err := removeContextMemoryFile(s.workDir, sessionMemoryFilename); err != nil {
+		logging.Debug("failed to remove session memory", "error", err)
+	}
 }
 
 func (s *SessionMemoryManager) filePath() string {
-	dir := filepath.Join(s.workDir, ".gokin")
-	return filepath.Join(dir, ".session-memory.md")
+	return filepath.Join(contextMemoryDir(s.workDir), sessionMemoryFilename)
 }
 
 func (s *SessionMemoryManager) writeToDisk() {
@@ -516,7 +525,7 @@ func (s *SessionMemoryManager) writeToDisk() {
 	// writing it under their OWN lock hold. Caught by -race under concurrent
 	// Extract() calls (round 5's LLM in-flight-guard test).
 	s.mu.RLock()
-	content := s.content
+	content := boundContextMemoryContent(s.content, maxSessionMemoryFileBytes)
 	s.mu.RUnlock()
 	if sessionMemoryBeforeDiskWriteForTest != nil {
 		sessionMemoryBeforeDiskWriteForTest()
@@ -525,21 +534,12 @@ func (s *SessionMemoryManager) writeToDisk() {
 	// the in-memory snapshot and removed the file. Treat empty content as the
 	// cleared state instead of recreating an empty .session-memory.md.
 	if strings.TrimSpace(content) == "" {
-		_ = os.Remove(s.filePath())
+		if err := removeContextMemoryFile(s.workDir, sessionMemoryFilename); err != nil {
+			logging.Debug("failed to remove empty session memory", "error", err)
+		}
 		return
 	}
-
-	dir := filepath.Join(s.workDir, ".gokin")
-	// Owner-only (0700/0600): session memory captures recent files,
-	// errors, and decisions during the active session — same
-	// sensitivity class as chat history (also 0600). Group-readable
-	// was the prior default but is overly permissive on shared
-	// systems.
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		logging.Debug("failed to create .gokin dir for session memory", "error", err)
-		return
-	}
-	if err := fileutil.AtomicWrite(s.filePath(), []byte(content), 0600); err != nil {
+	if err := writeContextMemoryFile(s.workDir, sessionMemoryFilename, []byte(content), maxSessionMemoryFileBytes); err != nil {
 		logging.Debug("failed to write session memory", "error", err)
 	}
 }

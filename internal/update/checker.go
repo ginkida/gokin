@@ -7,13 +7,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/security"
+)
+
+const (
+	maxReleaseResponseBytes int64 = 4 << 20
+	maxUpdateCacheBytes     int64 = 2 << 20
 )
 
 // Checker handles version checking against GitHub releases.
@@ -31,6 +36,9 @@ type Checker struct {
 
 // NewChecker creates a new version checker.
 func NewChecker(config *Config, cacheDir string) *Checker {
+	if config == nil {
+		config = DefaultConfig()
+	}
 	tlsConfig := security.DefaultTLSConfig()
 	secureClient, err := security.CreateSecureHTTPClient(tlsConfig, config.Timeout)
 	if err != nil {
@@ -93,6 +101,9 @@ func (c *Checker) getLatestStableRelease(ctx context.Context) (*ReleaseInfo, err
 
 // GetReleases fetches multiple releases from GitHub.
 func (c *Checker) GetReleases(ctx context.Context, limit int) ([]ReleaseInfo, error) {
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("release list limit must be between 1 and 100")
+	}
 	url := fmt.Sprintf("%s/repos/%s/releases?per_page=%d", c.baseURL, c.repo, limit)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -113,7 +124,7 @@ func (c *Checker) GetReleases(ctx context.Context, limit int) ([]ReleaseInfo, er
 	}
 
 	var releases []ReleaseInfo
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	if err := decodeBoundedJSON(resp.Body, resp.ContentLength, maxReleaseResponseBytes, &releases); err != nil {
 		return nil, fmt.Errorf("failed to parse releases: %w", err)
 	}
 
@@ -146,7 +157,7 @@ func (c *Checker) fetchRelease(ctx context.Context, url string) (*ReleaseInfo, e
 	}
 
 	var release ReleaseInfo
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := decodeBoundedJSON(resp.Body, resp.ContentLength, maxReleaseResponseBytes, &release); err != nil {
 		return nil, fmt.Errorf("failed to parse release: %w", err)
 	}
 
@@ -158,10 +169,10 @@ func (c *Checker) setHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("User-Agent", "gokin-updater/1.0")
 
-	// Add GitHub token if available (increases rate limit)
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
+	// Add GitHub credentials only to trusted GitHub HTTPS endpoints. The same
+	// helper is used by asset/checksum downloads so release metadata or a
+	// tampered cache cannot exfiltrate GITHUB_TOKEN to an arbitrary host.
+	addGitHubTokenHeader(req)
 }
 
 // checkResponse checks the HTTP response for errors.
@@ -275,15 +286,18 @@ func (c *Checker) FindChecksumAsset(release *ReleaseInfo, asset *Asset) *Asset {
 
 // LoadCache loads cached update information.
 func (c *Checker) LoadCache() (*UpdateCache, error) {
-	cachePath := c.getCachePath()
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
+	if err := c.ensureCacheDir(); err != nil {
 		return nil, err
+	}
+	cachePath := c.getCachePath()
+	data, err := fileutil.ReadPrivateFile(cachePath, maxUpdateCacheBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read update cache: %w", err)
 	}
 
 	var cache UpdateCache
 	if err := json.Unmarshal(data, &cache); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode update cache: %w", err)
 	}
 
 	return &cache, nil
@@ -291,19 +305,32 @@ func (c *Checker) LoadCache() (*UpdateCache, error) {
 
 // SaveCache saves update information to cache.
 func (c *Checker) SaveCache(cache *UpdateCache) error {
-	cachePath := c.getCachePath()
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
-		return err
+	if cache == nil {
+		return fmt.Errorf("update cache is nil")
 	}
-
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
+		return fmt.Errorf("encode update cache: %w", err)
+	}
+	if int64(len(data)) > maxUpdateCacheBytes {
+		return fmt.Errorf("update cache exceeds %d-byte limit", maxUpdateCacheBytes)
+	}
+	if err := c.ensureCacheDir(); err != nil {
 		return err
 	}
 
-	return os.WriteFile(cachePath, data, 0644)
+	cachePath := c.getCachePath()
+	if err := fileutil.SecurePrivateFile(cachePath); err != nil {
+		return fmt.Errorf("secure update cache: %w", err)
+	}
+	if err := fileutil.AtomicWrite(cachePath, data, 0o600); err != nil {
+		return fmt.Errorf("write update cache: %w", err)
+	}
+	return nil
+}
+
+func (c *Checker) ensureCacheDir() error {
+	return ensurePrivateUpdateDir(c.cacheDir, "update cache")
 }
 
 // getCachePath returns the path to the cache file.
@@ -324,8 +351,41 @@ func stripArchiveExtensions(name string) string {
 
 // IsCacheValid returns true if cached data is still valid.
 func (c *Checker) IsCacheValid(cache *UpdateCache) bool {
-	if cache == nil {
+	if cache == nil || cache.LastCheck.IsZero() {
 		return false
 	}
-	return time.Since(cache.LastCheck) < c.config.CheckInterval
+	age := time.Since(cache.LastCheck)
+	return age >= 0 && age < c.config.CheckInterval
+}
+
+func decodeBoundedJSON(body io.Reader, contentLength, maxBytes int64, dst any) error {
+	data, err := readBoundedResponseBody(body, contentLength, maxBytes)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, dst); err != nil {
+		return fmt.Errorf("decode JSON response: %w", err)
+	}
+	return nil
+}
+
+func readBoundedResponseBody(body io.Reader, contentLength, maxBytes int64) ([]byte, error) {
+	if body == nil {
+		return nil, fmt.Errorf("response body is nil")
+	}
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("response body limit must be positive")
+	}
+	if contentLength > maxBytes {
+		return nil, fmt.Errorf("response body exceeds %d-byte limit", maxBytes)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeds %d-byte limit", maxBytes)
+	}
+	return data, nil
 }

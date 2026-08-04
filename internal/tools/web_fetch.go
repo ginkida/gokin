@@ -375,6 +375,15 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 			errChan <- fmt.Errorf("%s", toolResult.Error)
 			return
 		}
+		// A transport may ignore Request.Context and still return a successful
+		// response after cancellation. Check explicitly before publishing any
+		// successful content, then again after the final buffered chunk: when
+		// both ctx.Done and a buffered send are ready, select is deliberately
+		// nondeterministic and can otherwise choose every send in succession.
+		if err := ctx.Err(); err != nil {
+			errChan <- err
+			return
+		}
 
 		// Stream content in ~2KB rune-safe chunks so multi-byte
 		// UTF-8 characters are never split at chunk boundaries.
@@ -392,6 +401,9 @@ func (t *WebFetchTool) ExecuteStreaming(ctx context.Context, args map[string]any
 				return
 			case chunks <- string(runes[i:end]):
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			errChan <- err
 		}
 	}()
 
