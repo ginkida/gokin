@@ -10,14 +10,30 @@ import (
 
 // Report summarizes one eval results JSONL file.
 type Report struct {
-	ResultsPath string            `json:"results_path,omitempty"`
-	Count       int               `json:"count"`
-	Passed      int               `json:"passed"`
-	DryRun      int               `json:"dry_run"`
-	Failed      int               `json:"failed"`
-	Score       ScoreSummary      `json:"score"`
-	Metrics     []MetricSummary   `json:"metrics"`
-	Scenarios   []ScenarioSummary `json:"scenarios"`
+	ResultsPath string          `json:"results_path,omitempty"`
+	Count       int             `json:"count"`
+	Passed      int             `json:"passed"`
+	DryRun      int             `json:"dry_run"`
+	Failed      int             `json:"failed"`
+	Score       ScoreSummary    `json:"score"`
+	Metrics     []MetricSummary `json:"metrics"`
+	// ToolUsage records which tools the agent actually reached for, across the
+	// scenarios that executed. A tool can be registered, permitted, and
+	// advertised while never being chosen — that is invisible in pass rates and
+	// metric ratios, and finding it previously meant reading raw journals by
+	// hand. Reporting it turns "is this tool earning its place in the schema?"
+	// into something every run answers on its own.
+	ToolUsage []ToolUsageSummary `json:"tool_usage,omitempty"`
+	Scenarios []ScenarioSummary  `json:"scenarios"`
+}
+
+// ToolUsageSummary counts the scenarios in which one tool was used at least
+// once. It deliberately counts SCENARIOS rather than calls: the question is
+// whether a tool gets chosen, not how chatty it is once chosen.
+type ToolUsageSummary struct {
+	Name      string  `json:"name"`
+	Scenarios int     `json:"scenarios"`
+	Ratio     float64 `json:"ratio"`
 }
 
 // MetricSummary aggregates a boolean metric across scenarios.
@@ -116,6 +132,8 @@ type GateResult struct {
 func BuildReport(path string, results []Result) Report {
 	report := Report{ResultsPath: path, Count: len(results)}
 	metricCounts := map[string]*MetricSummary{}
+	toolScenarios := map[string]int{}
+	measuredScenarios := 0
 
 	for _, result := range results {
 		scenarioScore := result.Score
@@ -140,8 +158,23 @@ func BuildReport(path string, results []Result) Report {
 		// setup_failed, fixture_missing, or agent_command_missing rows; none is
 		// valid score evidence.
 		if measured {
+			measuredScenarios++
 			report.Score.Passed += result.Score.Passed
 			report.Score.Total += result.Score.Total
+			if result.Journal != nil {
+				seen := map[string]struct{}{}
+				for _, tool := range result.Journal.Tools {
+					tool = strings.TrimSpace(tool)
+					if tool == "" {
+						continue
+					}
+					if _, dup := seen[tool]; dup {
+						continue
+					}
+					seen[tool] = struct{}{}
+					toolScenarios[tool]++
+				}
+			}
 
 			for name, ok := range result.Metrics {
 				summary := metricCounts[name]
@@ -181,6 +214,19 @@ func BuildReport(path string, results []Result) Report {
 			return report.Metrics[i].Ratio < report.Metrics[j].Ratio
 		}
 		return report.Metrics[i].Name < report.Metrics[j].Name
+	})
+	for name, count := range toolScenarios {
+		summary := ToolUsageSummary{Name: name, Scenarios: count}
+		if measuredScenarios > 0 {
+			summary.Ratio = float64(count) / float64(measuredScenarios)
+		}
+		report.ToolUsage = append(report.ToolUsage, summary)
+	}
+	sort.Slice(report.ToolUsage, func(i, j int) bool {
+		if report.ToolUsage[i].Scenarios != report.ToolUsage[j].Scenarios {
+			return report.ToolUsage[i].Scenarios > report.ToolUsage[j].Scenarios
+		}
+		return report.ToolUsage[i].Name < report.ToolUsage[j].Name
 	})
 	sort.Slice(report.Scenarios, func(i, j int) bool {
 		if report.Scenarios[i].Status != report.Scenarios[j].Status {

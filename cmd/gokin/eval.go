@@ -385,6 +385,13 @@ func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.
 		}
 	}
 
+	if len(report.ToolUsage) > 0 {
+		fmt.Fprintln(out, "\nTools chosen (scenarios that used each at least once):")
+		for _, tool := range report.ToolUsage {
+			fmt.Fprintf(out, "  %-36s %d (%.0f%%)\n", tool.Name, tool.Scenarios, tool.Ratio*100)
+		}
+	}
+
 	var failing []evals.ScenarioSummary
 	for _, scenario := range report.Scenarios {
 		if scenario.Status != "passed" && scenario.Status != "dry_run" {
