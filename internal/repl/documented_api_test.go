@@ -32,6 +32,13 @@ func TestDocumentedContextAPIExecutesAsAdvertised(t *testing.T) {
 r = context.search_code("Target", path=".", limit=50, case_sensitive=False)
 [sorted(r.keys()), sorted(r["matches"][0].keys())]`,
 			`['matches', 'scanned_files', 'truncated'], ['line', 'path', 'text']`},
+		{"list_files returns the documented dict", `
+r = context.list_files(path=".", pattern="*.go")
+[sorted(r.keys()), sorted(r["files"][0].keys())]`,
+			`['files', 'scanned_files', 'truncated'], ['path', 'size']`},
+		{"list_files pattern filters by relative path", `
+[len(context.list_files(pattern="*.go")["files"]), len(context.list_files(pattern="*.rs")["files"])]`,
+			`[1, 0]`},
 		{"read_slice returns the documented dict", `
 r = context.read_slice("sample.go", start_line=1, end_line=3)
 [r["path"], r["start_line"], sorted(r["lines"][0].keys())]`,

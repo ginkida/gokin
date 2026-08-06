@@ -8,6 +8,7 @@ only provides bounded, workspace-contained convenience APIs.
 
 import ast
 import contextlib
+import fnmatch
 import io
 import json
 import os
@@ -380,6 +381,41 @@ class Context:
                 continue
         return {
             "matches": matches,
+            "scanned_files": scanned,
+            "truncated": scanned > MAX_SEARCH_FILES,
+        }
+
+    def list_files(self, path=".", pattern=None):
+        # Inventory questions — how many files of a kind, which are largest,
+        # how work is distributed across directories — have no answer in
+        # search_code or read_slice, so without this the only route is a raw
+        # os.walk, which does not go through _walk_files and therefore sees
+        # ignored trees. Sizes come along because they are the one attribute
+        # the search path cannot produce at all.
+        #
+        # There is deliberately no result limit: a capped list would make
+        # len(...) a plausible but wrong count, which is the failure this whole
+        # surface is meant to avoid. The walk is bounded by the same file
+        # ceiling as search_code and says so through truncated.
+        root = self._resolve(path)
+        matcher = None if pattern in (None, "") else str(pattern)
+        files = []
+        scanned = 0
+        iterator = [root] if root.is_file() else self._walk_files(root)
+        for candidate in iterator:
+            scanned += 1
+            if scanned > MAX_SEARCH_FILES:
+                break
+            relative = str(candidate.relative_to(self._root))
+            if matcher is not None and not fnmatch.fnmatch(relative, matcher):
+                continue
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                continue
+            files.append({"path": relative, "size": size})
+        return {
+            "files": files,
             "scanned_files": scanned,
             "truncated": scanned > MAX_SEARCH_FILES,
         }

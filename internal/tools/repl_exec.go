@@ -54,6 +54,9 @@ Best for questions ANSWERED BY AGGREGATION over many files (counts, rankings, cr
 context.workspace -> str (property, not a call)
 context.search_code(query, path=".", limit=50, case_sensitive=False)
     -> {"matches": [{"path","line","text"}], "scanned_files": int, "truncated": bool}
+context.list_files(path=".", pattern=None)
+    -> {"files": [{"path","size"}], "scanned_files": int, "truncated": bool}
+    pattern is fnmatch over the workspace-relative path ("*.go", "internal/*").
 context.read_slice(path, start_line=1, end_line=200)
     -> {"path", "start_line", "end_line", "lines": [{"line","text"}]}
 context.git_status() -> str ; context.git_diff(staged=False) -> str
