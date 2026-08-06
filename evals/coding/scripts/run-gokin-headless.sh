@@ -17,7 +17,11 @@ if [ -z "$prompt" ]; then
   exit 64
 fi
 
-set -- "$bin" --headless --prompt "$prompt"
+# Evals run unattended in disposable temp workspaces, and headless permission
+# prompts are refused rather than auto-approved (there is no operator to ask).
+# Without this every scenario that edits a file scores zero, which is what
+# silently happened to the whole suite once that refusal landed.
+set -- "$bin" --headless --permission-mode bypassPermissions --prompt "$prompt"
 if [ -n "$provider" ]; then
   set -- "$@" --provider "$provider"
 fi
