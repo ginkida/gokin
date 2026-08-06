@@ -37,8 +37,34 @@ func (t *ReplExecTool) SetManager(manager replExecutor) {
 
 func (t *ReplExecTool) Name() string { return "repl_exec" }
 
+// Description documents the exact Python surface, not just its existence.
+//
+// Listing capability names ("context (search/read/git/...)") without signatures
+// or return shapes made every first call a guess: search_code returns a dict,
+// not a list, and workspace is a property, not a method. A caller that guesses
+// wrong spends a round on a TypeError, while grep next door has a precise
+// schema that works immediately — so the cheaper tool wins regardless of which
+// one suits the question. The signatures below are pinned by a test that
+// executes each one, so this text cannot drift from the runtime.
 func (t *ReplExecTool) Description() string {
-	return "Execute, inspect, or reset a persistent workspace-read-only Python session for multi-step codebase analysis. State survives across execute calls. Globals: context (search/read/git/artifacts/runtime limits), rlm (delegation), and rlm.harness (bounded, permissioned continual adjustments). Direct writes/processes/network are blocked; use structured tools for external actions."
+	return `Persistent workspace-read-only Python session for multi-step codebase analysis. State survives across execute calls.
+
+Best for questions ANSWERED BY AGGREGATION over many files (counts, rankings, cross-file joins): return the conclusion instead of pulling every match into the transcript. For "show me the matches", grep is simpler.
+
+context.workspace -> str (property, not a call)
+context.search_code(query, path=".", limit=50, case_sensitive=False)
+    -> {"matches": [{"path","line","text"}], "scanned_files": int, "truncated": bool}
+context.read_slice(path, start_line=1, end_line=200)
+    -> {"path", "start_line", "end_line", "lines": [{"line","text"}]}
+context.git_status() -> str ; context.git_diff(staged=False) -> str
+context.artifact_get(id, offset=0, limit=...) -> {"id","offset","size","content","has_more"}
+context.runtime_limits() -> dict
+
+rlm(instruction, dynamic_context=None, *, agent_type="general", max_turns=20, model="") -> dict
+rlm.async_call(...) -> future with .result(timeout=600), .poll(), .cancel()
+rlm.harness: create_prompt/update_prompt/list_prompts/delete_prompt, put_memory/get_memory/list_memory/delete_memory, create_skill/list_skills/delete_skill
+
+The final expression is returned like an interactive REPL. Direct writes, subprocesses, sockets and native libraries are blocked; use structured tools for external actions.`
 }
 
 func (t *ReplExecTool) Declaration() *genai.FunctionDeclaration {
