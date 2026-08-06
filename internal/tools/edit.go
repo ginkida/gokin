@@ -214,6 +214,12 @@ func (t *EditTool) Validate(args map[string]any) error {
 	}
 	_ = filePath
 
+	// Contradictory intents are refused before mode dispatch, because dispatch
+	// resolves them by ORDER rather than by meaning.
+	if err := rejectConflictingInsertArgs(args); err != nil {
+		return err
+	}
+
 	// Multi-edit mode: edits array takes precedence
 	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
 		for i, e := range edits {
@@ -283,6 +289,12 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// downstream).
 	if msg := t.checkReadBeforeEdit(filePath); msg != "" {
 		return NewErrorResult(msg), nil
+	}
+
+	// Same guard as Validate: Execute is reachable directly (InvokeTool, tests),
+	// and silently discarding a replacement corrupts the file.
+	if err := rejectConflictingInsertArgs(args); err != nil {
+		return ToolResult{}, err
 	}
 
 	// Check for multi-edit mode
@@ -1321,4 +1333,31 @@ func editedRegionSnippet(newContent string, line int) string {
 		fmt.Fprintf(&b, "%5d\t%s\n", i, text)
 	}
 	return b.String()
+}
+
+// rejectConflictingInsertArgs refuses an edit that asks for an insert and a
+// replacement at the same time.
+//
+// The mode dispatch picks insert simply because it is tested first, so a stray
+// `insert_after_line` next to `old_string` (or an `edits` array) silently threw
+// the replacement away and inserted the new text at the requested line — with
+// line 0 that is the top of the file, ahead of the package clause. Naming the
+// conflict is strictly better than guessing which half of the request the
+// caller meant.
+func rejectConflictingInsertArgs(args map[string]any) error {
+	if _, hasInsert := GetInt(args, "insert_after_line"); !hasInsert {
+		return nil
+	}
+	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
+		return NewValidationError("insert_after_line",
+			"cannot be combined with edits; send the insert as its own call, "+
+				"or drop insert_after_line to apply the edits array")
+	}
+	if oldStr, ok := GetString(args, "old_string"); ok && oldStr != "" {
+		return NewValidationError("insert_after_line",
+			"cannot be combined with old_string: one asks to insert new text, the "+
+				"other to replace existing text. Drop insert_after_line to replace "+
+				"old_string, or drop old_string to insert at that line")
+	}
+	return nil
 }
