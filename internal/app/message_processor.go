@@ -4074,7 +4074,7 @@ func stepLikelyMutatesFiles(step *plan.Step, entry *plan.RunLedgerEntry) bool {
 
 func isMutatingToolName(name string) bool {
 	switch strings.TrimSpace(strings.ToLower(name)) {
-	case "write", "edit", "batch", "move", "delete", "mkdir", "atomicwrite":
+	case "write", "edit", "batch", "move", "delete", "mkdir":
 		return true
 	default:
 		return false

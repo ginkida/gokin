@@ -4053,12 +4053,11 @@ func isWriteOperation(toolName string) bool {
 // file path we can surface in post-compaction hints (excludes bash/git_commit
 // whose "written path" is opaque or irrelevant as a hint).
 var fileModifyingTools = map[string]bool{
-	"write":       true,
-	"edit":        true,
-	"atomicwrite": true,
-	"copy":        true,
-	"move":        true,
-	"refactor":    true,
+	"write":    true,
+	"edit":     true,
+	"copy":     true,
+	"move":     true,
+	"refactor": true,
 }
 
 // isFileModifyingTool returns true if the tool produces a named file path

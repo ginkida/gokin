@@ -14,7 +14,7 @@ import (
 func TestToolDependencyClassifier_NoDriftFromForeground(t *testing.T) {
 	c := NewToolDependencyClassifier()
 
-	for _, name := range []string{"run_tests", "batch", "refactor", "atomicwrite", "edit", "write", "bash"} {
+	for _, name := range []string{"run_tests", "batch", "refactor", "edit", "write", "bash"} {
 		if !c.IsWriteTool(name) {
 			t.Errorf("%q must be classified as a write tool", name)
 		}

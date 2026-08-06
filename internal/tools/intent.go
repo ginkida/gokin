@@ -16,18 +16,17 @@ import "strings"
 // trade-off (a model could write via `bash` `cat > file` and dodge the gate) is
 // accepted: the real "реализация" path is edit/write/refactor, which IS gated.
 var implementationTools = map[string]bool{
-	"write":       true,
-	"edit":        true,
-	"delete":      true,
-	"move":        true,
-	"copy":        true,
-	"mkdir":       true,
-	"refactor":    true,
-	"batch":       true,
-	"atomicwrite": true,
-	"git_commit":  true,
-	"git_add":     true,
-	"ssh":         true,
+	"write":      true,
+	"edit":       true,
+	"delete":     true,
+	"move":       true,
+	"copy":       true,
+	"mkdir":      true,
+	"refactor":   true,
+	"batch":      true,
+	"git_commit": true,
+	"git_add":    true,
+	"ssh":        true,
 }
 
 // IsImplementationTool reports whether name writes/mutates code or repo state —

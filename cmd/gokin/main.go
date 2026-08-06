@@ -827,7 +827,6 @@ func resolveCLIPermissionMode(raw string, dangerouslySkip bool) (cliPermissionMo
 
 var acceptEditsPermissionTools = []string{
 	"write",
-	"atomicwrite",
 	"edit",
 	"batch",
 	"refactor",

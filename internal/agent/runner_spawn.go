@@ -17,13 +17,12 @@ import (
 const fewShotExampleLimit = 2
 
 var approvedPlanStepPermissionOverrides = map[string]permission.Level{
-	"write":       permission.LevelAllow,
-	"atomicwrite": permission.LevelAllow,
-	"edit":        permission.LevelAllow,
-	"copy":        permission.LevelAllow,
-	"move":        permission.LevelAllow,
-	"mkdir":       permission.LevelAllow,
-	"run_tests":   permission.LevelAllow,
+	"write":     permission.LevelAllow,
+	"edit":      permission.LevelAllow,
+	"copy":      permission.LevelAllow,
+	"move":      permission.LevelAllow,
+	"mkdir":     permission.LevelAllow,
+	"run_tests": permission.LevelAllow,
 }
 
 func approvedPlanStepPermissions(base *permission.Manager) *permission.Manager {

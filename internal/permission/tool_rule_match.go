@@ -15,7 +15,7 @@ var readRuleTools = map[string]bool{
 }
 
 var editRuleTools = map[string]bool{
-	"edit": true, "write": true, "atomicwrite": true, "batch": true,
+	"edit": true, "write": true, "batch": true,
 	"refactor": true, "copy": true, "move": true, "delete": true, "mkdir": true,
 }
 
@@ -406,7 +406,7 @@ func permissionPathTargets(runtimeName string, args map[string]any, workDir stri
 		return value, ok && value != ""
 	}
 	switch runtimeName {
-	case "read", "write", "edit", "atomicwrite":
+	case "read", "write", "edit":
 		value, ok := stringArg("file_path")
 		return []string{value}, ok
 	case "grep", "glob", "list_dir", "tree":

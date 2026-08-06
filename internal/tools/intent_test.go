@@ -44,7 +44,7 @@ func TestIsImplementationTool(t *testing.T) {
 	// Code/repo-mutating tools are gated in discuss mode.
 	for _, n := range []string{
 		"write", "edit", "delete", "move", "copy", "mkdir",
-		"refactor", "batch", "atomicwrite", "git_commit", "git_add", "ssh",
+		"refactor", "batch", "git_commit", "git_add", "ssh",
 	} {
 		if !IsImplementationTool(n) {
 			t.Errorf("IsImplementationTool(%q) = false, want true", n)

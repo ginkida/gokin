@@ -39,7 +39,7 @@ func TestGetToolRiskLevel(t *testing.T) {
 		}
 	}
 
-	mediumTools := []string{"write", "edit", "git_add", "copy", "move", "mkdir", "atomicwrite", "task", "batch"}
+	mediumTools := []string{"write", "edit", "git_add", "copy", "move", "mkdir", "task", "batch"}
 	for _, tool := range mediumTools {
 		if got := GetToolRiskLevel(tool); got != RiskMedium {
 			t.Errorf("GetToolRiskLevel(%q) = %v, want RiskMedium", tool, got)

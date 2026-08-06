@@ -17,7 +17,7 @@ func NewToolDependencyClassifier() *ToolDependencyClassifier {
 // IsWriteTool returns true if the tool modifies state. Delegates to the SINGLE
 // shared write-tool set in internal/tools so the foreground (executor) and
 // sub-agent classifiers can never drift — they previously did, dropping
-// run_tests/batch/refactor/atomicwrite here and letting sub-agents run a
+// run_tests/batch/refactor here and letting sub-agents run a
 // refactor/batch in parallel with reads.
 func (c *ToolDependencyClassifier) IsWriteTool(name string) bool {
 	return tools.IsWriteTool(name)

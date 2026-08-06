@@ -39,15 +39,14 @@ const (
 )
 
 var deltaCheckToolSet = map[string]bool{
-	"write":       true,
-	"edit":        true,
-	"delete":      true,
-	"mkdir":       true,
-	"copy":        true,
-	"move":        true,
-	"batch":       true,
-	"refactor":    true,
-	"atomicwrite": true,
+	"write":    true,
+	"edit":     true,
+	"delete":   true,
+	"mkdir":    true,
+	"copy":     true,
+	"move":     true,
+	"batch":    true,
+	"refactor": true,
 }
 
 type deltaCheckResult struct {

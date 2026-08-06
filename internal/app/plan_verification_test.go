@@ -29,7 +29,6 @@ func TestIsMutatingToolName(t *testing.T) {
 		{"move", "move", true},
 		{"delete", "delete", true},
 		{"mkdir", "mkdir", true},
-		{"atomicwrite", "atomicwrite", true},
 		{"read not mutating", "read", false},
 		{"grep not mutating", "grep", false},
 		{"bash not mutating", "bash", false},

@@ -173,7 +173,7 @@ func GetToolRiskLevel(toolName string) RiskLevel {
 		// in safe mode they go through silently.
 		return RiskMedium
 	case "write", "edit", "git_add", "copy", "move", "mkdir",
-		"atomicwrite", "task", "batch":
+		"task", "batch":
 		return RiskMedium
 	case "bash", "delete", "git_commit", "ssh":
 		return RiskHigh
