@@ -7,8 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
+
+	"gokin/internal/git"
 )
 
 // Detect probes secure backends instead of trusting executable presence. Some
@@ -140,6 +143,40 @@ func sandboxString(value string) string {
 	return `"` + value + `"`
 }
 
+// ignoredTopLevelDirs returns workspace-relative top-level directories that
+// .gitignore excludes. It reuses the repository's own matcher rather than
+// re-deriving ignore semantics in Python, and stays TOP-LEVEL on purpose: the
+// hazard is large vendored/build trees, one shallow readdir keeps worker
+// startup cheap, and a narrow rule cannot accidentally hide source the user
+// wanted analysed. Failure to read .gitignore is not fatal — the walker simply
+// keeps its previous behaviour.
+func ignoredTopLevelDirs(workDir string) []string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return nil
+	}
+	matcher := git.NewGitIgnore(workDir)
+	if err := matcher.Load(); err != nil {
+		return nil
+	}
+	var ignored []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if matcher.IsIgnored(filepath.Join(workDir, name)) {
+			ignored = append(ignored, name)
+		}
+	}
+	sort.Strings(ignored)
+	return ignored
+}
+
 func buildWorkerCommand(ctx context.Context, opts Options, runtimeDir, workerPath string, generation uint64) (*exec.Cmd, error) {
 	args := []string{"-I", "-u", workerPath, opts.WorkDir, fmt.Sprint(generation), opts.GitPath, string(opts.Backend)}
 	var cmd *exec.Cmd
@@ -191,6 +228,14 @@ func buildWorkerCommand(ctx context.Context, opts Options, runtimeDir, workerPat
 		"LC_ALL=en_US.UTF-8",
 		"PYTHONIOENCODING=utf-8",
 		"PYTHONDONTWRITEBYTECODE=1",
+	}
+	// Analysis that silently includes ignored trees produces confidently wrong
+	// answers: in this very repository a gitignored 266 MB Go toolchain cache
+	// made a "which packages have the most TODOs" ranking return the standard
+	// library — reported with truncated=False, so nothing in the answer hinted
+	// at it. Grep's noise is visible in the transcript; the walker's is not.
+	if ignored := ignoredTopLevelDirs(opts.WorkDir); len(ignored) > 0 {
+		cmd.Env = append(cmd.Env, "GOKIN_REPL_IGNORE_DIRS="+strings.Join(ignored, string(os.PathListSeparator)))
 	}
 	configureProcessGroup(cmd)
 	return cmd, nil

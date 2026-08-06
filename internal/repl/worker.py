@@ -285,6 +285,16 @@ class Harness:
 class Context:
     _SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", ".idea", ".vscode"}
 
+    @staticmethod
+    def _ignored_roots():
+        # Top-level directories .gitignore excludes, resolved by the Go side
+        # with the repository's own matcher. Traversing them produces answers
+        # that are confidently wrong rather than merely noisy: a vendored
+        # toolchain cache once made a "most TODOs" ranking return the Go
+        # standard library, and nothing in the result said so.
+        raw = os.environ.get("GOKIN_REPL_IGNORE_DIRS", "")
+        return {part for part in raw.split(os.pathsep) if part}
+
     def __init__(self, workdir, git_path, runtime_limits):
         self._root = pathlib.Path(workdir).resolve(strict=True)
         self._git_path = git_path
@@ -375,8 +385,20 @@ class Context:
         }
 
     def _walk_files(self, root):
+        ignored_roots = self._ignored_roots()
         for current, dirs, files in os.walk(str(root), followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in self._SKIP_DIRS)
+            keep = []
+            for name in sorted(dirs):
+                if name in self._SKIP_DIRS:
+                    continue
+                try:
+                    relative = (pathlib.Path(current) / name).relative_to(self._root)
+                except ValueError:
+                    relative = None
+                if relative is not None and str(relative) in ignored_roots:
+                    continue
+                keep.append(name)
+            dirs[:] = keep
             for name in sorted(files):
                 candidate = pathlib.Path(current) / name
                 try:
