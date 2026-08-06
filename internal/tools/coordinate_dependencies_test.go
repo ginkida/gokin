@@ -2,8 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"gokin/internal/config"
 )
 
 func coordinateTask(id string, dependencies ...string) map[string]any {
@@ -110,5 +114,45 @@ func TestCoordinateTool_ValidateRejectsMalformedDependencies(t *testing.T) {
 	err := tool.Validate(map[string]any{"tasks": []any{task}})
 	if err == nil || !strings.Contains(err.Error(), "non-empty task IDs") {
 		t.Fatalf("Validate error = %v, want malformed dependency error", err)
+	}
+}
+
+func TestCoordinateImplicitTimeoutFollowsCriticalDependencyPath(t *testing.T) {
+	independent := map[string]any{"tasks": []any{
+		coordinateTask("a"), coordinateTask("b"), coordinateTask("c"),
+	}}
+	if got := coordinateTimeout(independent); got != DefaultCoordinateTimeout {
+		t.Fatalf("parallel graph timeout = %v, want floor %v", got, DefaultCoordinateTimeout)
+	}
+	serialized := map[string]any{
+		"tasks": independent["tasks"], "max_parallel": 1,
+	}
+	if got, want := coordinateTimeout(serialized), 3*config.DefaultAgentTimeout; got != want {
+		t.Fatalf("serialized independent graph timeout = %v, want %v", got, want)
+	}
+
+	chain := map[string]any{"tasks": []any{
+		coordinateTask("deploy", "test"),
+		coordinateTask("test", "build"),
+		coordinateTask("build"),
+	}}
+	if got, want := coordinateTimeout(chain), 3*config.DefaultAgentTimeout; got != want {
+		t.Fatalf("three-node critical path timeout = %v, want %v", got, want)
+	}
+
+	longChain := make([]any, 0, 8)
+	longChain = append(longChain, coordinateTask("step-0"))
+	for i := 1; i < 8; i++ {
+		longChain = append(longChain, coordinateTask(
+			fmt.Sprintf("step-%d", i), fmt.Sprintf("step-%d", i-1)))
+	}
+	if got := coordinateTimeout(map[string]any{"tasks": longChain}); got != MaxCoordinateTimeout {
+		t.Fatalf("long critical path timeout = %v, want ceiling %v", got, MaxCoordinateTimeout)
+	}
+
+	if got := coordinateTimeout(map[string]any{
+		"tasks": chain["tasks"], "timeout_minutes": 7,
+	}); got != 7*time.Minute {
+		t.Fatalf("explicit timeout = %v, want 7m", got)
 	}
 }

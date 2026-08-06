@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"gokin/internal/commands"
+	"gokin/internal/repl"
 
 	"github.com/spf13/cobra"
 )
@@ -46,12 +47,20 @@ func newDoctorCmd() *cobra.Command {
 					configPath = absolute
 				}
 			}
+			executablePath, _ := os.Executable()
+			var hybridAvailability *repl.Availability
+			if strings.ToLower(strings.TrimSpace(cfg.Engine.Mode)) != "tools" {
+				availability := repl.Detect(cmd.Context(), workDir)
+				hybridAvailability = &availability
+			}
 			report := commands.RenderDoctor(commands.DoctorOptions{
-				Version:    version,
-				Config:     cfg,
-				WorkDir:    workDir,
-				ConfigPath: configPath,
-				CLI:        true,
+				Version:            version,
+				Config:             cfg,
+				WorkDir:            workDir,
+				ConfigPath:         configPath,
+				ExecutablePath:     executablePath,
+				CLI:                true,
+				HybridAvailability: hybridAvailability,
 			})
 			_, err = fmt.Fprint(cmd.OutOrStdout(), doctorANSIPattern.ReplaceAllString(report, ""))
 			return err

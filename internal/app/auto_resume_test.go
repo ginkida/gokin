@@ -109,6 +109,18 @@ func TestScheduleAutoResume_BudgetAndDelays(t *testing.T) {
 	}
 }
 
+func TestScheduleAutoResume_ZeroValueMapIsSafe(t *testing.T) {
+	a := &App{}
+	attempt, _, ok := a.scheduleAutoResume(
+		"headless timeout", client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout))
+	if !ok || attempt != 1 {
+		t.Fatalf("zero-value scheduler = attempt %d ok=%v, want 1/true", attempt, ok)
+	}
+	if a.autoResumeCount == nil {
+		t.Fatal("zero-value scheduler did not initialize its retry ledger")
+	}
+}
+
 // TestScheduleAutoResume_DifferentMessagesIndependentBudgets verifies the
 // per-message keying: exhausting the budget on one message does NOT block
 // a different message from getting its own auto-resume.
@@ -199,29 +211,24 @@ func TestAutoResumeReason(t *testing.T) {
 	}
 }
 
-// TestIsContextSizeError pins the classification used to skip a retry whose
-// compaction removed nothing. Model round timeout IS context-size-driven (a
-// large context forces longer reasoning → 14m cap); other resumable errors are
-// not, so they still retry even with an unchanged context.
-func TestIsContextSizeError(t *testing.T) {
+// TestShouldSkipUnchangedAutoResume pins the asymmetric no-compaction policy:
+// allow one nondeterministic provider retry, stop the second unchanged timeout.
+func TestShouldSkipUnchangedAutoResume(t *testing.T) {
 	timeoutErr := client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout)
-	if !isContextSizeError(timeoutErr) {
-		t.Error("model round timeout should be a context-size error")
+	if shouldSkipUnchangedAutoResume(timeoutErr, 1) {
+		t.Error("first unchanged model timeout should get one transient retry")
 	}
-
-	// Empty model response is resumable but NOT classified as context-size — it's
-	// cheap to retry and may be transient, so the no-compaction skip doesn't apply.
-	if isContextSizeError(client.ErrEmptyModelResponse) {
-		t.Error("empty model response should NOT be a context-size error")
+	if !shouldSkipUnchangedAutoResume(timeoutErr, 2) {
+		t.Error("second unchanged model timeout should stop automatic retries")
 	}
-
-	// A transient network error is not context-size-driven.
-	if isContextSizeError(errors.New("connection reset")) {
-		t.Error("generic network error should NOT be a context-size error")
+	if shouldSkipUnchangedAutoResume(client.ErrEmptyModelResponse, 2) {
+		t.Error("empty response should retain its normal retry budget")
 	}
-
-	if isContextSizeError(nil) {
-		t.Error("nil error should not be a context-size error")
+	if shouldSkipUnchangedAutoResume(errors.New("connection reset"), 2) {
+		t.Error("network errors should retain their normal retry budget")
+	}
+	if shouldSkipUnchangedAutoResume(nil, 2) {
+		t.Error("nil error should not skip a retry")
 	}
 }
 

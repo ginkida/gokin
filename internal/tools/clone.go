@@ -19,6 +19,12 @@ func CloneRegistryForWorkDirWithToolCeiling(baseRegistry ToolRegistry, workDir s
 	}
 
 	for _, tool := range baseRegistry.List() {
+		// A REPL kernel is session-scoped mutable state. Until sub-agents receive
+		// their own runtime budgets and lifecycle owner, never share or clone the
+		// foreground kernel into a delegated registry.
+		if tool.Name() == "repl_exec" || tool.Name() == "harness" {
+			continue
+		}
 		if restricted {
 			if _, ok := allowed[tool.Name()]; !ok {
 				continue

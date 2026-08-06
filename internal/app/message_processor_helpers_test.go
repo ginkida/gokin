@@ -52,6 +52,29 @@ func TestLastModelText_ConcatenatesParts(t *testing.T) {
 	}
 }
 
+func TestLastModelText_ExcludesHiddenThinkingFromContinuationAnchor(t *testing.T) {
+	history := []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{
+			{Text: "private chain of thought", Thought: true, ThoughtSignature: []byte("signed")},
+			{Text: "visible partial answer"},
+		}},
+	}
+	got := lastModelText(history)
+	if got != "visible partial answer" {
+		t.Fatalf("lastModelText() = %q, want only assistant-facing text", got)
+	}
+}
+
+func TestLastModelText_SkipsThinkingOnlyMessage(t *testing.T) {
+	history := []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "older visible answer"}}},
+		{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "hidden thought", Thought: true}}},
+	}
+	if got := lastModelText(history); got != "older visible answer" {
+		t.Fatalf("lastModelText() = %q, want prior visible assistant message", got)
+	}
+}
+
 func TestLastModelText_IgnoresNilContent(t *testing.T) {
 	history := []*genai.Content{
 		nil,

@@ -39,6 +39,11 @@ func TestFormatCompactionResult(t *testing.T) {
 			wantContains: "every message is pinned",
 		},
 		{
+			name:         "summarization_in_progress",
+			err:          appcontext.ErrSummarizationInProgress,
+			wantContains: "already running",
+		},
+		{
 			name:         "real_failure",
 			err:          errors.New("network timeout"),
 			wantContains: "Compaction failed: network timeout",
@@ -93,6 +98,7 @@ func TestFormatCompactionResult_NoOpSentinelsAreNotErrors(t *testing.T) {
 		appcontext.ErrSummarizerUnavailable,
 		appcontext.ErrHistoryTooShort,
 		appcontext.ErrNothingToSummarize,
+		appcontext.ErrSummarizationInProgress,
 	}
 	for _, sentinel := range sentinels {
 		got := formatCompactionResult(sentinel, 0, 0, 0)

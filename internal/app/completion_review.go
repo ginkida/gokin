@@ -88,7 +88,7 @@ func (a *App) runCompletionReviewIfNeeded(
 		return true
 	}
 
-	if a.program != nil {
+	if a.hasProgram() {
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusInfo,
 			Message: "Final self-review: checking diff and verification before completion",

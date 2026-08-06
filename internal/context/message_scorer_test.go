@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/client"
+	"gokin/internal/testkit"
+
 	"google.golang.org/genai"
 )
 
@@ -237,6 +240,55 @@ func TestMessageScorerSemanticClientSetup(t *testing.T) {
 	s.semanticMu.RUnlock()
 	if enabled {
 		t.Error("nil client should not enable semantic scoring")
+	}
+}
+
+func TestMessageScorerSemanticCallUsesLiveModelRoundTimeout(t *testing.T) {
+	mock := testkit.NewMockClient().EnqueueText(`[
+		{"index":0,"score":0.9},{"index":1,"score":0.8},
+		{"index":2,"score":0.7},{"index":3,"score":0.6},
+		{"index":4,"score":0.5},{"index":5,"score":0.4}
+	]`)
+	deadlineRemaining := make(chan time.Duration, 1)
+	mock.OnSend = func(ctx context.Context) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadlineRemaining <- 0
+			return
+		}
+		deadlineRemaining <- time.Until(deadline)
+	}
+
+	s := NewMessageScorer()
+	s.SetSemanticClient(mock)
+	s.SetSemanticTimeout(40 * time.Minute)
+	messages := make([]*genai.Content, 6)
+	for i := range messages {
+		messages[i] = genai.NewContentFromText("important context", genai.RoleUser)
+	}
+	if scores := s.ScoreMessages(messages); len(scores) != len(messages) {
+		t.Fatalf("scores = %d, want %d", len(scores), len(messages))
+	}
+
+	remaining := <-deadlineRemaining
+	if remaining < 39*time.Minute || remaining > 41*time.Minute {
+		t.Fatalf("semantic scorer deadline = %v, want approximately 40m", remaining)
+	}
+	if got := s.SemanticTimeout(); got != 40*time.Minute {
+		t.Fatalf("SemanticTimeout() = %v, want 40m", got)
+	}
+	s.SetSemanticTimeout(0)
+	if got := s.SemanticTimeout(); got != client.DefaultModelRoundTimeout {
+		t.Fatalf("zero semantic timeout = %v, want default %v", got, client.DefaultModelRoundTimeout)
+	}
+}
+
+func TestContextManagerPropagatesModelRoundTimeoutToSemanticScorer(t *testing.T) {
+	s := NewMessageScorer()
+	m := &ContextManager{messageScorer: s}
+	m.SetModelRoundTimeout(37 * time.Minute)
+	if got := s.SemanticTimeout(); got != 37*time.Minute {
+		t.Fatalf("semantic scorer timeout = %v, want 37m", got)
 	}
 }
 

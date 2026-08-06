@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"gokin/internal/config"
 )
 
 // APIError represents an API error with HTTP status code.
@@ -63,9 +65,10 @@ var ErrModelRoundTimeout = errors.New("model round timeout")
 // turn just failed (the "agent stopped at ~7m with 13m thinking" incident).
 // 14m comfortably exceeds a realistic single-round thinking budget; the round
 // helper still clamps to the parent's remaining deadline when the parent (e.g.
-// a sub-agent overall timeout) is stricter. Single source of truth shared by
-// tools.defaultModelRoundTimeout and agent.agentModelRoundTimeout (don't drift).
-const DefaultModelRoundTimeout = 14 * time.Minute
+// a sub-agent overall timeout) is stricter. The canonical value lives in
+// config so persisted defaults, foreground execution, and sub-agents cannot
+// drift apart.
+const DefaultModelRoundTimeout = config.DefaultModelRoundTimeout
 
 // ErrEmptyModelResponse is the sentinel for a successful provider response
 // that carried neither text nor tool calls.
@@ -119,6 +122,31 @@ type FailureTelemetry struct {
 	Partial  bool
 	Timeout  time.Duration
 	Provider string
+}
+
+// partialFailureError records that a request failed after the stream had
+// already delivered useful response data. It deliberately preserves the
+// original error through Unwrap so timeout/cancellation classification and
+// errors.Is checks keep working unchanged.
+type partialFailureError struct {
+	err error
+}
+
+func (e *partialFailureError) Error() string { return e.err.Error() }
+func (e *partialFailureError) Unwrap() error { return e.err }
+func (e *partialFailureError) PartialFailure() bool {
+	return true
+}
+
+func markFailurePartial(err error) error {
+	if err == nil {
+		return nil
+	}
+	var partial interface{ PartialFailure() bool }
+	if errors.As(err, &partial) && partial.PartialFailure() {
+		return err
+	}
+	return &partialFailureError{err: err}
 }
 
 // ContextErr returns context cause when available (preserves timeout reason),
@@ -175,6 +203,11 @@ func DetectFailureTelemetry(err error) FailureTelemetry {
 	t := FailureTelemetry{Reason: string(FailureReasonOther)}
 	if err == nil {
 		return t
+	}
+
+	var partial interface{ PartialFailure() bool }
+	if errors.As(err, &partial) {
+		t.Partial = partial.PartialFailure()
 	}
 
 	var timeoutErr *TimeoutError

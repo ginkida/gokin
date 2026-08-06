@@ -67,7 +67,7 @@ func (a *App) registerPermRequest() (id string, ch chan permission.Decision, cle
 // promptPermission is called by the permission manager to ask the user for permission.
 // It sends a request to the TUI and waits for a response with timeout.
 func (a *App) promptPermission(ctx context.Context, req *permission.Request) (permission.Decision, error) {
-	if a.program == nil {
+	if !a.hasProgram() {
 		toolName := "operation"
 		if req != nil && strings.TrimSpace(req.ToolName) != "" {
 			toolName = req.ToolName
@@ -242,7 +242,7 @@ func (a *App) notifyPromptExpired(kind ui.PromptKind, reqID, message string) {
 
 // promptQuestion is called by the AskUserTool to ask the user a question.
 func (a *App) promptQuestion(ctx context.Context, question string, options []string, defaultOpt string) (string, error) {
-	if a.program == nil {
+	if !a.hasProgram() {
 		return "", fmt.Errorf("program not running")
 	}
 	reqID, responseCh, cleanup := a.registerQuestionRequest()
@@ -367,7 +367,7 @@ func (a *App) applyPlanApprovalResponse(p *plan.Plan, response planApprovalRespo
 
 // promptPlanApproval is called by the plan manager to request user approval.
 func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.ApprovalDecision, error) {
-	if a.program == nil {
+	if !a.hasProgram() {
 		return plan.ApprovalRejected, fmt.Errorf("plan approval is required, but interactive approval is unavailable in headless mode; disable required plan approval explicitly for intentional unattended execution")
 	}
 	reqID, responseCh, cleanup := a.registerPlanApprovalRequest()
@@ -413,7 +413,7 @@ func (a *App) promptPlanApproval(ctx context.Context, p *plan.Plan) (plan.Approv
 
 // handlePlanProgressUpdate is called when plan execution progress is made.
 func (a *App) handlePlanProgressUpdate(progress *plan.ProgressUpdate) {
-	if a.program == nil {
+	if !a.hasProgram() {
 		return
 	}
 
@@ -573,7 +573,7 @@ func (a *App) promptDiffDecision(ctx context.Context, filePath, oldContent, newC
 		return ui.DiffReject, nil
 	}
 
-	if a.program == nil {
+	if !a.hasProgram() {
 		return ui.DiffApply, nil
 	}
 
@@ -646,7 +646,7 @@ func (a *App) promptMultiDiffDecision(ctx context.Context, files []ui.DiffFile) 
 
 	drainMultiDiffDecisionChan(a.multiDiffResponseChan)
 
-	if a.program == nil {
+	if !a.hasProgram() {
 		decisions := make(map[string]ui.DiffDecision, len(files))
 		for _, file := range files {
 			decisions[file.FilePath] = ui.DiffApply

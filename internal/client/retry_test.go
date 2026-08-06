@@ -1,10 +1,57 @@
 package client
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
+
+type retryableFailureRoundTripper struct {
+	calls int
+}
+
+func (r *retryableFailureRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	r.calls++
+	return nil, errors.New("connection reset by peer")
+}
+
+func TestExhaustedRetryErrorDoesNotClaimZeroRetriesWereExhausted(t *testing.T) {
+	root := errors.New("connection reset by peer")
+	got := exhaustedRetryError(0, root)
+	if !errors.Is(got, root) || strings.Contains(got.Error(), "max retries (0)") {
+		t.Fatalf("zero-retry error = %v, want unmodified root cause", got)
+	}
+
+	got = exhaustedRetryError(3, root)
+	if !errors.Is(got, root) || !strings.Contains(got.Error(), "max retries (3) exceeded") {
+		t.Fatalf("exhausted retry error = %v, want retry count and wrapped root", got)
+	}
+}
+
+func TestAnthropicZeroLocalRetryBudgetReturnsHonestRootFailure(t *testing.T) {
+	transport := &retryableFailureRoundTripper{}
+	c := &AnthropicClient{
+		config: AnthropicConfig{
+			Model: "k3", BaseURL: "https://api.kimi.invalid", APIKey: "test",
+			Provider: "kimi", MaxRetries: 0, HTTPTimeout: 5 * time.Minute,
+		},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	_, err := c.SendMessage(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "connection reset by peer") {
+		t.Fatalf("SendMessage error = %v, want transport root cause", err)
+	}
+	if strings.Contains(err.Error(), "max retries (0)") {
+		t.Fatalf("zero local retry budget produced misleading wrapper: %v", err)
+	}
+	if transport.calls != 1 {
+		t.Fatalf("transport calls = %d, want exactly one App-owned attempt", transport.calls)
+	}
+}
 
 func TestAdaptiveRetryConfigHealthy(t *testing.T) {
 	// Setup: record many successes to make provider very healthy

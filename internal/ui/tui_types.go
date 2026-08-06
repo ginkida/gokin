@@ -279,6 +279,7 @@ type (
 		HintsEnabled        bool
 		ShowToolCalls       bool
 		ModelName           string // Current model name (empty = no change)
+		ModelRoundTimeout   time.Duration
 	}
 	// ModelSelectResultMsg resolves a model switch requested by the selector.
 	// ModelID is the authoritative active model after success or rollback.

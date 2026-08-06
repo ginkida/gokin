@@ -21,6 +21,7 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/git"
+	"gokin/internal/harness"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
@@ -29,6 +30,7 @@ import (
 	"gokin/internal/permission"
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
+	"gokin/internal/repl"
 	"gokin/internal/router"
 	"gokin/internal/security"
 	"gokin/internal/tasks"
@@ -107,6 +109,10 @@ type Builder struct {
 	mcpConnectSummary string // Deferred UI summary of initial MCP connect results
 	contextAgent      *appcontext.ContextAgent
 	codeIntelProvider codeintel.ReadOnlyProvider
+	replManager       hybridRuntime
+	harnessStore      *harness.Store
+	replDetector      func(context.Context, string) repl.Availability
+	replFactory       func(repl.Options) (hybridRuntime, error)
 
 	// Loops (autonomous recurring tasks, v0.81+). Initialized late in
 	// the build pipeline so the home-dir lookup happens once.
@@ -427,6 +433,9 @@ func (b *Builder) initTools() error {
 	} else {
 		b.registry = tools.DefaultRegistry(b.workDir)
 	}
+	if err := b.initHybridEngine(); err != nil {
+		return err
+	}
 	// Keep bash's inner foreground deadline aligned with the configured tool
 	// budget. Previously the executor allowed two minutes while Bash killed the
 	// command at its hard-coded 30-second default.
@@ -517,6 +526,101 @@ func (b *Builder) initTools() error {
 		b.executor.GetNotificationManager().EnableNativeNotifications(true)
 	}
 
+	return nil
+}
+
+// initHybridEngine resolves the auto mode before any tool declarations reach
+// the model. DefaultRegistry carries an unwired repl_exec placeholder so eager
+// and lazy registries share one schema; an unavailable runtime is physically
+// unregistered here, making fallback indistinguishable from the legacy tools
+// engine instead of advertising a capability that will fail later.
+func (b *Builder) initHybridEngine() error {
+	if b.registry == nil || b.options.Bare {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(b.cfg.Engine.Mode))
+	if mode == "tools" {
+		b.registry.Unregister("repl_exec")
+		b.registry.Unregister("harness")
+		logging.Debug("hybrid engine disabled by configuration")
+		return nil
+	}
+
+	detector := b.replDetector
+	if detector == nil {
+		detector = repl.Detect
+	}
+	availability := detector(b.ctx, b.workDir)
+	if !availability.Available {
+		b.registry.Unregister("repl_exec")
+		b.registry.Unregister("harness")
+		if mode == "hybrid" {
+			return fmt.Errorf("engine.mode=hybrid requires a secure REPL runtime: %w", availability.Error())
+		}
+		logging.Debug("hybrid auto mode fell back to structured tools", "reason", availability.Reason)
+		return nil
+	}
+
+	factory := b.replFactory
+	if factory == nil {
+		factory = func(opts repl.Options) (hybridRuntime, error) {
+			return repl.NewManager(opts)
+		}
+	}
+	manager, err := factory(repl.Options{
+		WorkDir:          b.workDir,
+		PythonPath:       availability.PythonPath,
+		Backend:          availability.Backend,
+		CellTimeout:      b.cfg.Engine.REPL.CellTimeout,
+		MaxCodeBytes:     b.cfg.Engine.REPL.MaxCodeBytes,
+		MaxResponseBytes: b.cfg.Engine.REPL.MaxResponseBytes,
+	})
+	if err != nil {
+		b.registry.Unregister("repl_exec")
+		b.registry.Unregister("harness")
+		if mode == "hybrid" {
+			return fmt.Errorf("initialize required hybrid runtime: %w", err)
+		}
+		logging.Debug("hybrid auto mode initialization failed; using structured tools", "error", err)
+		return nil
+	}
+	registered, ok := b.registry.Get("repl_exec")
+	if !ok {
+		_ = manager.Close()
+		return fmt.Errorf("hybrid runtime initialized but repl_exec is not registered")
+	}
+	tool, ok := registered.(*tools.ReplExecTool)
+	if !ok {
+		_ = manager.Close()
+		return fmt.Errorf("repl_exec has unexpected implementation %T", registered)
+	}
+	tool.SetManager(manager)
+	store, err := harness.NewStore(b.workDir)
+	if err != nil {
+		_ = manager.Close()
+		b.registry.Unregister("repl_exec")
+		b.registry.Unregister("harness")
+		if mode == "hybrid" {
+			return fmt.Errorf("initialize required continual harness: %w", err)
+		}
+		logging.Debug("hybrid auto mode harness initialization failed; using structured tools", "error", err)
+		return nil
+	}
+	registeredHarness, ok := b.registry.Get("harness")
+	if !ok {
+		_ = manager.Close()
+		return fmt.Errorf("hybrid runtime initialized but harness is not registered")
+	}
+	harnessTool, ok := registeredHarness.(*tools.HarnessTool)
+	if !ok {
+		_ = manager.Close()
+		return fmt.Errorf("harness has unexpected implementation %T", registeredHarness)
+	}
+	harnessTool.SetStore(store)
+	b.replManager = manager
+	b.harnessStore = store
+	logging.Info("hybrid engine enabled",
+		"mode", mode, "backend", availability.Backend, "python", availability.PythonPath)
 	return nil
 }
 
@@ -695,6 +799,7 @@ func (b *Builder) initSession() error {
 			smConfig.ToolCallsBetweenUpdates = d.ToolCallsBetweenUpdates
 		}
 		b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
+		b.sessionMemory.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 		b.sessionMemory.LoadFromDisk()
 		b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.mainClient))
 		if b.projectLearning != nil {
@@ -729,6 +834,7 @@ func (b *Builder) initSession() error {
 	}
 
 	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.mainClient, &b.cfg.Context)
+	b.contextManager.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
 
 	// Initialize context predictor for predictive file loading
@@ -796,6 +902,7 @@ func (b *Builder) initBareManagers() error {
 	b.agentRunner.SetHooks(b.hooksManager)
 	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
+	b.agentRunner.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.agentRunner.SetWorkspaceIsolationEnabled(false)
 	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)
 
@@ -1006,6 +1113,7 @@ func (b *Builder) initManagers() error {
 	b.agentRunner.SetHooks(b.hooksManager)
 	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive thinking for sub-agents
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
+	b.agentRunner.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
 	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)
 	if b.readTracker != nil {
@@ -1139,6 +1247,7 @@ func (b *Builder) initManagers() error {
 
 	// 4. Meta-Agent (monitors and optimizes agents)
 	metaConfig := agent.DefaultMetaAgentConfig()
+	metaConfig.StuckThreshold = config.ModelWatchdogTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.metaAgent = agent.NewMetaAgent(
 		b.ctx,
 		b.agentRunner,
@@ -1158,6 +1267,8 @@ func (b *Builder) initManagers() error {
 	treePlannerConfig := agent.DefaultTreePlannerConfig()
 	if b.cfg.Plan.PlanningTimeout > 0 {
 		treePlannerConfig.PlanningTimeout = b.cfg.Plan.PlanningTimeout
+	} else if b.cfg.Tools.ModelRoundTimeout > 0 {
+		treePlannerConfig.PlanningTimeout = b.cfg.Tools.ModelRoundTimeout
 	}
 	treePlannerConfig.UseLLMExpansion = b.cfg.Plan.UseLLMExpansion
 
@@ -2052,6 +2163,16 @@ func (b *Builder) initUI() error {
 // wireDependencies sets up callbacks and inter-component connections.
 func (b *Builder) wireDependencies() error {
 	app := b.assembleApp()
+	if app.replManager != nil {
+		app.replManager.SetCallHandler(app.handleRLMCall)
+	}
+	if app.registry != nil {
+		if registered, ok := app.registry.Get("harness"); ok {
+			if harnessTool, ok := registered.(*tools.HarnessTool); ok {
+				harnessTool.SetPromptChangedCallback(app.refreshSystemInstruction)
+			}
+		}
+	}
 
 	// loop_control's stop must ALSO cancel an in-flight iteration, which needs
 	// the App (the loop runner is created later, in App.Run) — so the wiring
@@ -2229,6 +2350,7 @@ func (b *Builder) wireDependencies() error {
 	b.tuiModel.SetPermissionsEnabled(b.cfg.Permission.Enabled)
 	b.tuiModel.SetPermissionsToggleCallback(app.TogglePermissions)
 	b.tuiModel.SetCompactMode(b.cfg.UI.CompactMode)
+	b.tuiModel.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 
 	// Set up sandbox toggle callback and initial state
 	b.tuiModel.SetSandboxEnabled(b.cfg.Tools.Bash.Sandbox)
@@ -2264,7 +2386,7 @@ func (b *Builder) wireDependencies() error {
 			}
 		}
 		b.contextManager.OnOptimizeStart = func(reason string) {
-			if app.program != nil {
+			if app.hasProgram() {
 				app.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusInfo,
 					Message: fmt.Sprintf("Optimizing context (%s)...", reason),
@@ -2278,7 +2400,7 @@ func (b *Builder) wireDependencies() error {
 		// summarization call — burning quota with zero on-screen signal while
 		// context keeps growing toward EmergencyTruncate/overflow.
 		b.contextManager.OnOptimizeFailed = func(reason string, optErr error) {
-			if app.program != nil {
+			if app.hasProgram() {
 				app.safeSendToProgram(ui.StatusUpdateMsg{
 					Type:    ui.StatusWarning,
 					Message: fmt.Sprintf("Context compaction (%s) failed — context will keep growing until it succeeds", reason),
@@ -2301,7 +2423,7 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up background task tracking callbacks for UI
 	b.agentRunner.SetOnAgentStart(func(id, agentType, description string) {
-		if app.program != nil {
+		if app.hasProgram() {
 			// Truncate description if too long
 			desc := description
 			if runes := []rune(desc); len(runes) > 50 {
@@ -2316,7 +2438,7 @@ func (b *Builder) wireDependencies() error {
 		}
 	})
 	b.agentRunner.SetOnAgentComplete(func(id string, result *agent.AgentResult) {
-		if app.program != nil {
+		if app.hasProgram() {
 			status := "completed"
 			if result != nil {
 				switch result.Status {
@@ -2375,7 +2497,7 @@ func (b *Builder) wireDependencies() error {
 	})
 
 	b.agentRunner.SetOnAgentProgress(func(id string, progress *agent.AgentProgress) {
-		if app.program != nil {
+		if app.hasProgram() {
 			total := max(progress.TotalSteps, 1)
 			app.safeSendToProgram(ui.BackgroundTaskProgressMsg{
 				ID:            id,
@@ -2398,14 +2520,14 @@ func (b *Builder) wireDependencies() error {
 			app.session.SetScratchpad(content)
 		}
 
-		if app.program != nil {
+		if app.hasProgram() {
 			app.safeSendToProgram(ui.ScratchpadMsg(content))
 		}
 	})
 
 	// Wire thinking callback for sub-agents
 	b.agentRunner.SetOnThinking(func(text string) {
-		if app.program != nil {
+		if app.hasProgram() {
 			app.safeSendToProgram(ui.StreamThinkingMsg(text))
 		}
 	})
@@ -2555,7 +2677,7 @@ func (b *Builder) wireDependencies() error {
 	// Wire Agent Runner onThinking callback to TUI
 	if b.agentRunner != nil {
 		b.agentRunner.SetOnThinking(func(text string) {
-			if app.program != nil {
+			if app.hasProgram() {
 				app.safeSendToProgram(ui.StreamThinkingMsg(text))
 			}
 		})
@@ -2633,6 +2755,8 @@ func (b *Builder) assembleApp() *App {
 		auditLogger:           b.auditLogger,
 		fileWatcher:           b.fileWatcher,
 		codeIntelProvider:     b.codeIntelProvider,
+		replManager:           b.replManager,
+		harnessStore:          b.harnessStore,
 		taskRouter:            b.taskRouter,
 		orchestrator:          b.taskOrchestrator,
 		reliability:           NewReliabilityManager(),
@@ -2754,7 +2878,7 @@ type uiBroadcasterAdapter struct {
 
 // BroadcastTaskStarted sends a task started event to the UI.
 func (a *uiBroadcasterAdapter) BroadcastTaskStarted(taskID, message, planType string) {
-	if a.app != nil && a.app.program != nil {
+	if a.app != nil && a.app.hasProgram() {
 		a.app.safeSendToProgram(ui.TaskStartedEvent{
 			TaskID:   taskID,
 			Message:  message,
@@ -2765,7 +2889,7 @@ func (a *uiBroadcasterAdapter) BroadcastTaskStarted(taskID, message, planType st
 
 // BroadcastTaskCompleted sends a task completed event to the UI.
 func (a *uiBroadcasterAdapter) BroadcastTaskCompleted(taskID string, success bool, duration time.Duration, err error, planType string) {
-	if a.app != nil && a.app.program != nil {
+	if a.app != nil && a.app.hasProgram() {
 		a.app.safeSendToProgram(ui.TaskCompletedEvent{
 			TaskID:   taskID,
 			Success:  success,
@@ -2778,7 +2902,7 @@ func (a *uiBroadcasterAdapter) BroadcastTaskCompleted(taskID string, success boo
 
 // BroadcastTaskProgress sends a task progress event to the UI.
 func (a *uiBroadcasterAdapter) BroadcastTaskProgress(taskID string, progress float64, message string) {
-	if a.app != nil && a.app.program != nil {
+	if a.app != nil && a.app.hasProgram() {
 		a.app.safeSendToProgram(ui.TaskProgressEvent{
 			TaskID:   taskID,
 			Progress: progress,

@@ -238,7 +238,7 @@ var toolSetDefinitions = map[ToolSet][]string{
 		"web_fetch", "web_search",
 	},
 	ToolSetAdvanced: {
-		"batch", "refactor", "check_impact",
+		"batch", "refactor", "check_impact", "repl_exec", "harness",
 		"verify_code", "run_tests",
 	},
 	ToolSetMemory: {
@@ -250,7 +250,7 @@ var toolSetDefinitions = map[ToolSet][]string{
 	},
 	ToolSetOllamaCore: {
 		"read", "write", "edit", "bash", "glob", "grep",
-		"ask_user", "list_dir", "todo", "skill",
+		"ask_user", "list_dir", "todo", "skill", "repl_exec", "harness",
 	},
 }
 
@@ -379,6 +379,10 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewMemorizeTool(nil))
 	r.MustRegister(NewPinContextTool(nil))
 	r.MustRegister(NewHistorySearchTool(nil))
+	// The builder either attaches a successfully probed session kernel or
+	// unregisters this optional capability before schemas reach the model.
+	r.MustRegister(NewReplExecTool(nil))
+	r.MustRegister(NewHarnessTool(nil))
 
 	// MCP admin tool: callbacks wired later by builder.go after MCP init.
 	r.MustRegister(NewMCPAdminTool())
@@ -722,6 +726,8 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	// Code analysis tools
 	r.RegisterFactory("batch", func() Tool { return NewBatchTool(workDir) }, declarations["batch"])
 	r.RegisterFactory("refactor", func() Tool { return NewRefactorTool() }, declarations["refactor"])
+	r.RegisterFactory("repl_exec", func() Tool { return NewReplExecTool(nil) }, declarations["repl_exec"])
+	r.RegisterFactory("harness", func() Tool { return NewHarnessTool(nil) }, declarations["harness"])
 
 	// Git tools
 	r.RegisterFactory("git_log", func() Tool { return NewGitLogTool(workDir) }, declarations["git_log"])

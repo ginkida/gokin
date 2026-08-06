@@ -41,7 +41,7 @@ func (r *Runner) agentResultWaitTimeout(agentID string) time.Duration {
 	if agent == nil {
 		return timeout + agentResultWaitGrace
 	}
-	if configured := agent.GetTimeout(); configured > timeout {
+	if configured := agent.EffectiveRunTimeout(); configured > timeout {
 		timeout = configured
 	}
 	if runCtx := agent.RunContext(); runCtx != nil {

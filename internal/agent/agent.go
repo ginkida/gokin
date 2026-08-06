@@ -60,13 +60,17 @@ type Agent struct {
 	permissions    *permission.Manager
 	hooks          *hooks.Manager
 	timeout        time.Duration
-	history        []*genai.Content
-	status         AgentStatus
-	startTime      time.Time
-	endTime        time.Time
-	maxTurns       int
-	thoroughness   tools.Thoroughness
-	outputStyle    tools.OutputStyle
+	// modelRoundTimeout is the configurable hard cap for one provider round.
+	// Guarded by stateMu so ApplyConfig can update live agents safely between
+	// rounds without racing their execution goroutines.
+	modelRoundTimeout time.Duration
+	history           []*genai.Content
+	status            AgentStatus
+	startTime         time.Time
+	endTime           time.Time
+	maxTurns          int
+	thoroughness      tools.Thoroughness
+	outputStyle       tools.OutputStyle
 	// invocationScope is rebound under stateMu at the start of every Run. A
 	// persisted agent ID can be resumed by a different top-level invocation, so
 	// attribution belongs to the run lease rather than the Agent's lifetime.
@@ -365,6 +369,7 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		outputBaseDir:      workDir,
 		permissions:        permManager,
 		timeout:            config.DefaultAgentTimeout,
+		modelRoundTimeout:  client.DefaultModelRoundTimeout,
 		history:            make([]*genai.Content, 0),
 		status:             AgentStatusPending,
 		maxTurns:           maxTurns,
@@ -522,6 +527,7 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		outputBaseDir:      workDir,
 		permissions:        permManager,
 		timeout:            2 * time.Minute,
+		modelRoundTimeout:  client.DefaultModelRoundTimeout,
 		history:            make([]*genai.Content, 0),
 		status:             AgentStatusPending,
 		maxTurns:           maxTurns,
@@ -745,9 +751,9 @@ func (a *Agent) applyAgentTypeDefaults() {
 		a.summarizeProtect = 2
 		a.pruneMinOutputSize = 400
 		// Verification agents often spend most of their wall time compiling.
-		// Keep enough headroom for run_tests' 10-minute default plus a final
-		// model round that can summarize the evidence.
-		a.timeout = 15 * time.Minute
+		// The normal shared budget leaves room for both a long provider round
+		// and tool-result processing; thorough mode raises it further below.
+		a.timeout = config.DefaultAgentTimeout
 	case AgentTypePlan:
 		a.maxHistorySize = 100
 		a.pruneProtectChars = 150000
@@ -784,7 +790,7 @@ func (a *Agent) ApplyThoroughness(t tools.Thoroughness, defaultMaxTurns int) {
 			if canOverrideMaxTurns {
 				a.maxTurns = 50
 			}
-			a.timeout = 5 * time.Minute
+			a.timeout = config.DefaultThoroughAgentTimeout
 		}
 	case AgentTypeBash:
 		switch t {
@@ -797,22 +803,30 @@ func (a *Agent) ApplyThoroughness(t tools.Thoroughness, defaultMaxTurns int) {
 			if canOverrideMaxTurns {
 				a.maxTurns = 20
 			}
-			a.timeout = 35 * time.Minute
+			a.timeout = config.DefaultThoroughAgentTimeout
 		}
 	case AgentTypeGeneral:
 		switch t {
 		case tools.ThoroughnessQuick:
 			a.timeout = 2 * time.Minute
 		case tools.ThoroughnessThorough:
-			a.timeout = 10 * time.Minute
+			a.timeout = config.DefaultThoroughAgentTimeout
 		}
 	case AgentTypePlan:
 		switch t {
 		case tools.ThoroughnessQuick:
 			a.timeout = 2 * time.Minute
 		case tools.ThoroughnessThorough:
-			a.timeout = 10 * time.Minute
+			a.timeout = config.DefaultThoroughAgentTimeout
 		}
+	}
+	// Historical per-type thorough budgets (Explore 5m, General/Plan 10m)
+	// became shorter than the 20m normal budget after model-round hardening.
+	// Thorough is an explicit request for MORE depth, so give every type —
+	// including guide/dynamic types outside the switch — the shared deep-work
+	// floor. EffectiveRunTimeout below also follows a user-raised round cap.
+	if t == tools.ThoroughnessThorough && a.timeout < config.DefaultThoroughAgentTimeout {
+		a.timeout = config.DefaultThoroughAgentTimeout
 	}
 
 	// Adjust loop detection threshold per thoroughness
@@ -891,6 +905,22 @@ func (a *Agent) GetTimeout() time.Duration {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
 	return a.timeout
+}
+
+// EffectiveRunTimeout returns the outer wall-clock budget for a new run.
+// Normal/thorough agents follow a user-raised model-round timeout so the outer
+// context cannot make that configured cap unreachable. Only quick is an
+// intentionally stricter latency budget.
+func (a *Agent) EffectiveRunTimeout() time.Duration {
+	timeout := a.GetTimeout()
+	if a.thoroughness == tools.ThoroughnessQuick {
+		return timeout
+	}
+	minimum := a.ModelRoundTimeout() + config.DefaultAgentTimeoutHeadroom
+	if timeout > 0 && timeout < minimum {
+		return minimum
+	}
+	return timeout
 }
 
 // SetOutputStyle sets the response output style.
@@ -3251,6 +3281,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 						})
 						a.stateMu.Unlock()
 					}
+					// Streaming callbacks already exposed this text live. Keep the
+					// same partial output in AgentResult too so task_output, callers,
+					// and resumptions do not observe an empty failed result.
+					output.WriteString(resp.Text)
 				}
 				return a.history, output.String(), fmt.Errorf("model response error: %w", apiErr)
 			}
@@ -4345,7 +4379,7 @@ func (a *Agent) forceCompactHistory(ctx context.Context) error {
 
 // forceCompactViaSummary uses the LLM summarizer to compress middle history.
 func (a *Agent) forceCompactViaSummary(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := a.withCompactionTimeout(ctx)
 	defer cancel()
 
 	a.stateMu.RLock()
@@ -4782,13 +4816,42 @@ func (a *Agent) collectStream(ctx context.Context, stream *client.StreamingRespo
 	})
 }
 
-// agentModelRoundTimeout caps a single model API call within the agent to
-// prevent zombie requests. Shared with the executor via the client package so
-// the two loops can't drift — was a too-tight 5m hard deadline that killed
-// healthy long thinking rounds (a glm/deepseek round can stream reasoning for
-// many minutes), surfacing as the "agent stopped at ~7m with 13m thinking"
-// failure. The activity-aware stream-idle timeout is the real stuck-guard.
-const agentModelRoundTimeout = client.DefaultModelRoundTimeout
+// SetModelRoundTimeout sets the hard cap for one model API round. Non-positive
+// values resolve to the shared default, matching tools.Executor. An in-flight
+// round keeps the deadline it started with; the next round sees the new value.
+func (a *Agent) SetModelRoundTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = client.DefaultModelRoundTimeout
+	}
+	a.stateMu.Lock()
+	a.modelRoundTimeout = timeout
+	reflector := a.reflector
+	a.stateMu.Unlock()
+	if reflector != nil {
+		reflector.SetSemanticTimeout(timeout)
+	}
+}
+
+// SetPlanningTimeout updates this agent's private tree-planner clone. It is
+// safe to call while a run is active; an in-flight planning call keeps the
+// context it already derived, while the next one sees the new atomic value.
+func (a *Agent) SetPlanningTimeout(timeout time.Duration) {
+	if a == nil || a.treePlanner == nil {
+		return
+	}
+	a.treePlanner.SetPlanningTimeout(timeout)
+}
+
+// ModelRoundTimeout returns the effective hard cap used by new model rounds.
+func (a *Agent) ModelRoundTimeout() time.Duration {
+	a.stateMu.RLock()
+	timeout := a.modelRoundTimeout
+	a.stateMu.RUnlock()
+	if timeout <= 0 {
+		return client.DefaultModelRoundTimeout
+	}
+	return timeout
+}
 
 // withModelRoundTimeout mirrors the executor's helper EXACTLY: it wraps the round
 // with a TYPED, non-retryable model-round-timeout cause (so a genuine round
@@ -4797,7 +4860,7 @@ const agentModelRoundTimeout = client.DefaultModelRoundTimeout
 // the parent's remaining deadline when the parent is stricter, and uses
 // cancel-only when no time remains (never a zero-length WithTimeout).
 func (a *Agent) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	timeout := agentModelRoundTimeout
+	timeout := a.ModelRoundTimeout()
 	if deadline, ok := parent.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -4815,22 +4878,22 @@ func (a *Agent) withModelRoundTimeout(parent context.Context) (context.Context, 
 // call made during pre-emptive compaction (checkAndSummarize). Without it those
 // calls inherit the raw parent context, so a slow or hung provider endpoint
 // could stall a turn — or a /loop iteration / sub-agent — indefinitely.
-// forceCompactViaSummary already bounds its forced path at the same 60s; this
+// forceCompactViaSummary uses the same helper; this
 // extends the documented "compaction never hangs" invariant to the pre-emptive
 // path, which is the one sub-agents and /loop iterations hit most.
-const agentCompactionAPITimeout = 60 * time.Second
+const agentCompactionAPITimeout = config.DefaultModelRoundTimeout
 
 func (a *Agent) withCompactionTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := a.compactionAPITimeout
 	if timeout <= 0 {
-		timeout = agentCompactionAPITimeout
+		timeout = a.ModelRoundTimeout()
 	}
 	if deadline, ok := parent.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
 			return context.WithTimeout(parent, remaining)
 		}
 	}
-	return context.WithTimeout(parent, timeout)
+	return context.WithTimeoutCause(parent, timeout, client.NewModelRoundTimeoutError(timeout))
 }
 
 // getModelResponse gets a response from the model.

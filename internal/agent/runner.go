@@ -52,6 +52,9 @@ type Runner struct {
 	messengerFactory func(agentID string) *AgentMessenger
 
 	ctxCfg *config.ContextConfig
+	// modelRoundTimeout is copied into every spawned agent and propagated to
+	// existing agents when runtime configuration changes. Guarded by r.mu.
+	modelRoundTimeout time.Duration
 
 	// Error learning (Phase 3)
 	errorStore *memory.ErrorStore
@@ -213,6 +216,7 @@ func (r *Runner) GetThought(id string) string {
 
 type runnerAgentDeps struct {
 	ctxCfg              *config.ContextConfig
+	modelRoundTimeout   time.Duration
 	errorStore          *memory.ErrorStore
 	predictor           PredictorInterface
 	sharedMemory        *SharedMemory
@@ -275,6 +279,56 @@ func (r *Runner) SetContextConfig(cfg *config.ContextConfig) {
 	r.mu.Lock()
 	r.ctxCfg = cfg
 	r.mu.Unlock()
+}
+
+// SetModelRoundTimeout applies the configured per-round cap to future and
+// already-created agents. Existing in-flight rounds retain their original
+// context deadline; subsequent rounds use the new value.
+func (r *Runner) SetModelRoundTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = client.DefaultModelRoundTimeout
+	}
+	r.mu.Lock()
+	r.modelRoundTimeout = timeout
+	agents := make([]*Agent, 0, len(r.agents))
+	for _, agent := range r.agents {
+		agents = append(agents, agent)
+	}
+	r.mu.Unlock()
+	for _, agent := range agents {
+		agent.SetModelRoundTimeout(timeout)
+	}
+}
+
+// ModelRoundTimeout returns the effective cap inherited by newly spawned
+// agents and propagated to existing ones.
+func (r *Runner) ModelRoundTimeout() time.Duration {
+	r.mu.RLock()
+	timeout := r.modelRoundTimeout
+	r.mu.RUnlock()
+	if timeout <= 0 {
+		return client.DefaultModelRoundTimeout
+	}
+	return timeout
+}
+
+// SetPlanningTimeout propagates an implicit plan-generation watchdog to the
+// planner prototype and already-created agents. Explicit-vs-inherited policy
+// is decided by App; Runner only publishes the selected effective value.
+func (r *Runner) SetPlanningTimeout(timeout time.Duration) {
+	r.mu.RLock()
+	planner := r.treePlanner
+	agents := make([]*Agent, 0, len(r.agents))
+	for _, agent := range r.agents {
+		agents = append(agents, agent)
+	}
+	r.mu.RUnlock()
+	if planner != nil {
+		planner.SetPlanningTimeout(timeout)
+	}
+	for _, agent := range agents {
+		agent.SetPlanningTimeout(timeout)
+	}
 }
 
 // SetErrorStore sets the error store for learning from errors.
@@ -727,14 +781,15 @@ func (r *Runner) reportActivity() {
 // NewRunner creates a new agent runner.
 func NewRunner(ctx context.Context, c client.Client, registry tools.ToolRegistry, workDir string) *Runner {
 	r := &Runner{
-		ctx:           ctx,
-		client:        c,
-		baseRegistry:  registry,
-		workDir:       workDir,
-		agents:        make(map[string]*Agent),
-		results:       make(map[string]*AgentResult),
-		resultWaiters: make(map[string]*resultWaitState),
-		activeRuns:    make(map[string]*agentRunLease),
+		ctx:               ctx,
+		client:            c,
+		baseRegistry:      registry,
+		workDir:           workDir,
+		agents:            make(map[string]*Agent),
+		results:           make(map[string]*AgentResult),
+		resultWaiters:     make(map[string]*resultWaitState),
+		activeRuns:        make(map[string]*agentRunLease),
+		modelRoundTimeout: client.DefaultModelRoundTimeout,
 	}
 	// Set up messenger factory
 	r.messengerFactory = func(agentID string) *AgentMessenger {
@@ -749,6 +804,7 @@ func (r *Runner) snapshotAgentDeps() runnerAgentDeps {
 
 	return runnerAgentDeps{
 		ctxCfg:              r.ctxCfg,
+		modelRoundTimeout:   r.modelRoundTimeout,
 		errorStore:          r.errorStore,
 		predictor:           r.predictor,
 		sharedMemory:        r.sharedMemory,
@@ -791,13 +847,15 @@ func cloneTreePlanner(tp *TreePlanner) *TreePlanner {
 		cfgCopy = &cfg
 	}
 
-	return &TreePlanner{
+	clone := &TreePlanner{
 		config:      cfgCopy,
 		strategyOpt: tp.strategyOpt,
 		reflector:   tp.reflector,
 		client:      tp.client,
 		trees:       make(map[string]*PlanTree),
 	}
+	clone.SetPlanningTimeout(tp.PlanningTimeout())
+	return clone
 }
 
 func (r *Runner) newConfiguredAgent(
@@ -878,6 +936,7 @@ func (r *Runner) newConfiguredAgent(
 			deps.ctxCfg,
 		)
 	}
+	agent.SetModelRoundTimeout(deps.modelRoundTimeout)
 
 	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
 	agent.SetHooks(deps.hooks)

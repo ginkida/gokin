@@ -9,7 +9,7 @@ import (
 // initializeUIUpdateSystem initializes the UI Auto-Update System.
 // This should be called after a.program is set in Run().
 func (a *App) initializeUIUpdateSystem() {
-	if a.program == nil {
+	if !a.hasProgram() {
 		logging.Debug("UI update system not initialized: program not set")
 		return
 	}

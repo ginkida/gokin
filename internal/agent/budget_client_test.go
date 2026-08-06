@@ -218,6 +218,78 @@ type budgetRunnerClient struct {
 	*testkit.MockClient
 }
 
+type auxiliaryCloneProbeClient struct {
+	*testkit.MockClient
+	lastClone *auxiliaryCloneProbeClient
+}
+
+func (c *auxiliaryCloneProbeClient) CloneForAuxiliaryClient() (client.Client, bool) {
+	clone := &auxiliaryCloneProbeClient{MockClient: testkit.NewMockClient()}
+	clone.SetModel(c.GetModel())
+	clone.SetTools(c.GetTools())
+	clone.SetSystemInstruction(c.SystemInstruction())
+	clone.SetTurnContext(c.TurnContext())
+	clone.SetThinkingBudget(c.ThinkingBudget())
+	c.lastClone = clone
+	return clone, true
+}
+
+func TestInvocationBudgetClientAuxiliaryCloneIsIsolatedAndMetered(t *testing.T) {
+	base := &auxiliaryCloneProbeClient{MockClient: testkit.NewMockClient()}
+	base.SetModel("glm-5.2")
+	base.SetTools([]*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "write"}}}})
+	base.SetSystemInstruction("foreground system")
+	base.SetTurnContext("foreground turn")
+	base.SetThinkingBudget(8192)
+	metered := newInvocationBudgetClientWithCalculator(base, fixedInvocationCost(1))
+
+	got, isolated := client.CloneForAuxiliary(metered)
+	if !isolated {
+		t.Fatal("metered wrapper was not isolated")
+	}
+	aux, ok := got.(*invocationBudgetClient)
+	if !ok || aux == metered {
+		t.Fatalf("auxiliary client = %T %p, want distinct invocationBudgetClient", got, got)
+	}
+	clone := base.lastClone
+	if clone == nil || aux.base != clone {
+		t.Fatalf("auxiliary base = %T, clone = %p", aux.base, clone)
+	}
+	if len(clone.GetTools()) != 0 || clone.SystemInstruction() != "" ||
+		clone.TurnContext() != "" || clone.ThinkingBudget() != 0 {
+		t.Fatalf("auxiliary state leaked: tools=%d system=%q turn=%q thinking=%d",
+			len(clone.GetTools()), clone.SystemInstruction(), clone.TurnContext(), clone.ThinkingBudget())
+	}
+	if len(base.GetTools()) != 1 || base.SystemInstruction() == "" ||
+		base.TurnContext() == "" || base.ThinkingBudget() != 8192 {
+		t.Fatal("foreground base was mutated while cloning auxiliary client")
+	}
+
+	clone.EnqueueText("semantic result")
+	ctx := tools.ContextWithMaxBudgetUSD(context.Background(), 2)
+	stream, err := aux.SendMessage(ctx, "reflect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, _ := tools.InvocationBudgetLedgerFromContext(ctx)
+	limit, spent := ledger.Snapshot()
+	if limit != 2 || spent != 1 {
+		t.Fatalf("auxiliary budget = limit %v spent %v, want 2/1", limit, spent)
+	}
+
+	reflector := NewReflector()
+	reflector.SetClient(metered)
+	if reflector.client == metered {
+		t.Fatal("reflector retained the foreground metered wrapper")
+	}
+	if _, ok := reflector.client.(*invocationBudgetClient); !ok {
+		t.Fatalf("reflector client = %T, want invocationBudgetClient", reflector.client)
+	}
+}
+
 func (c *budgetRunnerClient) GetProvider() string { return "glm" }
 func (c *budgetRunnerClient) WithModel(string) client.Client {
 	return c

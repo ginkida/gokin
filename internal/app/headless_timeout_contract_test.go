@@ -60,6 +60,20 @@ func TestWatchMessageIdle_LatchesTimeoutBeforeCancellingInnerContext(t *testing.
 	}
 }
 
+func TestMessageIdleBudgetStaysOutsideModelRoundDeadline(t *testing.T) {
+	executor := tools.NewExecutor(tools.NewRegistry(), nil, time.Second)
+	app := &App{executor: executor}
+
+	executor.SetModelRoundTimeout(40 * time.Minute)
+	if got, want := app.messageIdleBudget(), 41*time.Minute; got != want {
+		t.Fatalf("raised message idle budget = %v, want %v", got, want)
+	}
+	executor.SetModelRoundTimeout(5 * time.Minute)
+	if got := app.messageIdleBudget(); got != messageIdleTimeout {
+		t.Fatalf("small-round message idle budget = %v, want floor %v", got, messageIdleTimeout)
+	}
+}
+
 func TestRunHeadlessWithOptions_InternalTimeoutCannotBecomeFalseSuccess(t *testing.T) {
 	mock := testkit.NewMockClient().
 		EnqueueStartupError(context.Canceled).

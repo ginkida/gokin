@@ -100,6 +100,14 @@ func (a *App) composeRunSystemInstruction(base string) string {
 		}
 		result += strings.TrimLeft(structured, "\r\n")
 	}
+	if a.harnessStore != nil {
+		if harnessPrompt := a.harnessStore.RenderPrompt(); harnessPrompt != "" {
+			if result != "" {
+				result = strings.TrimRight(result, "\r\n") + "\n\n"
+			}
+			result += harnessPrompt
+		}
+	}
 	return result
 }
 

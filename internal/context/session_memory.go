@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gokin/internal/client"
+	appconfig "gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
 
@@ -54,12 +55,14 @@ type SessionMemoryManager struct {
 
 	// LLM summarizer (optional — set via SetSummarizer)
 	summarizer SessionSummarizer
+	// modelRoundTimeout bounds each background LLM extraction. Guarded by mu.
+	modelRoundTimeout time.Duration
 
 	// Callback fired after each successful extraction (for UI notifications)
 	onUpdate func()
 
 	// onExtractionFailed fires ONLY when the LLM-backed extraction (a real
-	// ~30s API call, every 3rd qualifying extraction) fails and falls back to
+	// model-round API call, every 3rd qualifying extraction) fails and falls back to
 	// the free heuristic summary. Previously this was Debug-log only — on a
 	// quota-limited provider (GLM's 5h Coding-Plan cap) a degraded endpoint
 	// silently spent an extra API call against the cap on every qualifying
@@ -80,7 +83,7 @@ type SessionMemoryManager struct {
 	contentGeneration uint64
 
 	// llmExtractionInFlight guards against overlapping extractWithLLM calls
-	// (each up to a 30s API call). Extract() launches one detached per
+	// (each up to the configured model-round cap). Extract() launches one detached per
 	// qualifying event with no tracking of whether a prior one is still
 	// running; a burst of qualifying extractions within that window could
 	// launch two concurrently, and network latency — not recency — would
@@ -138,6 +141,27 @@ func (s *SessionMemoryManager) SetSummarizer(sum SessionSummarizer) {
 	s.summarizer = sum
 }
 
+// SetModelRoundTimeout updates the hard cap for future LLM-backed extractions.
+func (s *SessionMemoryManager) SetModelRoundTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = appconfig.DefaultModelRoundTimeout
+	}
+	s.mu.Lock()
+	s.modelRoundTimeout = timeout
+	s.mu.Unlock()
+}
+
+// ModelRoundTimeout returns the effective session-memory model-round cap.
+func (s *SessionMemoryManager) ModelRoundTimeout() time.Duration {
+	s.mu.RLock()
+	timeout := s.modelRoundTimeout
+	s.mu.RUnlock()
+	if timeout <= 0 {
+		return appconfig.DefaultModelRoundTimeout
+	}
+	return timeout
+}
+
 // SetConfig updates the manager's runtime configuration live (enable/disable +
 // thresholds), so a /settings or /set toggle takes effect this session without a
 // restart. Zero thresholds on an enabled config are repaired from
@@ -160,10 +184,11 @@ func (s *SessionMemoryManager) SetConfig(config SessionMemoryConfig) {
 func NewSessionMemoryManager(workDir string, config SessionMemoryConfig) *SessionMemoryManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &SessionMemoryManager{
-		workDir: workDir,
-		config:  config,
-		ctx:     ctx,
-		cancel:  cancel,
+		workDir:           workDir,
+		config:            config,
+		ctx:               ctx,
+		cancel:            cancel,
+		modelRoundTimeout: appconfig.DefaultModelRoundTimeout,
 	}
 }
 
@@ -306,7 +331,7 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 	s.lastExtractionTokens = currentTokens
 	s.toolCallsSinceUpdate = 0
 	s.initialized = true
-	// Skip the LLM path if one is already in flight (up to 30s), even if
+	// Skip the LLM path if one is already in flight (up to one model round), even if
 	// this would otherwise be a qualifying 3rd extraction — a burst of
 	// qualifying extractions (token/tool-call thresholds, plus sub-agent
 	// tool activity counting too) within that window would otherwise launch
@@ -366,7 +391,8 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 // extractWithLLM uses the Summarizer to create a higher-quality session summary.
 // Runs in a goroutine; falls back to heuristic content on failure.
 func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback string, baseGeneration uint64) {
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	timeout := s.ModelRoundTimeout()
+	ctx, cancel := context.WithTimeoutCause(s.ctx, timeout, client.NewModelRoundTimeoutError(timeout))
 	defer cancel()
 	// Clear the in-flight guard on every exit path (success, LLM failure, or
 	// a future early return) so the next qualifying Extract() can proceed.
@@ -933,7 +959,8 @@ type ClientSessionSummarizer struct {
 
 // NewClientSessionSummarizer creates a summarizer adapter from a Client.
 func NewClientSessionSummarizer(c client.Client) *ClientSessionSummarizer {
-	return &ClientSessionSummarizer{client: c}
+	auxiliary, _ := client.CloneForAuxiliary(c)
+	return &ClientSessionSummarizer{client: auxiliary}
 }
 
 func (s *ClientSessionSummarizer) Summarize(ctx context.Context, history []*genai.Content, prompt string) (string, error) {
@@ -948,7 +975,7 @@ func (s *ClientSessionSummarizer) Summarize(ctx context.Context, history []*gena
 		return "", err
 	}
 
-	resp, err := stream.Collect()
+	resp, err := stream.CollectContext(ctx)
 	if err != nil {
 		return "", err
 	}

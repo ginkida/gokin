@@ -9,12 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/logging"
 	"google.golang.org/genai"
 )
 
 const (
-	DefaultCoordinateTimeout = 10 * time.Minute
+	// Coordination can contain a full normal/thorough agent round. Keep its
+	// implicit wall-clock budget above the normal agent floor; a ten-minute
+	// parent deadline made the default 14-minute model-round cap unreachable.
+	DefaultCoordinateTimeout = config.DefaultThoroughAgentTimeout
 	MaxCoordinateTimeout     = 120 * time.Minute
 	coordinateCleanupTimeout = 5 * time.Second
 )
@@ -118,7 +122,7 @@ func (t *CoordinateTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"timeout_minutes": {
 					Type:        genai.TypeInteger,
-					Description: "Maximum time to wait for all tasks in minutes (default: 10, clamped to 1-120)",
+					Description: "Maximum time to wait for all tasks in minutes (implicit default is at least 35 and grows with the dependency chain; explicit values are clamped to 1-120)",
 				},
 			},
 			Required: []string{"tasks"},
@@ -152,16 +156,103 @@ func isCoordinateInteger(value any) bool {
 }
 
 func coordinateTimeout(args map[string]any) time.Duration {
-	minutes := int(DefaultCoordinateTimeout / time.Minute)
 	if requested, ok := GetInt(args, "timeout_minutes"); ok {
-		minutes = requested
+		if requested < 1 {
+			requested = 1
+		} else if maximum := int(MaxCoordinateTimeout / time.Minute); requested > maximum {
+			requested = maximum
+		}
+		return time.Duration(requested) * time.Minute
 	}
-	if minutes < 1 {
-		minutes = 1
-	} else if maximum := int(MaxCoordinateTimeout / time.Minute); minutes > maximum {
-		minutes = maximum
+	return coordinateImplicitTimeout(args, config.DefaultModelRoundTimeout)
+}
+
+// coordinateImplicitTimeout budgets both the longest dependency chain and the
+// number of waves imposed by max_parallel. Independent work runs concurrently,
+// while a -> b -> c or max_parallel=1 consumes sequential normal-agent runs.
+// The 120-minute orchestration ceiling prevents malformed/over-decomposed
+// graphs from creating an unbounded zombie; when a single user-raised model
+// round already needs more, keep at least that one-agent budget reachable.
+func coordinateImplicitTimeout(args map[string]any, modelRoundTimeout time.Duration) time.Duration {
+	if modelRoundTimeout <= 0 {
+		modelRoundTimeout = config.DefaultModelRoundTimeout
 	}
-	return time.Duration(minutes) * time.Minute
+	agentBudget := config.DefaultAgentTimeout
+	if minimum := modelRoundTimeout + config.DefaultAgentTimeoutHeadroom; minimum > agentBudget {
+		agentBudget = minimum
+	}
+	ceiling := MaxCoordinateTimeout
+	if agentBudget > ceiling {
+		ceiling = agentBudget
+	}
+	units := coordinateScheduleUnits(args)
+	budget := ceiling
+	if units > 0 && time.Duration(units) <= ceiling/agentBudget {
+		budget = time.Duration(units) * agentBudget
+	}
+	if budget < DefaultCoordinateTimeout {
+		budget = DefaultCoordinateTimeout
+	}
+	return budget
+}
+
+func coordinateScheduleUnits(args map[string]any) int {
+	rawTasks, ok := args["tasks"].([]any)
+	if !ok || len(rawTasks) == 0 {
+		return 1
+	}
+	ordered, err := prepareCoordinateTasks(rawTasks)
+	if err != nil {
+		return 1
+	}
+	depthByID := make(map[string]int, len(ordered))
+	longest := 1
+	for _, task := range ordered {
+		depth := 1
+		for _, dependency := range task.dependencies {
+			if candidate := depthByID[dependency] + 1; candidate > depth {
+				depth = candidate
+			}
+		}
+		depthByID[task.id] = depth
+		if depth > longest {
+			longest = depth
+		}
+	}
+	maxParallel := 3
+	if requested, provided := GetInt(args, "max_parallel"); provided {
+		maxParallel = requested
+	}
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+	if maxParallel > len(ordered) {
+		maxParallel = len(ordered)
+	}
+	waves := (len(ordered) + maxParallel - 1) / maxParallel
+	return waves + longest - 1
+}
+
+// coordinateTimeoutForContext expands only the implicit default to the budget
+// reserved by Executor for a user-raised model-round timeout. Explicit
+// timeout_minutes remains an exact caller override. Leave cleanup and the
+// executor's completion grace outside the coordinator wait so timeout
+// classification and straggler cancellation can finish before the outer
+// context fires.
+func coordinateTimeoutForContext(ctx context.Context, args map[string]any) time.Duration {
+	timeout := coordinateTimeout(args)
+	if _, explicit := GetInt(args, "timeout_minutes"); explicit || ctx == nil {
+		return timeout
+	}
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return timeout
+	}
+	available := time.Until(deadline) - coordinateCleanupTimeout - toolTimeoutCompletionGrace
+	if available > timeout {
+		return available
+	}
+	return timeout
 }
 
 type coordinateTaskInput struct {
@@ -411,7 +502,7 @@ func (t *CoordinateTool) Execute(ctx context.Context, args map[string]any) (Tool
 	coord.Start()
 
 	// Wait for completion
-	timeout := coordinateTimeout(args)
+	timeout := coordinateTimeoutForContext(ctx, args)
 	results, waitErr := coord.WaitWithTimeout(ctx, timeout)
 	if waitErr != nil && len(results) == 0 {
 		// Nothing finished before the deadline/cancellation — there's

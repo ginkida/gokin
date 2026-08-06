@@ -113,7 +113,8 @@ var errorGuidancePatterns = []ErrorGuidance{
 		Title:   "Model Round Timeout",
 		Suggestions: []string{
 			"A single model round hit the hard safety cap",
-			"Increase tools.model_round_timeout for heavy reasoning/tool chains",
+			"Run /timeout 14m if the cap is the legacy 5m0s",
+			"Use /timeout 20m or longer for unusually heavy reasoning/tool chains",
 			"Try a narrower prompt to reduce round duration",
 		},
 	},

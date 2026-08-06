@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"gokin/internal/client"
 	"gokin/internal/config"
@@ -80,18 +81,23 @@ type TaskContext struct {
 type Summarizer struct {
 	client      client.Client
 	taskContext *TaskContext
+	mu          sync.RWMutex
 }
 
 // NewSummarizer creates a new summarizer.
 func NewSummarizer(c client.Client) *Summarizer {
+	auxiliary, _ := client.CloneForAuxiliary(c)
 	return &Summarizer{
-		client: c,
+		client: auxiliary,
 	}
 }
 
 // SetClient updates the underlying client.
 func (s *Summarizer) SetClient(c client.Client) {
-	s.client = c
+	auxiliary, _ := client.CloneForAuxiliary(c)
+	s.mu.Lock()
+	s.client = auxiliary
+	s.mu.Unlock()
 }
 
 // SetConfig updates the summarizer configuration.
@@ -103,11 +109,15 @@ func (s *Summarizer) SetConfig(cfg *config.ContextConfig) {
 // SetTaskContext updates the current task context for task-aware summarization.
 // Pass nil to clear task context and revert to generic summarization.
 func (s *Summarizer) SetTaskContext(tc *TaskContext) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.taskContext = tc
 }
 
 // formatTaskContext creates a human-readable summary of the current task.
 func (s *Summarizer) formatTaskContext() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	tc := s.taskContext
 	if tc == nil {
 		return ""
@@ -165,13 +175,17 @@ func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content)
 	}
 
 	// Send to model for summarization
-	stream, err := s.client.SendMessage(ctx, prompt)
+	modelClient := s.clientSnapshot()
+	if modelClient == nil {
+		return nil, fmt.Errorf("summarization client is not configured")
+	}
+	stream, err := modelClient.SendMessage(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("summarization request failed: %w", err)
 	}
 
 	// Collect response
-	resp, err := stream.Collect()
+	resp, err := stream.CollectContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("summarization response failed: %w", err)
 	}
@@ -200,6 +214,8 @@ func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content)
 // omitted so they survive compaction regardless of LLM compliance. Cheap,
 // self-contained, and over-anchoring is harmless (it only re-states known facts).
 func (s *Summarizer) ensureCriticalContext(summary string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	tc := s.taskContext
 	if tc == nil {
 		return summary
@@ -225,6 +241,10 @@ func (s *Summarizer) ensureCriticalContext(summary string) string {
 
 // summarizeHierarchical handles large conversations by splitting on semantic boundaries.
 func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*genai.Content) (*genai.Content, error) {
+	modelClient := s.clientSnapshot()
+	if modelClient == nil {
+		return nil, fmt.Errorf("summarization client is not configured")
+	}
 	chunks := s.splitOnBoundaries(messages)
 	var midSummaries []string
 
@@ -232,11 +252,11 @@ func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*gena
 		formatted := s.formatMessages(chunk)
 		prompt := fmt.Sprintf("Summarize this segment of a development conversation. Focus on file changes, errors resolved, and technical decisions:\n\n%s", formatted)
 
-		stream, err := s.client.SendMessage(ctx, prompt)
+		stream, err := modelClient.SendMessage(ctx, prompt)
 		if err != nil {
 			return nil, err
 		}
-		resp, err := stream.Collect()
+		resp, err := stream.CollectContext(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -245,11 +265,11 @@ func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*gena
 
 	// Final summarization of summaries
 	finalPrompt := fmt.Sprintf("Combine these conversation segment summaries into a single cohesive technical summary. Group by file/component:\n\n%s", strings.Join(midSummaries, "\n\n---\n\n"))
-	stream, err := s.client.SendMessage(ctx, finalPrompt)
+	stream, err := modelClient.SendMessage(ctx, finalPrompt)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := stream.Collect()
+	resp, err := stream.CollectContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +281,12 @@ func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*gena
 
 	summaryText := fmt.Sprintf("[Long-term conversation summary]\n%s\n[End of summary]", s.ensureCriticalContext(resp.Text))
 	return genai.NewContentFromText(summaryText, genai.RoleUser), nil
+}
+
+func (s *Summarizer) clientSnapshot() client.Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.client
 }
 
 // splitOnBoundaries splits messages into chunks at semantic boundaries
@@ -461,7 +487,7 @@ DISTILLED SUMMARY:`, toolName, content)
 		return "", err
 	}
 
-	resp, err := stream.Collect()
+	resp, err := stream.CollectContext(ctx)
 	if err != nil {
 		return "", err
 	}

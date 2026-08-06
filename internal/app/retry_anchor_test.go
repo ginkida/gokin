@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"gokin/internal/chat"
+	"gokin/internal/client"
+
 	"google.golang.org/genai"
 )
 
@@ -133,6 +136,97 @@ func TestNextRetryMessageAfterProgress_TextProgressAnchorsLastSentence(t *testin
 	}
 	if !strings.Contains(got, "The build passes") {
 		t.Fatalf("expected the anchor to reference the last complete sentence, got: %q", got)
+	}
+}
+
+func TestNextAutoResumeMessageAfterProgress_FirstRecoveryAnchorsPartialText(t *testing.T) {
+	original := "finish the timeout fix"
+	preAttempt := []*genai.Content{userContent("older task"), modelTextContent("older answer")}
+	committed := append(append([]*genai.Content{}, preAttempt...),
+		userContent(original),
+		modelTextContent("I inspected the stream. The response accumulator is intact."),
+	)
+
+	got := nextAutoResumeMessageAfterProgress(original, preAttempt, committed, false)
+	if got == original {
+		t.Fatal("first auto-resume discarded partial progress and replayed the bare request")
+	}
+	if !strings.Contains(got, "The response accumulator is intact") {
+		t.Fatalf("auto-resume payload lacks the latest partial anchor: %q", got)
+	}
+	if !strings.HasSuffix(got, "\n\n"+original) {
+		t.Fatalf("auto-resume payload lost the original objective: %q", got)
+	}
+}
+
+func TestNextAutoResumeMessageAfterProgress_RecoveryPayloadIdentityIsStable(t *testing.T) {
+	persistedPayload := "[System note: previous response was interrupted. Continue from where you stopped.]\n\nfinish the timeout fix"
+	preAttempt := []*genai.Content{userContent(persistedPayload)}
+	committed := append(append([]*genai.Content{}, preAttempt...),
+		modelTextContent("More progress from the recovery attempt."),
+	)
+
+	got := nextAutoResumeMessageAfterProgress(persistedPayload, preAttempt, committed, true)
+	if got != persistedPayload {
+		t.Fatalf("recovery payload identity changed across attempts:\n got: %q\nwant: %q", got, persistedPayload)
+	}
+}
+
+func TestAnchoredAutoResumePayloadContinuesPersistedRetryBudget(t *testing.T) {
+	original := "finish the timeout fix"
+	preAttempt := []*genai.Content{userContent(original)}
+	committed := append(append([]*genai.Content{}, preAttempt...),
+		modelTextContent("Partial result before the timeout."),
+	)
+	payload := nextAutoResumeMessageAfterProgress(original, preAttempt, committed, false)
+	if payload == original {
+		t.Fatal("test setup did not produce an anchored recovery payload")
+	}
+
+	a := &App{autoResumeCount: make(map[string]int)}
+	// This is what claimPendingRecovery restores after the first scheduled
+	// attempt survives a process restart or wakes from its durable timer.
+	a.seedPendingRecoveryBudget(chat.SerializedPendingRecovery{
+		Message:            payload,
+		Kind:               "auto_resume",
+		Attempt:            1,
+		AutoResumeAttempts: 1,
+	})
+
+	attempt, _, ok := a.scheduleAutoResume(
+		payload, client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout))
+	if !ok || attempt != 2 {
+		t.Fatalf("anchored recovery resumed at attempt=%d ok=%v, want bounded attempt 2", attempt, ok)
+	}
+	if _, _, ok := a.scheduleAutoResume(
+		payload, client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout)); ok {
+		t.Fatal("anchored recovery reset its key and exceeded the two-attempt budget")
+	}
+}
+
+func TestAnchoredAutoResumePayloadOwnsInProcessBudgetFromFirstAttempt(t *testing.T) {
+	original := "finish the timeout fix"
+	preAttempt := []*genai.Content{userContent(original)}
+	committed := append(append([]*genai.Content{}, preAttempt...),
+		modelTextContent("Partial result before the timeout."),
+	)
+	payload := nextAutoResumeMessageAfterProgress(original, preAttempt, committed, false)
+	a := &App{autoResumeCount: make(map[string]int)}
+	timeoutErr := client.NewModelRoundTimeoutError(client.DefaultModelRoundTimeout)
+
+	first, _, ok := a.scheduleAutoResume(payload, timeoutErr)
+	if !ok || first != 1 {
+		t.Fatalf("first anchored schedule = (%d,%v), want (1,true)", first, ok)
+	}
+	second, _, ok := a.scheduleAutoResume(payload, timeoutErr)
+	if !ok || second != 2 {
+		t.Fatalf("second anchored schedule = (%d,%v), want (2,true)", second, ok)
+	}
+	if _, _, ok := a.scheduleAutoResume(payload, timeoutErr); ok {
+		t.Fatal("in-process anchored payload exceeded the bounded retry budget")
+	}
+	if _, exists := a.autoResumeCount[rateLimitRetryKey(original)]; exists {
+		t.Fatal("bare prompt received a separate counter from the executable anchored payload")
 	}
 }
 

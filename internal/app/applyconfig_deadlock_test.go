@@ -5,10 +5,43 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/agent"
 	"gokin/internal/config"
 	"gokin/internal/router"
 	"gokin/internal/tools"
 )
+
+func TestApplyConfigSynchronizesModelRoundTimeoutAtRuntime(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.Backend = "glm"
+	cfg.API.GLMKey = "test-key-that-is-long-enough-1234567890"
+	cfg.Model.Provider = "glm"
+	cfg.Model.Name = "glm-5.2"
+	cfg.Tools.ModelRoundTimeout = 19 * time.Minute
+
+	registry := tools.DefaultRegistry(".")
+	executor := tools.NewExecutor(registry, nil, time.Minute)
+	executor.SetModelRoundTimeout(time.Minute)
+	runner := agent.NewRunner(context.Background(), nil, registry, ".")
+	runner.SetModelRoundTimeout(time.Minute)
+	app := &App{
+		config:      cfg,
+		ctx:         context.Background(),
+		executor:    executor,
+		agentRunner: runner,
+	}
+
+	if err := app.ApplyConfig(cfg); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	if got := executor.ModelRoundTimeout(); got != 19*time.Minute {
+		t.Fatalf("executor model round timeout = %v, want 19m", got)
+	}
+	if got := runner.ModelRoundTimeout(); got != 19*time.Minute {
+		t.Fatalf("agent runner model round timeout = %v, want 19m", got)
+	}
+}
 
 // TestApplyConfig_NoSelfDeadlock verifies ApplyConfig doesn't self-deadlock
 // when holding a.mu while calling safeSendToProgram (which also takes a.mu).

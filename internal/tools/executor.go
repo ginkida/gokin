@@ -19,6 +19,7 @@ import (
 	"gokin/internal/audit"
 	"gokin/internal/cache"
 	"gokin/internal/client"
+	"gokin/internal/config"
 	"gokin/internal/format"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
@@ -55,6 +56,8 @@ const (
 	// exceeded". Matches DefaultConfig().Tools.Timeout.
 	defaultToolExecTimeout = 2 * time.Minute
 )
+
+var nestedToolCallSeq atomic.Uint64
 
 // ResultCompactor interface for compacting tool results.
 type ResultCompactor interface {
@@ -829,6 +832,34 @@ func (e *Executor) SetToolTimeout(timeout time.Duration) {
 	e.timeoutMu.Unlock()
 }
 
+// InvokeTool routes an internal orchestration request through the same control
+// plane as a model-emitted function call. Hybrid REPL callbacks use this narrow
+// entrypoint so nested delegation retains capability ceilings, validation,
+// permissions, hooks, circuit breakers, audit callbacks, timeouts, and retry
+// safety. Tool failures remain structured ToolResults; Go errors are reserved
+// for an invalid dispatcher invocation.
+func (e *Executor) InvokeTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	if e == nil || e.registry == nil {
+		return ToolResult{}, fmt.Errorf("tool executor is unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ToolResult{}, fmt.Errorf("tool name is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if args == nil {
+		args = make(map[string]any)
+	}
+	call := &genai.FunctionCall{
+		ID:   fmt.Sprintf("internal-%d", nestedToolCallSeq.Add(1)),
+		Name: name,
+		Args: ClonePermissionArgs(args),
+	}
+	return e.executeTool(ctx, call), nil
+}
+
 // SetToolWaitBudgetResolver wires dynamic interactive wait budgets. The
 // returned duration is the inner prompt's own budget; the executor adds its
 // completion grace. Returning (0, true) means the prompt intentionally waits
@@ -868,17 +899,45 @@ func (e *Executor) resolveToolExecutionTimeout(
 			return waitBudget + toolTimeoutCompletionGrace, true
 		}
 	}
-	return toolExecutionTimeout(base, p95, haveStats, toolName, args), true
+	timeout := toolExecutionTimeout(base, p95, haveStats, toolName, args)
+	if toolName == "task" && taskNeedsModelRoundHeadroom(args) {
+		minimum := e.ModelRoundTimeout() + config.DefaultAgentTimeoutHeadroom + toolTimeoutCompletionGrace
+		if timeout < minimum {
+			timeout = minimum
+		}
+	}
+	if toolName == "coordinate" {
+		if _, explicit := GetInt(args, "timeout_minutes"); !explicit {
+			minimum := coordinateImplicitTimeout(args, e.ModelRoundTimeout()) +
+				coordinateCleanupTimeout + toolTimeoutCompletionGrace
+			if timeout < minimum {
+				timeout = minimum
+			}
+		}
+	}
+	return timeout, true
 }
 
 // SetModelRoundTimeout sets timeout for a single model round.
 // Non-positive values reset to the default timeout.
 func (e *Executor) SetModelRoundTimeout(timeout time.Duration) {
 	if timeout <= 0 {
-		e.modelRoundTimeout = defaultModelRoundTimeout
-		return
+		timeout = defaultModelRoundTimeout
 	}
+	e.timeoutMu.Lock()
 	e.modelRoundTimeout = timeout
+	e.timeoutMu.Unlock()
+}
+
+// ModelRoundTimeout returns the effective hard cap used for new model rounds.
+func (e *Executor) ModelRoundTimeout() time.Duration {
+	e.timeoutMu.RLock()
+	timeout := e.modelRoundTimeout
+	e.timeoutMu.RUnlock()
+	if timeout <= 0 {
+		return defaultModelRoundTimeout
+	}
+	return timeout
 }
 
 // SetSideEffectDedup enables/disables deduplication for side-effecting tools.
@@ -1625,7 +1684,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					return budgetFailure(resp.FunctionCalls, responseSpent)
 				}
 			}
-			return history, "", fmt.Errorf("model response error (%s): %w", ft.Reason, err)
+			partialText := carriedText
+			if resp != nil {
+				partialText += resp.Text
+			}
+			return history, partialText, fmt.Errorf("model response error (%s): %w", ft.Reason, err)
 		}
 		streamRetries = 0        // reset on success
 		partialStreamRetries = 0 // reset on success
@@ -2124,7 +2187,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 							return budgetFailure(resp.FunctionCalls, responseSpent)
 						}
 					}
-					return history, "", fmt.Errorf("function response error (%s): %w", ft.Reason, err)
+					partialText := carriedText
+					if resp != nil {
+						partialText += resp.Text
+					}
+					return history, partialText, fmt.Errorf("function response error (%s): %w", ft.Reason, err)
 				}
 
 				if decision.Partial {
@@ -2415,10 +2482,7 @@ func (e *Executor) getModelResponse(ctx context.Context, cl client.Client, histo
 }
 
 func (e *Executor) withModelRoundTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	timeout := e.modelRoundTimeout
-	if timeout <= 0 {
-		timeout = defaultModelRoundTimeout
-	}
+	timeout := e.ModelRoundTimeout()
 	if deadline, ok := parent.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -4998,6 +5062,11 @@ func toolExecutionTimeout(base, p95 time.Duration, haveStats bool, toolName stri
 		requested = coordinateTimeout(args) + coordinateCleanupTimeout
 	case "task":
 		requested = taskForegroundTimeout(args)
+	case "repl_exec":
+		// Python computation has its own short inactivity watchdog. The wider
+		// outer budget exists for synchronous rlm() callbacks, whose delegated
+		// agent owns a long-running but cancellable task lifecycle.
+		requested = config.DefaultThoroughAgentTimeout
 	case "task_output":
 		if GetBoolDefault(args, "block", false) {
 			requested = taskOutputWaitTimeout(args)

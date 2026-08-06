@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
@@ -132,7 +133,7 @@ func TestResumeAsyncCancellationPublishesCancelledStatus(t *testing.T) {
 }
 
 func TestDetachedResumeRunContextHonorsAgentTimeout(t *testing.T) {
-	agent := &Agent{timeout: 20 * time.Millisecond}
+	agent := &Agent{timeout: 20 * time.Millisecond, thoroughness: tools.ThoroughnessQuick}
 	ctx, cancel := detachedResumeRunContext(context.Background(), agent)
 	defer cancel()
 
@@ -143,6 +144,25 @@ func TestDetachedResumeRunContextHonorsAgentTimeout(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("detached resume context ignored agent timeout")
+	}
+}
+
+func TestDetachedResumeRunContextCoversRaisedNormalModelRoundBudget(t *testing.T) {
+	agent := &Agent{
+		timeout:           config.DefaultAgentTimeout,
+		modelRoundTimeout: 30 * time.Minute,
+		thoroughness:      tools.ThoroughnessNormal,
+	}
+	ctx, cancel := detachedResumeRunContext(context.Background(), agent)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("detached normal resume has no deadline")
+	}
+	want := 30*time.Minute + config.DefaultAgentTimeoutHeadroom
+	if remaining := time.Until(deadline); remaining < want-time.Minute || remaining > want+time.Minute {
+		t.Fatalf("detached resume budget = %v, want ~%v", remaining, want)
 	}
 }
 

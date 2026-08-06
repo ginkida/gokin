@@ -35,3 +35,18 @@ func TestBoundedCompactionCtx(t *testing.T) {
 		t.Errorf("tighter parent deadline must be preserved, got %v", d)
 	}
 }
+
+func TestContextManagerCompactionBudgetUpdatesLive(t *testing.T) {
+	m := &ContextManager{}
+	m.SetModelRoundTimeout(40 * time.Minute)
+	ctx, cancel := m.compactionContext(context.Background())
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("compaction context has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining < 39*time.Minute || remaining > 40*time.Minute+time.Second {
+		t.Fatalf("live compaction deadline = %v, want ~40m", remaining)
+	}
+}

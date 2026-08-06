@@ -36,11 +36,18 @@ type StreamHandler struct {
 // ProcessStream processes a streaming response with the given handler.
 func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHandler) (*Response, error) {
 	resp := &Response{}
+	contextFailure := func() (*Response, error) {
+		err := ContextErr(ctx)
+		if responseHasProgress(resp) {
+			err = markFailurePartial(err)
+		}
+		return resp, err
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ContextErr(ctx)
+			return contextFailure()
 		case chunk, ok := <-sr.Chunks:
 			if !ok {
 				// A producer may close its channel while cancellation is racing
@@ -48,7 +55,7 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 				// be reclassified as a successful (possibly empty) response merely
 				// because the closed channel won the select.
 				if err := ContextErr(ctx); err != nil {
-					return nil, err
+					return contextFailure()
 				}
 				if handler.OnComplete != nil {
 					handler.OnComplete(resp)
@@ -156,10 +163,20 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 	}
 }
 
+func responseHasProgress(resp *Response) bool {
+	return resp != nil && (resp.Text != "" || resp.Thinking != "" ||
+		len(resp.Parts) > 0 || len(resp.FunctionCalls) > 0 ||
+		resp.InputTokens > 0 || resp.OutputTokens > 0 ||
+		resp.CacheReadInputTokens > 0 || resp.CacheCreationInputTokens > 0)
+}
+
 // CollectText is a convenience function that collects only text from a stream.
 func CollectText(ctx context.Context, sr *StreamingResponse) (string, error) {
 	resp, err := ProcessStream(ctx, sr, &StreamHandler{})
 	if err != nil {
+		if resp != nil {
+			return resp.Text, err
+		}
 		return "", err
 	}
 	return resp.Text, nil

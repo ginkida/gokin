@@ -3,6 +3,8 @@ package tools
 import (
 	"testing"
 	"time"
+
+	"gokin/internal/config"
 )
 
 func TestAdaptiveToolTimeout_NoStatsReturnsBase(t *testing.T) {
@@ -123,14 +125,37 @@ func TestToolExecutionTimeoutHonorsLongOperationBudget(t *testing.T) {
 	}
 	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
 		"subagent_type": "bash",
-	}), 15*time.Minute+toolTimeoutCompletionGrace; got != want {
+	}), config.DefaultAgentTimeout+toolTimeoutCompletionGrace; got != want {
 		t.Fatalf("normal bash task outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type": "general",
+	}), config.DefaultAgentTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("normal general task outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type": "general",
+		"thoroughness":  "quick",
+	}), 2*time.Minute+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("quick general task outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type": "general",
+		"thoroughness":  "thorough",
+	}), config.DefaultThoroughAgentTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("thorough general task outer timeout = %v, want %v", got, want)
 	}
 	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
 		"subagent_type": "bash",
 		"thoroughness":  "thorough",
-	}), 35*time.Minute+toolTimeoutCompletionGrace; got != want {
+	}), config.DefaultThoroughAgentTimeout+toolTimeoutCompletionGrace; got != want {
 		t.Fatalf("thorough bash task outer timeout = %v, want %v", got, want)
+	}
+	if got, want := toolExecutionTimeout(base, 0, false, "task", map[string]any{
+		"subagent_type": "dynamic-reviewer",
+		"thoroughness":  "thorough",
+	}), config.DefaultThoroughAgentTimeout+toolTimeoutCompletionGrace; got != want {
+		t.Fatalf("thorough dynamic task outer timeout = %v, want %v", got, want)
 	}
 	if got := toolExecutionTimeout(base, 0, false, "task", map[string]any{
 		"subagent_type":     "bash",

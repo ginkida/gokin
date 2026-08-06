@@ -237,7 +237,7 @@ func (a *App) dirGrantPrompt(ctx context.Context, toolName, path string) (bool, 
 	// Headless / no interactive program cannot create new ambient filesystem
 	// authority. Unattended callers must opt in explicitly with --add-dir (or a
 	// persisted allowed-dir setting), which is both deterministic and auditable.
-	if a.program == nil {
+	if !a.hasProgram() {
 		return false, fmt.Errorf("access to %s requires approval, but interactive approval is unavailable in headless mode; grant it explicitly with --add-dir", dir)
 	}
 

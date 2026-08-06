@@ -33,6 +33,9 @@ var (
 	// ErrNothingToSummarize: the summary strategy produced an empty plan
 	// (e.g., all messages are pinned or already-summarized markers).
 	ErrNothingToSummarize = errors.New("no summarizable messages found")
+	// ErrSummarizationInProgress prevents /compact from starting a second
+	// provider call while an automatic compaction is already in flight.
+	ErrSummarizationInProgress = errors.New("context summarization already in progress")
 )
 
 // tokenSnapshot records token usage at a point in time for trend prediction.
@@ -56,7 +59,12 @@ type ContextManager struct {
 	mu            sync.RWMutex
 	currentTokens int
 	lastUsage     *TokenUsage
-	updateVersion uint64 // Monotonically increasing version to prevent stale watcher updates
+	updateVersion uint64 // Any usage/history update; prevents stale watcher writes.
+	// sessionCountVersion advances only for Session change callbacks. Keeping it
+	// separate from updateVersion prevents an exact ObserveAPIUsage update from
+	// being mistaken for another history-count request and then overwritten by
+	// a second local estimate.
+	sessionCountVersion uint64
 
 	// Provider usage is the only exact GLM token measurement available on the
 	// Anthropic-compatible endpoint. Keep the newest prompt/completion split and
@@ -72,6 +80,11 @@ type ContextManager struct {
 	// Async token counting
 	lastEstimatedTokens int // Cached estimate for fast path
 	lastHistoryLen      int // History length at last count
+	// sessionCountRunning coalesces bursty Session change callbacks into one
+	// latest-only worker. It is separate from tokenCountSem: the bool prevents
+	// stale queued work, while the semaphore bounds provider calls shared with
+	// PrepareForRequest's precise counter.
+	sessionCountRunning atomic.Bool
 
 	// Background summarization
 	summarizing    atomic.Bool   // Whether summarization is in progress (lock-free)
@@ -89,6 +102,10 @@ type ContextManager struct {
 
 	// Semaphore to limit concurrent async token count goroutines
 	tokenCountSem chan struct{}
+
+	// modelRoundTimeout is the hard cap inherited by LLM-backed compaction.
+	// Guarded by mu and updated live by /timeout via App.
+	modelRoundTimeout time.Duration
 
 	// Plan manager for task-aware summarization
 	planManager PlanManagerProvider
@@ -169,6 +186,7 @@ func NewContextManager(
 		keyFiles:           make(map[string]bool),
 		tokenHistory:       make([]tokenSnapshot, 0, 20),
 		tokenCountSem:      make(chan struct{}, 3),
+		modelRoundTimeout:  config.DefaultModelRoundTimeout,
 	}
 }
 
@@ -273,6 +291,32 @@ func (m *ContextManager) SetConfig(cfg *config.ContextConfig) {
 	}
 }
 
+// SetModelRoundTimeout updates the hard cap for future LLM-backed compaction
+// calls. In-flight calls retain the deadline they started with.
+func (m *ContextManager) SetModelRoundTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = config.DefaultModelRoundTimeout
+	}
+	m.mu.Lock()
+	m.modelRoundTimeout = timeout
+	messageScorer := m.messageScorer
+	m.mu.Unlock()
+	if messageScorer != nil {
+		messageScorer.SetSemanticTimeout(timeout)
+	}
+}
+
+// ModelRoundTimeout returns the effective compaction model-round cap.
+func (m *ContextManager) ModelRoundTimeout() time.Duration {
+	m.mu.RLock()
+	timeout := m.modelRoundTimeout
+	m.mu.RUnlock()
+	if timeout <= 0 {
+		return config.DefaultModelRoundTimeout
+	}
+	return timeout
+}
+
 // StartSessionWatcher starts monitoring session changes for auto-updating token counts.
 func (m *ContextManager) StartSessionWatcher() {
 	m.session.SetChangeHandler(m.onSessionChange)
@@ -288,43 +332,120 @@ func (m *ContextManager) onSessionChange(event chat.ChangeEvent) {
 		m.trackKeyFiles(event)
 	}
 
-	// Reserve a unique version before launching the worker. Multiple session
-	// changes can otherwise observe the same version and complete out of order.
+	// Reserve a unique version, then wake the latest-only counter. A new
+	// goroutine per event used to bypass tokenCountSem entirely and could queue
+	// dozens of stale provider calls during a burst of tool/history updates.
 	m.mu.Lock()
 	m.updateVersion++
-	versionBefore := m.updateVersion
+	m.sessionCountVersion++
 	m.mu.Unlock()
+	m.startSessionTokenCountWorker()
+}
 
-	// Update token count asynchronously
+func (m *ContextManager) startSessionTokenCountWorker() {
+	if !m.sessionCountRunning.CompareAndSwap(false, true) {
+		return
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				logging.Error("panic in session change handler", "error", r)
+				logging.Error("panic in session token-count worker", "error", r)
+				m.sessionCountRunning.Store(false)
+				// An event may have arrived while the flag was still true. Retry
+				// from the authoritative latest snapshot after releasing ownership.
+				if m.ctx.Err() == nil {
+					m.startSessionTokenCountWorker()
+				}
 			}
 		}()
+		m.runSessionTokenCountWorker()
+	}()
+}
 
-		tctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		defer cancel()
-
+func (m *ContextManager) runSessionTokenCountWorker() {
+	for {
+		// Read history before the versions. If a mutation lands between the two,
+		// its callback advances sessionCountVersion and this pass is retried.
 		history := m.session.GetHistory()
-		tokens, isEstimate, err := m.tokenCounter.CountContentsWithAccuracy(tctx, history)
+		m.mu.RLock()
+		applyVersion := m.updateVersion
+		requestVersion := m.sessionCountVersion
+		m.mu.RUnlock()
+
+		if m.tokenCountSem != nil {
+			select {
+			case m.tokenCountSem <- struct{}{}:
+			case <-m.ctx.Done():
+				m.sessionCountRunning.Store(false)
+				return
+			}
+		}
+		var tokens int
+		var isEstimate bool
+		var err error
+		func() {
+			if m.tokenCountSem != nil {
+				defer func() { <-m.tokenCountSem }()
+			}
+			countCtx, cancelCount := context.WithTimeout(m.ctx, 30*time.Second)
+			defer cancelCount()
+			tokens, isEstimate, err = m.tokenCounter.CountContentsWithAccuracy(countCtx, history)
+		}()
+		if m.ctx.Err() != nil {
+			m.sessionCountRunning.Store(false)
+			return
+		}
 		if err != nil {
 			tokens = EstimateContentsTokens(history)
 			isEstimate = true
 			logging.Debug("failed to count tokens on session change, using estimate", "error", err)
 		}
 
+		latest := false
 		m.mu.Lock()
-		if m.updateVersion == versionBefore {
+		if m.updateVersion == applyVersion && m.sessionCountVersion == requestVersion {
 			m.currentTokens = tokens
 			usage := m.tokenCounter.GetUsage(tokens)
 			usage.IsEstimate = isEstimate
 			m.lastUsage = &usage
+			latest = true
 		}
+		currentRequestVersion := m.sessionCountVersion
 		m.mu.Unlock()
 
-		// Auto-compact if threshold exceeded
-		m.tryAutoCompact(tctx, tokens)
+		if latest {
+			m.startAutoCompact(tokens)
+		}
+		if currentRequestVersion != requestVersion {
+			continue // Coalesce every intermediate event into the newest snapshot.
+		}
+
+		// Lost-wakeup-safe handoff: publish idle, then recheck the version. An
+		// event racing before Store(false) sees us running; we reclaim ownership.
+		// An event racing after it starts its own worker and our CAS fails.
+		m.sessionCountRunning.Store(false)
+		m.mu.RLock()
+		newer := m.sessionCountVersion != requestVersion
+		m.mu.RUnlock()
+		if newer && m.sessionCountRunning.CompareAndSwap(false, true) {
+			continue
+		}
+		return
+	}
+}
+
+func (m *ContextManager) startAutoCompact(currentTokens int) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("panic in session auto-compaction worker", "error", r)
+			}
+		}()
+		// Auto-compaction is an independent model round. Do not inherit the
+		// token-count helper's 30-second deadline: that silently overrode the
+		// live tools.model_round_timeout and made this one compaction path fail
+		// far earlier than /compact and the other background triggers.
+		m.tryAutoCompact(m.ctx, currentTokens)
 	}()
 }
 
@@ -482,30 +603,24 @@ func (m *ContextManager) notifyOptimizeFailed(reason string, err error) {
 // backgroundOptimize runs context optimization in a background goroutine.
 // Only one optimization runs at a time; concurrent calls are no-ops.
 func (m *ContextManager) backgroundOptimize(_ context.Context) {
-	// Atomic CAS prevents concurrent summarization without holding the mutex
-	if !m.summarizing.CompareAndSwap(false, true) {
+	finish, started := m.beginSummarization()
+	if !started {
 		return // Already running
 	}
-
-	done := make(chan struct{})
-	m.mu.Lock()
-	m.summarizeDone = done
-	m.mu.Unlock()
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logging.Error("panic in background optimization", "error", r)
 			}
-			m.summarizing.Store(false)
-			close(done)
+			finish()
 		}()
 
 		// Use the manager's lifecycle context, not the request context.
 		// The request context is cancelled when the API call returns, but
 		// background summarization may still be running — using the request
 		// ctx causes it to abort prematurely on fast responses.
-		sumCtx, cancel := context.WithTimeout(m.ctx, 60*time.Second)
+		sumCtx, cancel := m.compactionContext(m.ctx)
 		defer cancel()
 
 		start := time.Now()
@@ -524,28 +639,61 @@ func (m *ContextManager) backgroundOptimize(_ context.Context) {
 	}()
 }
 
-// compactionBudget bounds a summarization round-trip. Matches the background
-// path (manager.go) and the agent's withCompactionTimeout.
-const compactionBudget = 60 * time.Second
+// beginSummarization serializes every LLM-backed compaction path. Session
+// changes can arrive in bursts, and each change starts an asynchronous token
+// count; without one shared gate they could all cross the threshold together
+// and spend several provider calls summarizing the same history. The same gate
+// is also used by backgroundOptimize so incremental and full compaction cannot
+// overlap.
+func (m *ContextManager) beginSummarization() (finish func(), started bool) {
+	if !m.summarizing.CompareAndSwap(false, true) {
+		return nil, false
+	}
+
+	done := make(chan struct{})
+	m.mu.Lock()
+	m.summarizeDone = done
+	m.mu.Unlock()
+
+	return func() {
+		close(done)
+		m.summarizing.Store(false)
+	}, true
+}
+
+// compactionBudget is the default summarization model-round cap. Runtime
+// /timeout changes are read from ContextManager.modelRoundTimeout instead.
+const compactionBudget = config.DefaultModelRoundTimeout
 
 // boundedCompactionCtx caps a summarization context at compactionBudget so a
 // slow/unreachable model endpoint can't stall a caller for minutes: SendMessage
 // is otherwise bounded only by the ~120s transport ResponseHeaderTimeout (the
 // shared HTTP client has no Client.Timeout, by design, to preserve SSE
 // streaming). Deadline-aware: a tighter parent deadline is preserved, never
-// extended (the background path already passes a 60s ctx). This closes the
+// extended. This closes the
 // /compact sibling of the v0.100.8 login-hang — ForceSummarize reached
 // OptimizeContext on the deadline-less command ctx.
-func boundedCompactionCtx(ctx context.Context) (context.Context, context.CancelFunc) {
-	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= compactionBudget {
+func boundedCompactionCtxWithTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = compactionBudget
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= timeout {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, compactionBudget)
+	return context.WithTimeoutCause(ctx, timeout, client.NewModelRoundTimeoutError(timeout))
+}
+
+func boundedCompactionCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return boundedCompactionCtxWithTimeout(ctx, compactionBudget)
+}
+
+func (m *ContextManager) compactionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return boundedCompactionCtxWithTimeout(ctx, m.ModelRoundTimeout())
 }
 
 // OptimizeContext optimizes the context by summarizing old messages.
 func (m *ContextManager) OptimizeContext(ctx context.Context) error {
-	ctx, cancel := boundedCompactionCtx(ctx)
+	ctx, cancel := m.compactionContext(ctx)
 	defer cancel()
 
 	startTime := time.Now()
@@ -873,7 +1021,11 @@ func (m *ContextManager) ForceSummarize(ctx context.Context) error {
 	if m.summarizer == nil {
 		return ErrSummarizerUnavailable
 	}
-	return m.OptimizeContext(ctx)
+	started, err := m.tryOptimizeContext(ctx)
+	if !started {
+		return ErrSummarizationInProgress
+	}
+	return err
 }
 
 // trackKeyFiles extracts file paths from session changes to track critical files.
@@ -926,6 +1078,13 @@ func (m *ContextManager) tryAutoCompact(ctx context.Context, currentTokens int) 
 		return
 	}
 
+	finish, started := m.beginSummarization()
+	if !started {
+		logging.Debug("auto-compaction skipped — summarization already running")
+		return
+	}
+	defer finish()
+
 	logging.Info("auto-compaction triggered",
 		"tokens", currentTokens,
 		"percentage", usage.PercentUsed,
@@ -945,9 +1104,27 @@ func (m *ContextManager) tryAutoCompact(ctx context.Context, currentTokens int) 
 	}
 }
 
+// tryOptimizeContext runs a full compaction under the shared summarization
+// gate. It is used by synchronous callers (manual /compact and ContextAgent);
+// backgroundOptimize owns the same gate across its goroutine lifecycle.
+func (m *ContextManager) tryOptimizeContext(ctx context.Context) (bool, error) {
+	finish, started := m.beginSummarization()
+	if !started {
+		return false, nil
+	}
+	defer finish()
+	return true, m.OptimizeContext(ctx)
+}
+
 // IncrementalCompact performs incremental compaction: summarizes oldest messages first,
 // preserves recent messages and key file references.
 func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
+	// Incremental compaction is an LLM model round just like OptimizeContext.
+	// Bound direct callers too; tryAutoCompact previously inherited an unrelated
+	// 30-second token-count deadline while other callers could be unbounded.
+	ctx, cancel := m.compactionContext(ctx)
+	defer cancel()
+
 	// Sync task context for task-aware summarization
 	m.syncTaskContext()
 

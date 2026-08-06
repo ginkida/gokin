@@ -91,6 +91,13 @@ var parallelSafeTools = map[string]bool{
 	"history_search": true, "get_plan_status": true,
 }
 
+// sequentialReadOnlyTools preserve local state between calls and therefore
+// must not be scheduled concurrently, but they still do not represent a user
+// or workspace mutation for checkpoint/done-gate accounting.
+var sequentialReadOnlyTools = map[string]bool{
+	"repl_exec": true,
+}
+
 // IsParallelSafeTool reports whether concurrent execution and abandonment are
 // safe for a built-in tool. Unknown third-party tools fail closed to false.
 func IsParallelSafeTool(name string) bool {
@@ -120,7 +127,8 @@ var defaultClassifier = &toolDependencyClassifier{}
 // MCP/plugin tools fail closed as stateful. This one capability boundary drives
 // serialization, checkpoint replay, and cancellation abandonment.
 func IsWriteTool(name string) bool {
-	return !IsParallelSafeTool(name)
+	name = strings.ToLower(strings.TrimSpace(name))
+	return !IsParallelSafeTool(name) && !sequentialReadOnlyTools[name]
 }
 
 // classifyDependencies delegates to the shared ClassifyToolDependencies so the

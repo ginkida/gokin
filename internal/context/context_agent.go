@@ -139,7 +139,12 @@ func (a *ContextAgent) CheckAndCompact(ctx context.Context) {
 }
 
 func (a *ContextAgent) runCompaction(ctx context.Context) {
-	if err := a.manager.OptimizeContext(ctx); err != nil {
+	started, err := a.manager.tryOptimizeContext(ctx)
+	if !started {
+		logging.Debug("ContextAgent: compaction skipped — summarization already running")
+		return
+	}
+	if err != nil {
 		// "Nothing to do" sentinels are not errors at this layer — auto-
 		// compaction triggers on token count, and reaching a no-op state
 		// (history too short / all pinned) is a normal outcome. Demote

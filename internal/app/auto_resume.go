@@ -132,15 +132,14 @@ func isAutoResumableError(err error) bool {
 	return false
 }
 
-// isContextSizeError returns true for model round timeout — an error whose
-// likelihood depends on the context size (large context → more reasoning →
-// longer streaming → 14m cap). When EmergencyTruncate already removed nothing
-// (context is minimal or fits budget), the timeout is NOT context-driven, so a
-// retry with an unchanged context would hit the same 14m cap deterministically.
-// The caller uses this to skip such a retry, refunding the budget and surfacing
-// the error immediately instead of wasting ~14m15s per guaranteed-failing attempt.
-func isContextSizeError(err error) bool {
-	return errors.Is(err, client.ErrModelRoundTimeout)
+// shouldSkipUnchangedAutoResume limits repeated model-timeout retries when
+// EmergencyTruncate could not reduce the context. The FIRST unchanged retry is
+// still valuable: provider latency and generated reasoning are nondeterministic,
+// so the old "guaranteed re-failure" assumption incorrectly disabled recovery
+// for already-compact prompts. A second timeout with no further context change
+// is strong enough evidence to stop automatically and surface /timeout guidance.
+func shouldSkipUnchangedAutoResume(err error, attempt int) bool {
+	return errors.Is(err, client.ErrModelRoundTimeout) && attempt > 1
 }
 
 // autoResumeReason returns a human-readable label for why the auto-resume was
@@ -171,6 +170,13 @@ func (a *App) scheduleAutoResume(message string, err error) (attempt int, delay 
 
 	a.autoResumeMu.Lock()
 	defer a.autoResumeMu.Unlock()
+	// Builder-backed Apps initialize this eagerly, but embedded/headless test
+	// Apps and partially restored runtimes may legitimately start from the zero
+	// value. Scheduling must not panic after the timeout outcome has already
+	// been latched (that panic used to be hidden by first-wins terminal status).
+	if a.autoResumeCount == nil {
+		a.autoResumeCount = make(map[string]int)
+	}
 
 	current := a.autoResumeCount[key]
 	if current >= maxAutoResumeAttempts {
@@ -214,9 +220,8 @@ func (a *App) clearAutoResume(message string) {
 
 // refundAutoResume reverses one increment of the resume counter, returning it to
 // its value before the last scheduleAutoResume call. It is used when a scheduled
-// resume is skipped (e.g. compaction removed nothing for a context-size error,
-// making the retry a guaranteed re-failure) so the budget isn't consumed by an
-// attempt that never ran.
+// resume is skipped after a repeated model timeout with no new compaction, so
+// the budget isn't consumed by an attempt that never ran.
 func (a *App) refundAutoResume(message string) {
 	key := rateLimitRetryKey(message)
 	a.autoResumeMu.Lock()

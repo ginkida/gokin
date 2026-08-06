@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"gokin/internal/config"
 	"gokin/internal/format"
 	"gokin/internal/highlight"
 )
@@ -362,8 +363,9 @@ type Model struct {
 	lastRecoverableStatus string // Last durable recoverable status in this recovery episode
 
 	// Copy support: track last AI response
-	lastResponseText   string           // Last AI response text (saved on ResponseDoneMsg)
-	currentResponseBuf *strings.Builder // Accumulates current streaming response (pointer to survive Bubble Tea copies)
+	lastResponseText       string           // Last copyable AI response, including a preserved timeout partial.
+	lastResponseWasPartial bool             // Changes Alt+C feedback until a complete response replaces it.
+	currentResponseBuf     *strings.Builder // Accumulates current streaming response (pointer to survive Bubble Tea copies)
 
 	// Terminal bell on prompts
 	bellEnabled bool
@@ -377,6 +379,10 @@ type Model struct {
 	pendingResize  *tea.WindowSizeMsg // nil if no pending resize
 	resizeDeadline time.Time          // when to apply the pending resize
 }
+
+const (
+	defaultStreamTimeout = config.DefaultModelWatchdogFloor
+)
 
 // BackgroundTaskState tracks the state of a background task for UI display.
 type BackgroundTaskState struct {
@@ -433,7 +439,7 @@ func NewModel() *Model {
 		spinner:              s,
 		styles:               styles,
 		state:                StateInput,
-		streamTimeout:        15 * time.Minute,       // Timeout for stuck streaming states (generous for long operations)
+		streamTimeout:        defaultStreamTimeout,   // Timeout for stuck streaming states (generous for long operations)
 		minSubmitDelay:       500 * time.Millisecond, // Debounce: 500ms between submissions
 		sessionStart:         time.Now(),
 		diffPreview:          NewDiffPreviewModel(styles),
@@ -473,6 +479,17 @@ func NewModel() *Model {
 	m.gitStatusModel.SetActionsLinked(false)
 	m.commandPalette.SetSubmissionLinked(false)
 	return m
+}
+
+// SetModelRoundTimeout keeps the UI's silent-stream watchdog outside the
+// provider round deadline. The 15-minute floor preserves the existing generous
+// watchdog for smaller custom caps; larger caps receive completion headroom so
+// the UI cannot cancel a request before the backend's configured timeout fires.
+func (m *Model) SetModelRoundTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	m.streamTimeout = config.ModelWatchdogTimeout(timeout)
 }
 
 // Init initializes the TUI.
@@ -3000,7 +3017,11 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	if msg.String() == "alt+c" &&
 		(m.state == StateInput || m.state == StateProcessing || m.state == StateStreaming) {
 		if m.lastResponseText != "" {
-			showClipboardCopyFeedback(m.toastManager, "Copied last response", copyTextToClipboard(m.lastResponseText))
+			label := "Copied last response"
+			if m.lastResponseWasPartial {
+				label = "Copied partial response"
+			}
+			showClipboardCopyFeedback(m.toastManager, label, copyTextToClipboard(m.lastResponseText))
 		} else if m.toastManager != nil {
 			m.toastManager.ShowWarning("No completed response to copy")
 		}
@@ -3697,6 +3718,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.lastRecoverableStatus = ""
 		if m.currentResponseBuf.Len() > 0 {
 			m.lastResponseText = m.currentResponseBuf.String()
+			m.lastResponseWasPartial = false
 			m.currentResponseBuf.Reset()
 		}
 		m.output.FlushStream() // Flush any remaining streamed content
@@ -3759,8 +3781,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.responseToolCount = 0
 		m.responseToolFailures = 0
 		m.lastRecoverableStatus = ""
-		m.currentResponseBuf.Reset() // Discard partial response on error
-		m.output.FlushStream()       // Flush any remaining streamed content
+		partialPreserved := false
+		if shouldPreservePartialResponseForError(errStr) && m.currentResponseBuf.Len() > 0 {
+			// The backend has already committed this partial model turn to session
+			// history. Keep the exact visible text copyable too; otherwise the user
+			// can see useful work in scrollback but Alt+C still returns an older
+			// answer. Explicit Esc and the local UI watchdog clear the buffer before
+			// their terminal messages, so they retain their discard semantics.
+			m.lastResponseText = m.currentResponseBuf.String()
+			m.lastResponseWasPartial = true
+			partialPreserved = true
+		}
+		m.currentResponseBuf.Reset()
+		m.output.FlushStream() // Flush any remaining streamed content
 
 		if errStr == m.lastErrorMsg {
 			m.lastErrorCount++
@@ -3771,6 +3804,10 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			m.lastErrorCount = 0
 			m.output.AppendLine("")
 			m.output.AppendLine(FormatErrorWithGuidanceWidth(m.styles, errStr, m.width))
+		}
+		if partialPreserved {
+			dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+			m.output.AppendLine(dimStyle.Render("  Partial response preserved — Alt+C copies it"))
 		}
 		m.appendRequestRecoveryHint()
 		if !modalActive {
@@ -4378,6 +4415,7 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		m.SetShowTokens(msg.ShowTokenUsage)
 		m.SetHintsEnabled(msg.HintsEnabled)
 		m.SetShowToolCalls(msg.ShowToolCalls)
+		m.SetModelRoundTimeout(msg.ModelRoundTimeout)
 		if bellEnabled, ok := msg.Settings["bell"]; ok {
 			m.SetBellEnabled(bellEnabled)
 		}
@@ -4968,6 +5006,14 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 	return nil
+}
+
+func shouldPreservePartialResponseForError(errText string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(errText))
+	return strings.Contains(normalized, "model_round_timeout") ||
+		strings.Contains(normalized, "model round timeout") ||
+		strings.Contains(normalized, "stream idle timeout after partial response") ||
+		strings.Contains(normalized, "(http_timeout)")
 }
 
 // extractToolInfoFromArgs generates tool info for status line display.

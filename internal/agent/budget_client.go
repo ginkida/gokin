@@ -34,6 +34,8 @@ type invocationBudgetClient struct {
 	allTracked  bool
 }
 
+var _ client.AuxiliaryClientCloner = (*invocationBudgetClient)(nil)
+
 func newInvocationBudgetClient(base client.Client) client.Client {
 	return newInvocationBudgetClientWithCalculator(base, defaultInvocationCostCalculator)
 }
@@ -352,6 +354,18 @@ func (c *invocationBudgetClient) SetModel(model string) {
 
 func (c *invocationBudgetClient) WithModel(model string) client.Client {
 	return newInvocationBudgetClientWithCalculator(c.base.WithModel(model), c.calculator)
+}
+
+// CloneForAuxiliaryClient preserves invocation-budget enforcement while
+// isolating the mutable provider request state used by semantic reflection.
+// The budget ledger itself lives in the request context, so the clone still
+// serializes and accounts its provider round with foreground/planner rounds.
+func (c *invocationBudgetClient) CloneForAuxiliaryClient() (client.Client, bool) {
+	baseClone, isolated := client.CloneForAuxiliary(c.base)
+	if !isolated {
+		return nil, false
+	}
+	return newInvocationBudgetClientWithCalculator(baseClone, c.calculator), true
 }
 
 func (c *invocationBudgetClient) GetRawClient() any {

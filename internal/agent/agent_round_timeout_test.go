@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"gokin/internal/client"
+	"gokin/internal/tools"
 )
 
 // TestWithModelRoundTimeout_GenerousCap pins that the round timeout is the shared
@@ -46,6 +48,62 @@ func TestWithModelRoundTimeout_GenerousCap(t *testing.T) {
 	default:
 		t.Error("an already-expired parent should yield an already-done round ctx")
 	}
+}
+
+func TestModelRoundTimeoutFollowsRunnerConfigForNewAndExistingAgents(t *testing.T) {
+	runner := NewRunner(context.Background(), nil, tools.NewRegistry(), t.TempDir())
+	runner.SetModelRoundTimeout(40 * time.Millisecond)
+
+	agent := runner.newConfiguredAgent(
+		context.Background(), runner.snapshotAgentDeps(), string(AgentTypeGeneral), 1, "", nil)
+	agent.stateMu.RLock()
+	got := agent.modelRoundTimeout
+	agent.stateMu.RUnlock()
+	if got != 40*time.Millisecond {
+		t.Fatalf("new agent round timeout = %v, want 40ms", got)
+	}
+
+	runner.mu.Lock()
+	runner.agents[agent.ID] = agent
+	runner.mu.Unlock()
+	runner.SetModelRoundTimeout(75 * time.Millisecond)
+	agent.stateMu.RLock()
+	got = agent.modelRoundTimeout
+	agent.stateMu.RUnlock()
+	if got != 75*time.Millisecond {
+		t.Fatalf("existing agent round timeout = %v, want 75ms", got)
+	}
+
+	roundCtx, cancel := agent.withModelRoundTimeout(context.Background())
+	defer cancel()
+	deadline, ok := roundCtx.Deadline()
+	if !ok {
+		t.Fatal("configured agent round has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > 150*time.Millisecond {
+		t.Fatalf("configured round deadline remaining = %v, want approximately 75ms", remaining)
+	}
+}
+
+func TestModelRoundTimeoutRuntimeUpdateIsRaceSafe(t *testing.T) {
+	a := NewAgent(AgentTypeGeneral, nil, tools.NewRegistry(), t.TempDir(), 1, "", nil, nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for n := 0; n < 100; n++ {
+				if offset%2 == 0 {
+					a.SetModelRoundTimeout(time.Duration(n+1) * time.Millisecond)
+					continue
+				}
+				ctx, cancel := a.withModelRoundTimeout(context.Background())
+				cancel()
+				_ = ctx
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 // TestModelRoundTimeoutCauseIsTypedNonRetryable pins that when the round timeout

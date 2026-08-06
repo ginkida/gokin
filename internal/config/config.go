@@ -11,6 +11,7 @@ import (
 type Config struct {
 	API           APIConfig           `yaml:"api"`
 	Model         ModelConfig         `yaml:"model"`
+	Engine        EngineConfig        `yaml:"engine"`
 	Tools         ToolsConfig         `yaml:"tools"`
 	UI            UIConfig            `yaml:"ui"`
 	Context       ContextConfig       `yaml:"context"`
@@ -47,6 +48,16 @@ type Config struct {
 	// savePath pins an explicitly loaded --config file as the destination for
 	// later runtime saves. Clone preserves it through the ordinary struct copy.
 	savePath string
+	// modelRoundTimeoutProjectPath records the project overlay that explicitly
+	// owns tools.model_round_timeout. Runtime /timeout updates must write that
+	// field back to the winning layer; saving only the global config would look
+	// successful but be overridden again on the next launch.
+	modelRoundTimeoutProjectPath string
+	// modelRoundTimeoutGlobalValue is the pre-project value. Full saves target
+	// the global/explicit config and must not serialize a repository overlay
+	// into that user-wide layer.
+	modelRoundTimeoutGlobalValue   time.Duration
+	modelRoundTimeoutGlobalTracked bool
 
 	// snapshotRevision is app-owned optimistic-concurrency metadata. It is
 	// deliberately unexported and never serialized; commands only carry it back
@@ -55,6 +66,23 @@ type Config struct {
 	snapshotTracked  bool
 	snapshotMCP      MCPConfig
 	snapshotMCPSet   bool
+}
+
+// EngineConfig selects the orchestration data plane. "auto" is deliberately
+// the default: it advertises the stateful REPL only after a real secure-runtime
+// probe succeeds, otherwise preserving the existing structured-tool engine.
+type EngineConfig struct {
+	Mode string     `yaml:"mode"` // auto, tools, or hybrid
+	REPL REPLConfig `yaml:"repl"`
+}
+
+// REPLConfig bounds one session-scoped Python kernel. The interpreter and
+// sandbox backend are runtime-detected rather than repository-configurable so
+// a project config cannot point Gokin at an attacker-controlled executable.
+type REPLConfig struct {
+	CellTimeout      time.Duration `yaml:"cell_timeout"`
+	MaxCodeBytes     int           `yaml:"max_code_bytes"`
+	MaxResponseBytes int           `yaml:"max_response_bytes"`
 }
 
 // SetSnapshotRevision marks which authoritative app revision this candidate
@@ -245,7 +273,7 @@ func (c *APIConfig) SetProviderKey(provider, key string) {
 type RetryConfig struct {
 	MaxRetries        int                            `yaml:"max_retries"`         // Maximum number of retry attempts (default: 3)
 	RetryDelay        time.Duration                  `yaml:"retry_delay"`         // Initial delay between retries (default: 1s)
-	HTTPTimeout       time.Duration                  `yaml:"http_timeout"`        // HTTP request timeout (default: 120s)
+	HTTPTimeout       time.Duration                  `yaml:"http_timeout"`        // First-response-header timeout (0 = provider default)
 	StreamIdleTimeout time.Duration                  `yaml:"stream_idle_timeout"` // Max pause between SSE chunks (0 = provider default)
 	Providers         map[string]ProviderRetryConfig `yaml:"providers,omitempty"` // Per-provider timeout overrides (e.g. glm/minimax/kimi).
 }
@@ -421,8 +449,8 @@ type PlanConfig struct {
 	DelegateSteps                bool                   `yaml:"delegate_steps"`                  // Run each step in isolated sub-agent
 	WorkspaceIsolation           bool                   `yaml:"workspace_isolation"`             // Use isolated workspaces for safe read-only sub-agents
 	AbortOnStepFailure           bool                   `yaml:"abort_on_step_failure"`           // Stop plan on step failure
-	PlanningTimeout              time.Duration          `yaml:"planning_timeout"`                // Timeout for LLM plan generation
-	DefaultStepTimeout           time.Duration          `yaml:"default_step_timeout"`            // Default timeout per step (0 = 5min)
+	PlanningTimeout              time.Duration          `yaml:"planning_timeout"`                // Timeout for LLM plan generation (0 = model-round timeout)
+	DefaultStepTimeout           time.Duration          `yaml:"default_step_timeout"`            // Default timeout per step (0 = dynamic agent budget)
 	UseLLMExpansion              bool                   `yaml:"use_llm_expansion"`               // Use LLM for dynamic plan expansion
 	Algorithm                    string                 `yaml:"algorithm"`                       // Tree search algorithm: beam, mcts, astar
 	RequireExpectedArtifactPaths bool                   `yaml:"require_expected_artifact_paths"` // Fail-closed completion when mutating step has no explicit artifact paths
@@ -651,6 +679,14 @@ func DefaultConfig() *Config {
 			ThinkingMode:    "auto", // think when hard, skip when easy — applied during work, not a manual toggle
 			MaxPoolSize:     5,      // Default pool size
 		},
+		Engine: EngineConfig{
+			Mode: "auto",
+			REPL: REPLConfig{
+				CellTimeout:      30 * time.Second,
+				MaxCodeBytes:     64 * 1024,
+				MaxResponseBytes: 1024 * 1024,
+			},
+		},
 		Tools: ToolsConfig{
 			Timeout:           2 * time.Minute,
 			ModelRoundTimeout: DefaultModelRoundTimeout,
@@ -715,6 +751,8 @@ func DefaultConfig() *Config {
 				"git_blame":            "allow",
 				"review_changes":       "allow",
 				"history_search":       "allow",
+				"repl_exec":            "allow",
+				"harness":              "ask",
 				"tools_list":           "allow",
 				"skill":                "allow",
 				"task_output":          "allow",
@@ -742,7 +780,7 @@ func DefaultConfig() *Config {
 			DelegateSteps:                true,  // Run each step in isolated sub-agent
 			WorkspaceIsolation:           true,  // Isolate safe read-only sub-agents in temp workspaces
 			AbortOnStepFailure:           false, // Continue by default on step failure
-			PlanningTimeout:              60 * time.Second,
+			PlanningTimeout:              0,     // Follow tools.model_round_timeout unless explicitly overridden
 			UseLLMExpansion:              true,
 			Algorithm:                    "beam", // Tree search algorithm: beam, mcts, astar
 			RequireExpectedArtifactPaths: false,

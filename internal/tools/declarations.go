@@ -1217,6 +1217,8 @@ func getAllDeclarationsForWorkDir(workDir string) map[string]*genai.FunctionDecl
 		"shared_memory":        NewSharedMemoryTool().Declaration(),
 		"update_scratchpad":    NewUpdateScratchpadTool(nil).Declaration(),
 		"verify_code":          NewVerifyCodeTool(workDir).Declaration(),
+		"repl_exec":            NewReplExecTool(nil).Declaration(),
+		"harness":              NewHarnessTool(nil).Declaration(),
 		"pin_context":          NewPinContextTool(nil).Declaration(),
 		"history_search":       NewHistorySearchTool(nil).Declaration(),
 		"skill":                SkillToolDeclaration(),

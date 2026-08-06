@@ -291,6 +291,15 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		}
 	}
 
+	// 5c. Stop the session-scoped Python kernel. Close is idempotent and kills
+	// the whole worker process group, so no cell can survive application exit.
+	if a.replManager != nil {
+		logging.Debug("shutting down hybrid REPL")
+		if err := a.replManager.Close(); err != nil {
+			logging.Warn("failed to shut down hybrid REPL", "error", err)
+		}
+	}
+
 	// 6. Stop file watcher
 	if a.fileWatcher != nil {
 		logging.Debug("stopping file watcher")

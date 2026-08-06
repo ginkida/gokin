@@ -642,8 +642,8 @@ api:
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
-    http_timeout: 120s
-    stream_idle_timeout: 30s
+    http_timeout: 0s               # 0 = provider-specific first-header default
+    stream_idle_timeout: 0s        # 0 = provider-specific SSE pause default
 
 model:
   name: "glm-5.2"
@@ -653,6 +653,16 @@ model:
   thinking_mode: "auto"           # auto | on | off; adapts per request
   enable_thinking: false          # legacy static switch
   thinking_budget: 0              # 0 = adaptive/provider default
+
+engine:
+  # auto probes a real OS sandbox and enables the stateful hybrid engine only
+  # when isolation succeeds; otherwise Gokin transparently uses normal tools.
+  # tools disables the REPL; hybrid fails startup if a secure runtime is absent.
+  mode: "auto"                    # auto | tools | hybrid
+  repl:
+    cell_timeout: 30s             # Python compute inactivity; pauses for callbacks
+    max_code_bytes: 65536
+    max_response_bytes: 1048576
 
 ui:
   stream_output: true              # compatibility field; responses always stream
@@ -669,7 +679,12 @@ ui:
 
 tools:
   timeout: 2m
-  model_round_timeout: 14m         # allows long GLM reasoning rounds
+  # Hard cap per provider round, shared by foreground and sub-agents.
+  # Use 0 to restore the default; reasoning-heavy GLM rounds need a generous cap.
+  # Context/session summaries inherit this cap. Normal/thorough agent, plan,
+  # coordinate, MetaAgent, and UI watchdogs leave extra
+  # headroom; shorter explicit quick/plan/coordinate/loop/headless budgets win.
+  model_round_timeout: 14m
   bash: { sandbox: true }
 
 permission:
@@ -679,6 +694,8 @@ permission:
 plan:
   enabled: true
   require_approval: true
+  planning_timeout: 0s            # 0 = follow tools.model_round_timeout
+  default_step_timeout: 0s        # 0 = dynamic model round + agent headroom
 
 memory:
   enabled: true
@@ -690,6 +707,30 @@ mcp:
   enabled: false                  # enable MCP server support
   servers: {}                     # server configs (stdio/http)
 ```
+
+Change the model-round cap live with `/timeout 20m`; `/timeout default`
+restores the recommended value for foreground and sub-agent requests.
+
+In the default `engine.mode: auto`, a successful sandbox probe exposes a
+persistent, workspace-read-only Python `repl_exec`. Its `context` object keeps
+large repository analysis out of the model transcript, while `rlm()` delegates
+bounded work through the existing permission and audit pipeline. The optional
+`rlm.harness` surface can add session-only prompt adjustments, project episodic
+memory, and inert skill proposals. Harness mutations require approval by
+default; proposals remain under `.gokin/harness/proposals/` and are never
+auto-loaded from `.gokin/skills/`. Python cannot change permissions, sandbox
+policy, built-in tools, or immutable system instructions. Direct Python file
+writes, subprocesses, sockets, and native-library loading are denied; resource
+limits and the OS sandbox remain the hard boundary. `context.git_status()` and
+`context.git_diff()` use the one fixed read-only subprocess path.
+
+Use `repl_exec` with `action: status` to inspect bounded kernel health
+(generation, restarts, executions, transport failures, and timeouts), or
+`action: reset` to discard Python globals/artifacts deliberately. Protocol
+failures and inactive cells discard the affected kernel automatically; the next
+cell starts a clean generation. Episodic-memory writes use an advisory lock plus
+atomic snapshots, so concurrent Gokin terminals merge updates instead of
+silently overwriting one another.
 
 Open the interactive settings screen with `Ctrl+S` or `/settings`. Interface
 toggles such as `hints`, `toolcalls`, `tokens`, `compactui`, and
@@ -710,6 +751,8 @@ gokin/
 │   ├── tools/          # 59 built-in tools, 9 tool sets
 │   ├── mcp/            # MCP client + manager (stdio/http)
 │   ├── loops/          # Autonomous loop scheduler
+│   ├── repl/           # Sandboxed stateful Python + typed callback protocol
+│   ├── harness/        # Bounded continual memory and inert skill proposals
 │   ├── ui/             # Bubble Tea TUI (46 source files, Graphite+Violet theme)
 │   ├── config/         # YAML config
 │   ├── permission/     # 3-level security + per-MCP-server isolation

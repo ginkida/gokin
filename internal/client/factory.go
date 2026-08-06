@@ -349,6 +349,49 @@ func resolveProviderTimeouts(cfg *config.Config, provider string, defaultStreamI
 	return streamIdleTimeout, httpTimeout
 }
 
+// ProviderTimeouts describes the transport watchdogs that surround (but do not
+// replace) the overall model-round deadline. ResponseHeaderTimeout applies only
+// until the first HTTP headers arrive; StreamIdleTimeout applies between SSE
+// fragments after that (zero means no application-level idle watchdog).
+type ProviderTimeouts struct {
+	ResponseHeaderTimeout time.Duration
+	StreamIdleTimeout     time.Duration
+}
+
+// EffectiveProviderTimeouts resolves the exact defaults and global/provider
+// overrides used when constructing the active client. Diagnostics call this
+// same function so displayed limits cannot drift from runtime behavior.
+func EffectiveProviderTimeouts(cfg *config.Config, provider string) ProviderTimeouts {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	defaultIdle, defaultHTTP := 30*time.Second, config.DefaultHTTPTimeout
+	switch provider {
+	case "glm":
+		defaultIdle, defaultHTTP = 180*time.Second, 5*time.Minute
+	case "kimi":
+		// Kimi Coding Plan regularly emits partial output and then spends more
+		// than two minutes in a silent reasoning/tool phase. Runtime logs showed
+		// healthy-looking streams terminating exactly at the old 2m boundary;
+		// match GLM's patient stall-prone profile while retaining the 5m header
+		// and overall model-round backstops.
+		defaultIdle, defaultHTTP = 180*time.Second, 5*time.Minute
+	case "minimax", "deepseek":
+		defaultIdle, defaultHTTP = 120*time.Second, 5*time.Minute
+	case "ollama":
+		defaultIdle, defaultHTTP = 0, config.DefaultHTTPTimeout
+	}
+	if cfg == nil {
+		return ProviderTimeouts{
+			ResponseHeaderTimeout: defaultHTTP,
+			StreamIdleTimeout:     defaultIdle,
+		}
+	}
+	streamIdle, responseHeader := resolveProviderTimeouts(cfg, provider, defaultIdle, defaultHTTP)
+	return ProviderTimeouts{
+		ResponseHeaderTimeout: responseHeader,
+		StreamIdleTimeout:     streamIdle,
+	}
+}
+
 // newGLMClient creates a GLM client using Z.AI's Anthropic-compatible API.
 func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load API key from environment or config via registry
@@ -384,7 +427,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	// GLM/Z.AI needs longer timeouts — server is slower than Anthropic.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "glm", 180*time.Second, 5*time.Minute)
+	timeouts := EffectiveProviderTimeouts(cfg, "glm")
 
 	// GLM 4.7+ supports extended thinking — enable by default if the user
 	// hasn't explicitly configured it. This includes the default GLM-5.2.
@@ -408,11 +451,11 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    enableThinking,
 		ThinkingBudget:    thinkingBudget,
-		StreamIdleTimeout: streamIdleTimeout,
+		StreamIdleTimeout: timeouts.StreamIdleTimeout,
 		// Request retries are orchestrated at App layer.
 		MaxRetries:  0,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
-		HTTPTimeout: httpTimeout,
+		HTTPTimeout: timeouts.ResponseHeaderTimeout,
 		Provider:    "glm",
 	}
 
@@ -457,7 +500,7 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 
 	// MiniMax may have long silent reasoning/tool phases.
 	// Use relaxed defaults unless user explicitly configured stricter values.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "minimax", 120*time.Second, 5*time.Minute)
+	timeouts := EffectiveProviderTimeouts(cfg, "minimax")
 
 	anthropicConfig := AnthropicConfig{
 		APIKey:            loadedKey.Value,
@@ -468,10 +511,10 @@ func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    cfg.Model.EnableThinking,
 		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: streamIdleTimeout,
+		StreamIdleTimeout: timeouts.StreamIdleTimeout,
 		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       httpTimeout,
+		HTTPTimeout:       timeouts.ResponseHeaderTimeout,
 		Provider:          "minimax",
 	}
 
@@ -509,7 +552,7 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	// Kimi may pause longer between chunks on complex tool chains.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "kimi", 120*time.Second, 5*time.Minute)
+	timeouts := EffectiveProviderTimeouts(cfg, "kimi")
 
 	// Kimi Coding Plan models support Extended Thinking. Enable by default
 	// if the user hasn't explicitly configured it — the dim-italic reasoning
@@ -536,10 +579,10 @@ func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    enableThinking,
 		ThinkingBudget:    thinkingBudget,
-		StreamIdleTimeout: streamIdleTimeout,
+		StreamIdleTimeout: timeouts.StreamIdleTimeout,
 		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       httpTimeout,
+		HTTPTimeout:       timeouts.ResponseHeaderTimeout,
 		Provider:          "kimi",
 	}
 
@@ -603,7 +646,7 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	// DeepSeek V4 reasoning tool chains can pause 30-60s between chunks
 	// on deep analytical calls. Wider idle tolerance than GLM's default
 	// matches real-world behaviour.
-	streamIdleTimeout, httpTimeout := resolveProviderTimeouts(cfg, "deepseek", 120*time.Second, 5*time.Minute)
+	timeouts := EffectiveProviderTimeouts(cfg, "deepseek")
 
 	// Auto-enable Extended Thinking for V4 / reasoner. deepseek-chat is
 	// a plain chat model and shouldn't get a thinking budget — the API
@@ -627,10 +670,10 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    enableThinking,
 		ThinkingBudget:    thinkingBudget,
-		StreamIdleTimeout: streamIdleTimeout,
+		StreamIdleTimeout: timeouts.StreamIdleTimeout,
 		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       httpTimeout,
+		HTTPTimeout:       timeouts.ResponseHeaderTimeout,
 		Provider:          "deepseek",
 	}
 
@@ -678,7 +721,7 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 		baseURL = config.DefaultOllamaBaseURL
 	}
 
-	_, httpTimeout := resolveProviderTimeouts(cfg, "ollama", 0, config.DefaultHTTPTimeout)
+	timeouts := EffectiveProviderTimeouts(cfg, "ollama")
 
 	ollamaConfig := OllamaConfig{
 		BaseURL:     baseURL,
@@ -686,7 +729,7 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 		Model:       modelID,
 		Temperature: cfg.Model.Temperature,
 		MaxTokens:   cfg.Model.MaxOutputTokens,
-		HTTPTimeout: httpTimeout,
+		HTTPTimeout: timeouts.ResponseHeaderTimeout,
 		MaxRetries:  0, // Request retries are orchestrated at App layer.
 		RetryDelay:  cfg.API.Retry.RetryDelay,
 	}

@@ -12,7 +12,7 @@ import (
 // activity reaches handleSubAgentActivity — NOT the foreground executor's
 // OnToolStart/OnToolEnd (buildExecutionHandler), which was the ONLY place
 // touching the step heartbeat. Any delegated step whose sub-agent worked for
-// longer than stepStuckTimeout (3min, well under the 5min default step
+// longer than the historical fixed 3m watchdog (well under the model-round
 // timeout) was falsely flagged "stuck" by the plan watchdog, which pauses
 // the WHOLE plan and cancels the step's context mid-work.
 func TestHandleSubAgentActivity_TouchesStepHeartbeat(t *testing.T) {

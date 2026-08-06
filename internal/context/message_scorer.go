@@ -82,8 +82,9 @@ func NewMessageScorer() *MessageScorer {
 			"env":         true,
 			"task_output": true,
 		},
-		scoreCache:    make(map[string]cachedScore),
-		scoreCacheTTL: 15 * time.Minute,
+		semanticTimeout: client.DefaultModelRoundTimeout,
+		scoreCache:      make(map[string]cachedScore),
+		scoreCacheTTL:   15 * time.Minute,
 	}
 }
 
@@ -256,9 +257,10 @@ func (s *MessageScorer) scoreFunctionResponse(score *MessageScore, fr *genai.Fun
 	}
 }
 
-// ScoreMessages scores a batch of messages.
-// When semantic scoring is enabled, automatically uses LLM-based evaluation
-// with a background context (10s timeout). Falls back to heuristic scoring.
+// ScoreMessages scores a batch of messages. When semantic scoring is enabled,
+// the LLM call uses the live model-round budget and falls back to heuristics on
+// failure. A fixed 10s cap made this path silently degrade on slow providers
+// even after the user raised tools.model_round_timeout.
 func (s *MessageScorer) ScoreMessages(messages []*genai.Content) []MessageScore {
 	// Try semantic scoring if enabled
 	s.semanticMu.RLock()
@@ -266,9 +268,7 @@ func (s *MessageScorer) ScoreMessages(messages []*genai.Content) []MessageScore 
 	s.semanticMu.RUnlock()
 
 	if enabled && len(messages) >= 6 {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return s.ScoreMessagesWithContext(ctx, messages)
+		return s.ScoreMessagesWithContext(context.Background(), messages)
 	}
 
 	scores := make([]MessageScore, len(messages))
@@ -358,17 +358,31 @@ func (s *MessageScorer) CalculateTokenBudget(
 func (s *MessageScorer) SetSemanticClient(c client.Client) {
 	s.semanticMu.Lock()
 	defer s.semanticMu.Unlock()
-	s.semanticClient = c
-	if s.semanticTimeout == 0 {
-		s.semanticTimeout = 10 * time.Second
+	s.semanticClient, _ = client.CloneForAuxiliary(c)
+	if s.semanticTimeout <= 0 {
+		s.semanticTimeout = client.DefaultModelRoundTimeout
 	}
 }
 
 // SetSemanticTimeout sets the timeout for semantic scoring API calls.
 func (s *MessageScorer) SetSemanticTimeout(d time.Duration) {
+	if d <= 0 {
+		d = client.DefaultModelRoundTimeout
+	}
 	s.semanticMu.Lock()
 	defer s.semanticMu.Unlock()
 	s.semanticTimeout = d
+}
+
+// SemanticTimeout returns the effective cap for future semantic scoring calls.
+func (s *MessageScorer) SemanticTimeout() time.Duration {
+	s.semanticMu.RLock()
+	timeout := s.semanticTimeout
+	s.semanticMu.RUnlock()
+	if timeout <= 0 {
+		return client.DefaultModelRoundTimeout
+	}
+	return timeout
 }
 
 // hashMessage generates a SHA256 hash for a single message, used as cache key.
@@ -472,6 +486,9 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 	c := s.semanticClient
 	timeout := s.semanticTimeout
 	s.semanticMu.RUnlock()
+	if timeout <= 0 {
+		timeout = client.DefaultModelRoundTimeout
+	}
 
 	if c == nil || len(messages) < 6 {
 		return heuristicScores
@@ -552,7 +569,8 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 
 	prompt := fmt.Sprintf(semanticScoringPrompt, builder.String())
 
-	scoreCtx, cancel := context.WithTimeout(ctx, timeout)
+	scoreCtx, cancel := context.WithTimeoutCause(
+		ctx, timeout, client.NewModelRoundTimeoutError(timeout))
 	defer cancel()
 
 	stream, err := c.SendMessage(scoreCtx, prompt)
@@ -561,7 +579,7 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 		return heuristicScores
 	}
 
-	resp, err := stream.Collect()
+	resp, err := stream.CollectContext(scoreCtx)
 	if err != nil {
 		logging.Debug("semantic scoring collect failed", "error", err)
 		return heuristicScores

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/tools"
 )
 
@@ -60,8 +61,8 @@ func TestBashAgentAllowsVerificationAndTaskOutputTools(t *testing.T) {
 func TestBashAgentTimeoutLeavesRoomForLongVerificationSummary(t *testing.T) {
 	a := &Agent{Type: AgentTypeBash, maxTurns: 15}
 	a.applyAgentTypeDefaults()
-	if a.timeout != 15*time.Minute {
-		t.Fatalf("normal bash timeout = %v, want 15m", a.timeout)
+	if a.timeout != config.DefaultAgentTimeout {
+		t.Fatalf("normal bash timeout = %v, want %v", a.timeout, config.DefaultAgentTimeout)
 	}
 	a.ApplyThoroughness(tools.ThoroughnessThorough, 15)
 	if a.timeout != 35*time.Minute {

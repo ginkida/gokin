@@ -303,14 +303,16 @@ func (c *OllamaClient) streamChat(ctx context.Context, req *api.ChatRequest) (*S
 			return nil, err
 		}
 
-		logging.Warn("Ollama request failed, will retry", "attempt", attempt, "error", lastErr)
+		if attempt < c.config.MaxRetries {
+			logging.Warn("Ollama request failed, will retry", "attempt", attempt, "error", lastErr)
+		}
 	}
 
 	// Return tokens on exhausted retries
 	if rateLimiter != nil {
 		rateLimiter.ReturnTokens(1, estimatedTokens)
 	}
-	err := fmt.Errorf("max retries (%d) exceeded: %w", c.config.MaxRetries, c.wrapOllamaError(lastErr))
+	err := exhaustedRetryError(c.config.MaxRetries, c.wrapOllamaError(lastErr))
 	c.recordDirectHealthFailure(providerAttempted, err)
 	return nil, err
 }

@@ -1,8 +1,14 @@
 package router
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"gokin/internal/client"
+	"gokin/internal/testkit"
 )
 
 // TestSplitByAndPattern covers the "X and Y" / "X и Y" conjunction splitter —
@@ -347,5 +353,25 @@ func TestSplitByAndPattern_ProseManyConjunctsRejected(t *testing.T) {
 	prose := "the parser and the lexer and the emitter and the linker and the loader and the runtime"
 	if got := splitByAndPattern(prose); got != nil {
 		t.Fatalf("prose with %d conjuncts must not split, got %v", len(got), got)
+	}
+}
+
+func TestLLMDecomposerPreservesCallerTimeoutOnSilentClose(t *testing.T) {
+	mc := testkit.NewMockClient().EnqueueScript(testkit.ResponseScript{
+		DelayBeforeFirstChunk: time.Hour,
+	})
+	ta := NewTaskAnalyzer(4, 7)
+	ta.SetLLMClient(mc)
+	cause := client.NewModelRoundTimeoutError(25 * time.Millisecond)
+	ctx, cancel := context.WithTimeoutCause(context.Background(), 25*time.Millisecond, cause)
+	defer cancel()
+
+	_, err := ta.decomposeWithLLM(ctx, "fix tests and update documentation")
+	if !errors.Is(err, client.ErrModelRoundTimeout) {
+		t.Fatalf("decomposeWithLLM() error = %v, want caller's model-round timeout", err)
+	}
+	telemetry := client.DetectFailureTelemetry(err)
+	if telemetry.Timeout != 25*time.Millisecond {
+		t.Fatalf("decomposer telemetry = %#v, want 25ms", telemetry)
 	}
 }

@@ -28,6 +28,12 @@ func (a *App) scheduleRateLimitAutoRetry(message string) (attempt int, delay tim
 
 	a.rateLimitRetryMu.Lock()
 	defer a.rateLimitRetryMu.Unlock()
+	// Match auto-resume's zero-value contract. Builder initializes this map,
+	// while embedded/headless Apps may not; a provider 429 must remain a typed
+	// recoverable failure instead of becoming a masked nil-map panic.
+	if a.rateLimitRetryCount == nil {
+		a.rateLimitRetryCount = make(map[string]int)
+	}
 
 	current := a.rateLimitRetryCount[key]
 	if current >= maxAutoRateLimitRetries {

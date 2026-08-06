@@ -682,7 +682,7 @@ func (r *Runner) ResumeLastCheckpoint(ctx context.Context) (string, error) {
 func detachedResumeRunContext(ctx context.Context, agent *Agent) (context.Context, context.CancelFunc) {
 	base := context.WithoutCancel(ctx)
 	if agent != nil {
-		if timeout := agent.GetTimeout(); timeout > 0 {
+		if timeout := agent.EffectiveRunTimeout(); timeout > 0 {
 			return context.WithTimeout(base, timeout)
 		}
 	}

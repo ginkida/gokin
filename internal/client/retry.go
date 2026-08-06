@@ -3,12 +3,24 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// exhaustedRetryError keeps a zero local retry budget honest. Provider
+// clients are intentionally constructed with MaxRetries=0 when App owns the
+// retry loop; wrapping the first failure as "max retries (0) exceeded" made it
+// look as if configured retries were disabled and hid the useful root error.
+func exhaustedRetryError(maxRetries int, lastErr error) error {
+	if maxRetries <= 0 || lastErr == nil {
+		return lastErr
+	}
+	return fmt.Errorf("max retries (%d) exceeded: %w", maxRetries, lastErr)
+}
 
 // RetryConfig holds retry configuration used across all client implementations.
 type RetryConfig struct {

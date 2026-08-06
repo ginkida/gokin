@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"gokin/internal/config"
 )
 
 func TestAgentResultWaitTimeoutCoversThoroughAgentBudget(t *testing.T) {
@@ -32,9 +34,24 @@ func TestAgentResultWaitTimeoutHonorsLongerExplicitRunDeadline(t *testing.T) {
 	}
 }
 
+func TestAgentResultWaitTimeoutCoversRaisedNormalModelRoundBudgetBeforeRunStarts(t *testing.T) {
+	a := &Agent{
+		ID:                "raised-normal-agent",
+		timeout:           config.DefaultAgentTimeout,
+		modelRoundTimeout: 30 * time.Minute,
+	}
+	runner := &Runner{agents: map[string]*Agent{a.ID: a}}
+
+	want := 30*time.Minute + config.DefaultAgentTimeoutHeadroom + agentResultWaitGrace
+	if got := runner.agentResultWaitTimeout(a.ID); got != want {
+		t.Fatalf("pre-run result wait timeout = %v, want %v", got, want)
+	}
+}
+
 func TestAgentResultWaitTimeoutHasFallbackForUnknownAgent(t *testing.T) {
 	runner := &Runner{agents: make(map[string]*Agent)}
-	if got := runner.agentResultWaitTimeout("missing"); got != 15*time.Minute {
-		t.Fatalf("unknown-agent wait timeout = %v, want 15m", got)
+	want := config.DefaultAgentTimeout + agentResultWaitGrace
+	if got := runner.agentResultWaitTimeout("missing"); got != want {
+		t.Fatalf("unknown-agent wait timeout = %v, want %v", got, want)
 	}
 }

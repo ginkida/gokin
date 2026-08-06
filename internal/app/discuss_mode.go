@@ -40,7 +40,7 @@ func (a *App) beginTurnIntent(message string) {
 	if a == nil {
 		return
 	}
-	if a.program == nil { // headless / eval / non-interactive
+	if !a.hasProgram() { // headless / eval / non-interactive
 		a.turnDiscuss.Store(false)
 		a.discussConfirmed.Store(false)
 		return
@@ -89,7 +89,7 @@ func (a *App) actionConfirmPrompt(ctx context.Context, toolName, target string) 
 	}
 	// No interactive program (headless/eval): act (symmetric with the dir-grant
 	// and permission auto-allow). The gate is a foreground UX feature.
-	if a.program == nil {
+	if !a.hasProgram() {
 		a.discussConfirmed.Store(true)
 		return true, nil
 	}

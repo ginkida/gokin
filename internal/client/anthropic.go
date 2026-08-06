@@ -1301,10 +1301,12 @@ func (c *AnthropicClient) streamRequest(ctx context.Context, requestBody map[str
 			return nil, err
 		}
 
-		logging.Warn("request failed, will retry", "attempt", attempt, "error", err, "status", lastStatusCode)
+		if attempt < c.config.MaxRetries {
+			logging.Warn("request failed, will retry", "attempt", attempt, "error", err, "status", lastStatusCode)
+		}
 	}
 
-	err := fmt.Errorf("max retries (%d) exceeded: %w", c.config.MaxRetries, lastErr)
+	err := exhaustedRetryError(c.config.MaxRetries, lastErr)
 	c.recordDirectHealthFailure(providerAttempted, err)
 	return nil, err
 }
@@ -1522,7 +1524,10 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	c.mu.RLock()
 	enableThinkingSnap := c.config.EnableThinking
 	providerSnap := c.config.Provider
+	modelSnap := c.config.Model
 	c.mu.RUnlock()
+	silentThinkingSnap := enableThinkingSnap ||
+		(strings.EqualFold(providerSnap, "kimi") && kimiAlwaysOnReasoningModel(modelSnap))
 
 	// Process stream in goroutine
 	go func() {
@@ -1624,7 +1629,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					}
 					if statusCb != nil {
 						// Distinguish thinking phase from generic idle
-						if !contentReceived && enableThinkingSnap {
+						if !contentReceived && silentThinkingSnap {
 							statusCb.OnThinkingIdle(lastWarningAt, providerSnap)
 						} else {
 							statusCb.OnStreamIdle(lastWarningAt)
@@ -1639,11 +1644,14 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					// If thinking is enabled and no content received yet, the model
 					// is likely in a silent reasoning phase. Extend the timeout once
 					// to avoid killing the request prematurely.
-					if !contentReceived && !initialTimeoutExtended && enableThinkingSnap {
+					if !contentReceived && !initialTimeoutExtended && silentThinkingSnap {
 						initialTimeoutExtended = true
+						extension := thinkingIdleExtension(ctx, streamIdleTimeout)
 						logging.Info("extending idle timeout for thinking model — no content yet",
-							"provider", providerSnap, "original_timeout", streamIdleTimeout)
-						idleTimer.Reset(streamIdleTimeout)
+							"provider", providerSnap,
+							"original_timeout", streamIdleTimeout,
+							"extension", extension)
+						idleTimer.Reset(extension)
 						if statusCb != nil {
 							statusCb.OnThinkingIdle(streamIdleTimeout, providerSnap)
 						}
@@ -1903,6 +1911,33 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		Chunks: chunks,
 		Done:   done,
 	}, nil
+}
+
+const thinkingDeadlineDeliveryGrace = 100 * time.Millisecond
+
+// thinkingIdleExtension lets the authoritative parent/model-round deadline win
+// during a completely silent initial reasoning phase. Once any SSE data is
+// received, the ordinary per-gap stream-idle watchdog remains unchanged. A
+// small delivery grace avoids racing the idle timer against ctx.Done at the
+// same instant; direct client calls without a deadline retain the historical
+// one-extra-idle-window fallback.
+func thinkingIdleExtension(ctx context.Context, fallback time.Duration) time.Duration {
+	if ctx == nil {
+		return fallback
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fallback
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return time.Nanosecond
+	}
+	maxDuration := time.Duration(1<<63 - 1)
+	if remaining > maxDuration-thinkingDeadlineDeliveryGrace {
+		return remaining
+	}
+	return remaining + thinkingDeadlineDeliveryGrace
 }
 
 // processStreamEvent converts an Anthropic stream event to a ResponseChunk.

@@ -26,6 +26,7 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/git"
+	"gokin/internal/harness"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
@@ -34,6 +35,7 @@ import (
 	"gokin/internal/permission"
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
+	"gokin/internal/repl"
 	"gokin/internal/router"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
@@ -41,6 +43,17 @@ import (
 	"gokin/internal/undo"
 	"gokin/internal/watcher"
 )
+
+// hybridRuntime is the narrow lifecycle boundary App owns. Keeping it as an
+// interface makes auto-mode wiring testable without weakening repl.NewManager's
+// production-only secure-backend requirement.
+type hybridRuntime interface {
+	Execute(context.Context, string) (repl.Result, error)
+	Reset(context.Context) error
+	Stats() repl.Stats
+	SetCallHandler(repl.CallHandler)
+	Close() error
+}
 
 var errConfigConflict = errors.New("configuration changed while this update was being prepared; retry the action")
 
@@ -263,6 +276,12 @@ type App struct {
 	// codeIntelProvider owns the lazy, workspace-scoped gopls process. It is
 	// separate from user MCP servers and must be closed explicitly.
 	codeIntelProvider codeintel.ReadOnlyProvider
+	// replManager owns the foreground session's isolated Python kernel. It is
+	// never shared with cloned sub-agent registries.
+	replManager hybridRuntime
+	// harnessStore owns bounded session prompt patches plus project-scoped
+	// episodic memory and inert skill proposals. It cannot mutate policy.
+	harnessStore *harness.Store
 
 	// Task router for intelligent task routing
 	taskRouter *router.Router
@@ -2531,16 +2550,54 @@ func (a *App) GetJournalReport() string {
 	sb.WriteString("Execution journal (latest 30):\n")
 	for _, e := range entries {
 		fmt.Fprintf(&sb, "- %s  %s", e.Timestamp.Format("15:04:05"), e.Event)
-		if len(e.Details) > 0 {
-			if p, ok := e.Details["message_preview"].(string); ok && p != "" {
-				fmt.Fprintf(&sb, " | %s", p)
-			} else if r, ok := e.Details["reason"].(string); ok && r != "" {
-				fmt.Fprintf(&sb, " | %s", r)
-			}
+		if detail := journalEntryDisplayDetail(e); detail != "" {
+			fmt.Fprintf(&sb, " | %s", detail)
 		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// journalEntryDisplayDetail keeps /journal useful for failure diagnosis while
+// avoiding needless repetition of user prompts. Structured timeout/recovery
+// metadata wins over message_preview; older events gracefully fall back to the
+// fields they already stored.
+func journalEntryDisplayDetail(entry JournalEntry) string {
+	if len(entry.Details) == 0 {
+		return ""
+	}
+	if entry.Event == "request_failed" || entry.Event == "auto_resume_scheduled" ||
+		entry.Event == "rate_limit_auto_retry_scheduled" {
+		reason, _ := entry.Details["failure_reason"].(string)
+		if reason == "" {
+			reason, _ = entry.Details["reason"].(string)
+		}
+		if reason != "" {
+			parts := []string{reason}
+			if provider, _ := entry.Details["provider"].(string); provider != "" {
+				parts = append(parts, provider)
+			}
+			if timeout, _ := entry.Details["timeout"].(string); timeout != "" && timeout != "0s" {
+				parts = append(parts, timeout)
+			}
+			if partial, _ := entry.Details["partial"].(bool); partial {
+				parts = append(parts, "partial response")
+			}
+			if attempt, ok := entry.Details["attempt"]; ok {
+				label := fmt.Sprintf("attempt %v", attempt)
+				if maximum, maxOK := entry.Details["max_attempts"]; maxOK {
+					label += fmt.Sprintf("/%v", maximum)
+				}
+				parts = append(parts, label)
+			}
+			return strings.Join(parts, " · ")
+		}
+	}
+	if preview, _ := entry.Details["message_preview"].(string); preview != "" {
+		return preview
+	}
+	reason, _ := entry.Details["reason"].(string)
+	return reason
 }
 
 // GetRecoveryReport returns the latest persisted recovery snapshot.
@@ -2851,6 +2908,16 @@ func (a *App) sendProgramMessage(msg tea.Msg) {
 		}
 	}()
 	program.Send(msg)
+}
+
+// hasProgram reports whether interactive Bubble Tea delivery is available.
+// All production reads of a.program must go through this helper: Run installs
+// the pointer concurrently with worker callbacks, and programMu—not a.mu—is
+// the ownership lock for that lifecycle state.
+func (a *App) hasProgram() bool {
+	a.programMu.RLock()
+	defer a.programMu.RUnlock()
+	return a.program != nil
 }
 
 // safeSendToProgram safely sends a message to the Bubble Tea program from a
@@ -3290,6 +3357,7 @@ func (a *App) CommitMCPConfigSnapshot(cfg *config.Config) {
 		HintsEnabled:        merged.UI.HintsEnabled,
 		ShowToolCalls:       merged.UI.ShowToolCalls,
 		ModelName:           merged.Model.Name,
+		ModelRoundTimeout:   merged.Tools.ModelRoundTimeout,
 	}
 	a.mu.Unlock()
 	a.safeSendToProgram(msg)
@@ -3441,6 +3509,7 @@ func (a *App) CommitCredentialConfigSnapshot(cfg *config.Config) error {
 		HintsEnabled:        merged.UI.HintsEnabled,
 		ShowToolCalls:       merged.UI.ShowToolCalls,
 		ModelName:           merged.Model.Name,
+		ModelRoundTimeout:   merged.Tools.ModelRoundTimeout,
 	}
 	originalCandidate.SetSnapshotRevision(msg.Revision)
 	a.mu.Unlock()
@@ -4131,6 +4200,83 @@ func (a *App) ApplyUIConfigForSetting(cfg *config.Config, key string) error {
 	return a.applyUIConfigForSetting(cfg, strings.ToLower(strings.TrimSpace(key)))
 }
 
+// ApplyModelRoundTimeout commits the local model-round watchdog without
+// flushing the provider pool, rebuilding the model client, or refreshing token
+// counts. Only this scalar is merged into the latest authoritative config, so a
+// candidate prepared before an unrelated setting commit cannot overwrite it.
+// Existing in-flight provider rounds keep their original context deadline;
+// foreground and sub-agent loops use the new value on their next round.
+func (a *App) ApplyModelRoundTimeout(cfg *config.Config) (persisted bool, err error) {
+	if cfg == nil {
+		return false, fmt.Errorf("cannot apply nil model round timeout config")
+	}
+	desired := cfg.Tools.ModelRoundTimeout
+	if desired <= 0 {
+		desired = config.DefaultModelRoundTimeout
+	}
+
+	a.mu.Lock()
+	merged := a.config.Clone()
+	if merged == nil {
+		merged = config.DefaultConfig()
+	}
+	merged.Tools.ModelRoundTimeout = desired
+	timeoutConfigPath := merged.ModelRoundTimeoutConfigPath()
+	saveErr := merged.SaveModelRoundTimeout(desired)
+	if saveErr != nil {
+		logging.Warn("failed to save model round timeout", "error", saveErr, "path", timeoutConfigPath)
+	}
+	merged.ClearSnapshotRevision()
+	a.config = merged
+	if a.executor != nil {
+		a.executor.SetModelRoundTimeout(desired)
+	}
+	if a.agentRunner != nil {
+		a.agentRunner.SetModelRoundTimeout(desired)
+	}
+	if a.metaAgent != nil {
+		a.metaAgent.SetModelRoundTimeout(desired)
+	}
+	if a.contextManager != nil {
+		a.contextManager.SetModelRoundTimeout(desired)
+	}
+	if a.sessionMemory != nil {
+		a.sessionMemory.SetModelRoundTimeout(desired)
+	}
+	if merged.Plan.PlanningTimeout <= 0 {
+		if a.treePlanner != nil {
+			a.treePlanner.SetPlanningTimeout(desired)
+		}
+		if a.agentRunner != nil {
+			a.agentRunner.SetPlanningTimeout(desired)
+		}
+	}
+	msg := ui.ConfigUpdateMsg{
+		Revision:            a.nextConfigRevisionLocked(),
+		Settings:            a.settingToggleSnapshotLocked(),
+		PermissionsEnabled:  merged.Permission.Enabled,
+		SandboxEnabled:      merged.Tools.Bash.Sandbox,
+		PlanningModeEnabled: a.planningModeEnabled,
+		CompactMode:         merged.UI.CompactMode,
+		ReducedMotion:       merged.UI.ReducedMotion,
+		ShowTokenUsage:      merged.UI.ShowTokenUsage,
+		HintsEnabled:        merged.UI.HintsEnabled,
+		ShowToolCalls:       merged.UI.ShowToolCalls,
+		ModelName:           merged.Model.Name,
+		ModelRoundTimeout:   desired,
+	}
+	a.mu.Unlock()
+
+	a.safeSendToProgram(msg)
+	if saveErr != nil {
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: fmt.Sprintf("Timeout applied for this session but NOT saved to %s — it will revert next launch", timeoutConfigPath),
+		})
+	}
+	return saveErr == nil, nil
+}
+
 func (a *App) applyUIConfigForSetting(cfg *config.Config, key string) error {
 	if cfg == nil {
 		return fmt.Errorf("cannot apply nil UI config")
@@ -4356,6 +4502,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	if a.executor != nil {
 		a.executor.SetClient(newClient)
 		a.executor.SetToolTimeout(a.config.Tools.Timeout)
+		a.executor.SetModelRoundTimeout(a.config.Tools.ModelRoundTimeout)
 		// The executor caches the active context window for in-loop pruning.
 		// Builder initializes it at boot, but /model and /provider replace the
 		// model without rebuilding the executor. Keep the pruning threshold in
@@ -4400,6 +4547,12 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.agentRunner.SetClient(newClient)
 		a.agentRunner.SetPlanningModeEnabled(requestedPlanMode)
 		a.agentRunner.SetContextConfig(&a.config.Context)
+		a.agentRunner.SetModelRoundTimeout(a.config.Tools.ModelRoundTimeout)
+		planningTimeout := a.config.Plan.PlanningTimeout
+		if planningTimeout <= 0 {
+			planningTimeout = a.config.Tools.ModelRoundTimeout
+		}
+		a.agentRunner.SetPlanningTimeout(planningTimeout)
 		a.agentRunner.SetWorkspaceIsolationEnabled(a.config.Plan.WorkspaceIsolation)
 		a.agentRunner.SetDoneGateConfig(a.config.DoneGate)
 		a.agentRunner.SetThinkingMode(a.config.Model.ThinkingMode)
@@ -4410,11 +4563,22 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 			a.agentRunner.SetWorkspaceReviewHandler(nil)
 		}
 	}
+	if a.metaAgent != nil {
+		a.metaAgent.SetModelRoundTimeout(a.config.Tools.ModelRoundTimeout)
+	}
+	if a.treePlanner != nil {
+		planningTimeout := a.config.Plan.PlanningTimeout
+		if planningTimeout <= 0 {
+			planningTimeout = a.config.Tools.ModelRoundTimeout
+		}
+		a.treePlanner.SetPlanningTimeout(planningTimeout)
+	}
 
 	// 6. Update context manager
 	if a.contextManager != nil {
 		a.contextManager.SetConfig(&a.config.Context)
 		a.contextManager.SetClient(newClient)
+		a.contextManager.SetModelRoundTimeout(a.config.Tools.ModelRoundTimeout)
 	}
 
 	// 6a. Update the task router's client. Without this, routed requests kept
@@ -4442,6 +4606,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	// /settings or /set toggle of `sessionmemory` takes effect THIS session — no
 	// restart — which is what lets that toggle honestly advertise live=true.
 	if a.sessionMemory != nil {
+		a.sessionMemory.SetModelRoundTimeout(a.config.Tools.ModelRoundTimeout)
 		a.sessionMemory.SetConfig(appcontext.SessionMemoryConfig{
 			Enabled:                 a.config.SessionMemory.Enabled,
 			MinTokensToInit:         a.config.SessionMemory.MinTokensToInit,
@@ -4536,6 +4701,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		HintsEnabled:        a.config.UI.HintsEnabled,
 		ShowToolCalls:       a.config.UI.ShowToolCalls,
 		ModelName:           a.config.Model.Name,
+		ModelRoundTimeout:   a.config.Tools.ModelRoundTimeout,
 	}
 
 	// 9. Update search cache
@@ -4854,6 +5020,10 @@ func (a *App) buildModelEnhancement() string {
 		enhancement += "\n\n**Flash Model Note:** Keep responses detailed with specific file:line references despite speed optimizations."
 	}
 
+	if a.replManager != nil {
+		enhancement += "\n\n**Hybrid Execution:** A persistent read-only Python `repl_exec` is available for multi-step repository analysis, aggregation, and local computation. Keep large intermediate data in Python variables/artifacts. `rlm(...)` delegates bounded work; `rlm.harness` provides permissioned session adjustments, episodic memory, and inert skill proposals. Use ordinary structured tools for every mutation or external action."
+	}
+
 	// Ollama models: per-model prompting + tool calling fallback
 	if a.config.API.Backend == "ollama" {
 		// Add per-model prompt enhancement based on model profile
@@ -5149,7 +5319,7 @@ func (a *App) sendAgentTreeUpdate() {
 // panel 100% dead UI: auto-show, Ctrl+A, and two rounds of polish
 // (v0.91.0 linger, v0.100.52 running-node fields) were unreachable.
 func (a *App) sendAgentTreeUpdateFrom(coord *agent.Coordinator) {
-	if a.program == nil || coord == nil {
+	if !a.hasProgram() || coord == nil {
 		return
 	}
 

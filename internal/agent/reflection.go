@@ -31,9 +31,11 @@ type PredictedFile struct {
 type Reflector struct {
 	patterns               []ErrorPattern
 	errorStore             *memory.ErrorStore // Persistent error learning
-	client                 client.Client      // For LLM-based semantic analysis
-	enableSemanticAnalysis bool               // Whether to use LLM for unmatched errors
 	predictor              PredictorInterface // For file predictions on file_not_found errors
+	semanticMu             sync.RWMutex
+	client                 client.Client // For LLM-based semantic analysis
+	enableSemanticAnalysis bool          // Whether to use LLM for unmatched errors
+	semanticTimeout        time.Duration
 	semanticCacheMu        sync.Mutex
 	semanticCache          map[string]*Reflection
 }
@@ -80,18 +82,47 @@ func NewReflector() *Reflector {
 	return &Reflector{
 		patterns:               defaultErrorPatterns(),
 		enableSemanticAnalysis: true,
+		semanticTimeout:        client.DefaultModelRoundTimeout,
 		semanticCache:          make(map[string]*Reflection),
 	}
 }
 
 // SetClient sets the LLM client for semantic analysis.
 func (r *Reflector) SetClient(c client.Client) {
-	r.client = c
+	auxiliary, _ := client.CloneForAuxiliary(c)
+	r.semanticMu.Lock()
+	r.client = auxiliary
+	r.semanticMu.Unlock()
 }
 
 // SetSemanticAnalysis enables or disables LLM-based error analysis.
 func (r *Reflector) SetSemanticAnalysis(enabled bool) {
+	r.semanticMu.Lock()
+	defer r.semanticMu.Unlock()
 	r.enableSemanticAnalysis = enabled
+}
+
+// SetSemanticTimeout updates the cap for future semantic error-analysis calls.
+// The agent wires this to the live model-round setting so /timeout applies to
+// auxiliary recovery calls as well as foreground generation.
+func (r *Reflector) SetSemanticTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = client.DefaultModelRoundTimeout
+	}
+	r.semanticMu.Lock()
+	r.semanticTimeout = timeout
+	r.semanticMu.Unlock()
+}
+
+// SemanticTimeout returns the effective semantic error-analysis cap.
+func (r *Reflector) SemanticTimeout() time.Duration {
+	r.semanticMu.RLock()
+	timeout := r.semanticTimeout
+	r.semanticMu.RUnlock()
+	if timeout <= 0 {
+		return client.DefaultModelRoundTimeout
+	}
+	return timeout
 }
 
 // SetErrorStore sets the persistent error store for learning.
@@ -185,9 +216,8 @@ func (r *Reflector) Reflect(ctx context.Context, toolName string, args map[strin
 	}
 
 	// For unmatched errors, try semantic analysis with LLM
-	if r.enableSemanticAnalysis && r.client != nil {
-		semanticReflection := r.semanticAnalyze(ctx, toolName, args, errorMsg)
-		if semanticReflection != nil && semanticReflection.Category != "unknown" {
+	if semanticReflection := r.semanticAnalyze(ctx, toolName, args, errorMsg); semanticReflection != nil {
+		if semanticReflection.Category != "unknown" {
 			// Append learned context if available
 			if reflection.LearnedContext != "" {
 				semanticReflection.LearnedContext = reflection.LearnedContext
@@ -224,8 +254,16 @@ type SemanticAnalysisResult struct {
 // Results are cached by tool+error fingerprint to avoid repeated API calls
 // for the same class of error within a session.
 func (r *Reflector) semanticAnalyze(ctx context.Context, toolName string, args map[string]any, errorMsg string) *Reflection {
-	if r.client == nil {
+	r.semanticMu.RLock()
+	enabled := r.enableSemanticAnalysis
+	c := r.client
+	timeout := r.semanticTimeout
+	r.semanticMu.RUnlock()
+	if !enabled || c == nil {
 		return nil
+	}
+	if timeout <= 0 {
+		timeout = client.DefaultModelRoundTimeout
 	}
 
 	cacheKey := toolName + ":" + errorMsg
@@ -239,7 +277,8 @@ func (r *Reflector) semanticAnalyze(ctx context.Context, toolName string, args m
 	}
 	r.semanticCacheMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeoutCause(
+		ctx, timeout, client.NewModelRoundTimeoutError(timeout))
 	defer cancel()
 
 	// Build analysis prompt
@@ -261,26 +300,24 @@ Respond with a JSON object containing:
 
 Be concise and practical. Focus on actionable solutions.`
 
-	resp, err := r.client.SendMessage(ctx, prompt)
+	resp, err := c.SendMessage(ctx, prompt)
 	if err != nil {
 		logging.Debug("semantic analysis failed", "error", err)
 		return nil
 	}
 
-	// Collect the response
-	var fullResponse strings.Builder
-	for chunk := range resp.Chunks {
-		if chunk.Error != nil {
-			logging.Debug("semantic analysis stream error", "error", chunk.Error)
-			break
-		}
-		if chunk.Text != "" {
-			fullResponse.WriteString(chunk.Text)
-		}
+	// Do not trust a syntactically complete prefix from an unterminated stream.
+	// A provider can close Chunks while cancellation races its terminal error;
+	// CollectContext preserves the typed timeout/partial cause instead of letting
+	// that prefix drive and populate the automatic-recovery cache.
+	collected, err := resp.CollectContext(ctx)
+	if err != nil {
+		logging.Debug("semantic analysis stream error", "error", err)
+		return nil
 	}
 
 	// Parse JSON from response
-	responseText := fullResponse.String()
+	responseText := collected.Text
 	result, err := r.parseSemanticResult(responseText)
 	if err != nil {
 		logging.Debug("failed to parse semantic analysis result", "error", err, "response", responseText)

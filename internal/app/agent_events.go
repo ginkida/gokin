@@ -319,19 +319,19 @@ type tuiPresenter struct {
 }
 
 func (p *tuiPresenter) StreamText(text string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.StreamTextMsg(text))
 	}
 }
 
 func (p *tuiPresenter) StreamThinking(text string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.StreamThinkingMsg(text))
 	}
 }
 
 func (p *tuiPresenter) StreamTokenEstimate(estimatedTokens int) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		if p.app.contextManager != nil {
 			p.app.contextManager.ObserveOutputEstimate(estimatedTokens)
 		}
@@ -342,13 +342,13 @@ func (p *tuiPresenter) StreamTokenEstimate(estimatedTokens int) {
 }
 
 func (p *tuiPresenter) ToolStart(name string, args map[string]any) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.ToolCallMsg{Name: name, Args: args})
 	}
 }
 
 func (p *tuiPresenter) ToolEnd(name string, args map[string]any, result tools.ToolResult) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		msg := ui.ToolResultMsg{
 			Name:    name,
 			Args:    args,
@@ -375,13 +375,13 @@ func (p *tuiPresenter) ToolEnd(name string, args map[string]any, result tools.To
 }
 
 func (p *tuiPresenter) ToolProgress(name string, elapsed time.Duration, currentStep string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.ToolProgressMsg{Name: name, Elapsed: elapsed, Progress: -1, CurrentStep: currentStep})
 	}
 }
 
 func (p *tuiPresenter) ToolDetailedProgress(name string, progress float64, currentStep string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.ToolProgressMsg{
 			Name:        name,
 			Progress:    progress,
@@ -391,13 +391,13 @@ func (p *tuiPresenter) ToolDetailedProgress(name string, progress float64, curre
 }
 
 func (p *tuiPresenter) ToolError(err error) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.ErrorMsg(err))
 	}
 }
 
 func (p *tuiPresenter) Warning(warning string) {
-	if p.app.program == nil {
+	if !p.app.hasProgram() {
 		return
 	}
 
@@ -421,7 +421,7 @@ func (p *tuiPresenter) Warning(warning string) {
 }
 
 func (p *tuiPresenter) InlineDiff(filePath, oldText, newText string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.InlineDiffMsg{
 			FilePath: filePath,
 			OldText:  oldText,
@@ -431,7 +431,7 @@ func (p *tuiPresenter) InlineDiff(filePath, oldText, newText string) {
 }
 
 func (p *tuiPresenter) LoopIteration(iteration, toolsUsed int) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.LoopIterationMsg{
 			Iteration: iteration,
 			ToolsUsed: toolsUsed,
@@ -440,7 +440,7 @@ func (p *tuiPresenter) LoopIteration(iteration, toolsUsed int) {
 }
 
 func (p *tuiPresenter) TokenUsage(inputTokens, maxTokens int, percentUsed float64) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		outputTokens := 0
 		isEstimate := false
 		if p.app.contextManager != nil {
@@ -461,7 +461,7 @@ func (p *tuiPresenter) TokenUsage(inputTokens, maxTokens int, percentUsed float6
 }
 
 func (p *tuiPresenter) FilePeek(filePath, title, content, action string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.FilePeekMsg{
 			FilePath: filePath,
 			Title:    title,
@@ -472,7 +472,7 @@ func (p *tuiPresenter) FilePeek(filePath, title, content, action string) {
 }
 
 func (p *tuiPresenter) MemoryNotify(message string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.LearningInsightMsg{Message: message})
 	}
 }
@@ -543,8 +543,8 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 		// signal that the step is making progress. Before this, ONLY the
 		// foreground executor's OnToolStart (buildExecutionHandler) touched
 		// the heartbeat, so any delegated step whose sub-agent worked for
-		// longer than stepStuckTimeout (3min, well under the 5min default
-		// step timeout) was falsely flagged "stuck" by the plan watchdog,
+		// longer than the old fixed 3m watchdog (well under the model-round
+		// budget) was falsely flagged "stuck" by the plan watchdog,
 		// which pauses the WHOLE plan and cancels the step's context
 		// mid-work.
 		a.touchStepHeartbeat()
@@ -598,7 +598,7 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 }
 
 func (p *tuiPresenter) SubAgentActivity(agentID, agentType, prompt, toolName string, args map[string]any, status string, success bool, summary string) {
-	if p.app.program != nil {
+	if p.app.hasProgram() {
 		p.app.safeSendToProgram(ui.SubAgentActivityMsg{
 			AgentID:   agentID,
 			AgentType: agentType,

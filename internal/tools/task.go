@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/config"
+
 	"google.golang.org/genai"
 )
 
@@ -75,7 +77,8 @@ type TaskTool struct {
 
 // taskForegroundTimeout mirrors the agent package's per-type normal/quick/
 // thorough wall-clock budgets. The task tool cannot import agent without an
-// import cycle, but its executor context must outlive the child-owned timeout;
+// import cycle, but shared normal defaults come from config and its executor
+// context must outlive the child-owned timeout;
 // otherwise the generic two-minute tool deadline cancels a healthy foreground
 // sub-agent long before it can finish and persist its partial result.
 func taskForegroundTimeout(args map[string]any) time.Duration {
@@ -84,46 +87,62 @@ func taskForegroundTimeout(args map[string]any) time.Duration {
 	}
 	if resume := strings.TrimSpace(GetStringDefault(args, "resume", "")); resume != "" {
 		// A restored agent may be any type/thoroughness. Match the largest
-		// built-in budget (thorough bash) rather than guessing from absent args.
-		return 35 * time.Minute
+		// built-in budget rather than guessing from absent args.
+		return config.DefaultThoroughAgentTimeout
 	}
 
 	agentType := strings.TrimSpace(GetStringDefault(args, "subagent_type", ""))
 	thoroughness := ParseThoroughness(GetStringDefault(args, "thoroughness", ""))
+	if thoroughness == ThoroughnessThorough {
+		return config.DefaultThoroughAgentTimeout
+	}
 	switch agentType {
 	case "bash":
 		switch thoroughness {
 		case ThoroughnessQuick:
 			return 3 * time.Minute
-		case ThoroughnessThorough:
-			return 35 * time.Minute
 		default:
-			return 15 * time.Minute
+			return config.DefaultAgentTimeout
 		}
 	case "explore":
 		switch thoroughness {
 		case ThoroughnessQuick:
 			return time.Minute
-		case ThoroughnessThorough:
-			return 5 * time.Minute
 		default:
-			return 10 * time.Minute
+			return config.DefaultAgentTimeout
 		}
 	case "plan":
-		if thoroughness == ThoroughnessQuick {
+		switch thoroughness {
+		case ThoroughnessQuick:
 			return 2 * time.Minute
+		default:
+			return config.DefaultAgentTimeout
 		}
-		return 10 * time.Minute
 	case "general":
-		if thoroughness == ThoroughnessQuick {
+		switch thoroughness {
+		case ThoroughnessQuick:
 			return 2 * time.Minute
+		default:
+			return config.DefaultAgentTimeout
 		}
-		return 10 * time.Minute
 	default:
-		// Guide and dynamic agent types inherit config.DefaultAgentTimeout,
-		// currently ten minutes.
-		return 10 * time.Minute
+		// Guide and dynamic agent types inherit the shared normal budget.
+		return config.DefaultAgentTimeout
 	}
+}
+
+// taskNeedsModelRoundHeadroom reports whether the outer executor deadline must
+// follow a runtime-raised model-round cap. Quick is the only deliberate
+// stricter ceiling; normal, thorough, and resumed tasks need enough room for at
+// least one complete provider response.
+func taskNeedsModelRoundHeadroom(args map[string]any) bool {
+	if GetBoolDefault(args, "run_in_background", false) {
+		return false
+	}
+	if strings.TrimSpace(GetStringDefault(args, "resume", "")) != "" {
+		return true
+	}
+	return ParseThoroughness(GetStringDefault(args, "thoroughness", "")) != ThoroughnessQuick
 }
 
 // NewTaskTool creates a new TaskTool instance.

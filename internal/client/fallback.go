@@ -559,6 +559,46 @@ func (fc *FallbackClient) WithModel(modelName string) Client {
 	return fb
 }
 
+// cloneForSession isolates every provider child in the fallback chain. Without
+// this method CloneForAuxiliary treated FallbackClient as unsupported even
+// though every built-in child supports a transport-sharing session clone,
+// causing summaries/reflection to share foreground tools, thinking and
+// callbacks. Prefer cloneForSession over WithModel here so each auxiliary
+// component reuses the provider's HTTP connection pool instead of opening a
+// fresh transport per fallback child.
+func (fc *FallbackClient) cloneForSession() Client {
+	fc.mu.RLock()
+	clients := append([]Client(nil), fc.clients...)
+	providers := append([]string(nil), fc.providers...)
+	current := fc.current
+	fc.mu.RUnlock()
+
+	clones := make([]Client, len(clients))
+	for i, child := range clients {
+		clone, err := cloneClientForSession(child)
+		if err != nil {
+			// Third-party/test clients may not implement the private clone
+			// contract. Preserve FallbackClient's historical WithModel clone
+			// behavior for them while built-in providers take the efficient path.
+			clone = child.WithModel(child.GetModel())
+		}
+		if isNilClient(clone) || sameClientInstance(clone, child) {
+			// Fail closed: returning a fallback wrapper around even one shared
+			// child would let auxiliary sanitization clear foreground state.
+			return nil
+		}
+		disableDirectHealthTracking(clone)
+		clones[i] = clone
+	}
+	clone, err := NewFallbackClient(clones, providers)
+	if err != nil {
+		logging.Debug("FallbackClient.cloneForSession failed", "error", err)
+		return nil
+	}
+	clone.setCurrent(current)
+	return clone
+}
+
 // GetRawClient returns the current active client's raw client.
 func (fc *FallbackClient) GetRawClient() any {
 	idx := fc.getCurrent()
@@ -581,10 +621,6 @@ func (fc *FallbackClient) Close() error {
 
 // SetStatusCallback sets status callbacks on all clients that support it.
 func (fc *FallbackClient) SetStatusCallback(cb StatusCallback) {
-	if cb == nil {
-		return
-	}
-
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	for _, c := range fc.clients {

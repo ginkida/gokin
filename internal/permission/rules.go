@@ -43,6 +43,10 @@ func DefaultRules() *Rules {
 			"get_plan_status":      LevelAllow,
 			"exit_plan_mode":       LevelAllow,
 
+			// Harness changes privileged session instructions or durable project
+			// state, so every operation requires explicit approval by default.
+			"harness": LevelAsk,
+
 			// File modification tools - ask before executing (caution)
 			"write":       LevelAsk,
 			"atomicwrite": LevelAsk,

@@ -316,6 +316,16 @@ type sessionClientCloner interface {
 	cloneForSession() Client
 }
 
+// AuxiliaryClientCloner lets client decorators outside this package preserve
+// their behavior while cloning the mutable provider beneath them. The built-in
+// provider clients use the private sessionClientCloner contract; wrappers such
+// as an agent's invocation-budget meter cannot implement that package-private
+// method, so without this bridge CloneForAuxiliary would silently return the
+// shared foreground wrapper.
+type AuxiliaryClientCloner interface {
+	CloneForAuxiliaryClient() (Client, bool)
+}
+
 func cloneClientForSession(prototype Client) (Client, error) {
 	if isNilClient(prototype) {
 		return nil, fmt.Errorf("cannot clone nil client prototype")
@@ -328,7 +338,49 @@ func cloneClientForSession(prototype Client) (Client, error) {
 	if isNilClient(clone) {
 		return nil, fmt.Errorf("client type %T returned a nil session clone", prototype)
 	}
+	if sameClientInstance(clone, prototype) {
+		return nil, fmt.Errorf("client type %T returned the shared session prototype", prototype)
+	}
 	return clone, nil
+}
+
+// CloneForAuxiliary creates an isolated client for internal summaries,
+// semantic scoring and error reflection. These calls need the same provider
+// transport and rate limiter, but must not inherit foreground-only mutable
+// request state: tool schemas can make a summary return function calls,
+// extended thinking adds minutes of avoidable latency, and status callbacks
+// would make a background extraction masquerade as foreground activity.
+//
+// The boolean is false for lightweight/test clients that do not implement the
+// production session-clone contract; callers may safely use the returned base
+// client in that case because this function never mutates it.
+func CloneForAuxiliary(base Client) (Client, bool) {
+	if isNilClient(base) {
+		return base, false
+	}
+	var clone Client
+	if cloner, ok := base.(AuxiliaryClientCloner); ok {
+		var isolated bool
+		clone, isolated = cloner.CloneForAuxiliaryClient()
+		if !isolated || isNilClient(clone) || sameClientInstance(clone, base) {
+			return base, false
+		}
+	} else {
+		var err error
+		clone, err = cloneClientForSession(base)
+		if err != nil {
+			return base, false
+		}
+	}
+	clone.SetTools(nil)
+	clone.SetSystemInstruction("")
+	clone.SetTurnContext("")
+	clone.SetThinkingBudget(0)
+	if setter, ok := clone.(interface{ SetStatusCallback(StatusCallback) }); ok {
+		setter.SetStatusCallback(nil)
+	}
+	disableDirectHealthTracking(clone)
+	return clone, true
 }
 
 // TokenCountAccuracy is an optional capability for clients whose CountTokens
@@ -537,4 +589,18 @@ func (sr *StreamingResponse) Collect() (*Response, error) {
 	}
 
 	return resp, nil
+}
+
+// CollectContext is the cancellation-aware form of Collect. Auxiliary model
+// calls (summarization, semantic scoring, session-memory extraction) have a
+// model-round context but no streaming UI handler. Using Collect there used to
+// lose context.Cause when a producer reacted to cancellation by quietly
+// closing Chunks before it could enqueue a terminal error: the expired round
+// was then misclassified as a successful empty response. ProcessStream already
+// handles that close-vs-cancel race and preserves partial-response telemetry.
+func (sr *StreamingResponse) CollectContext(ctx context.Context) (*Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return ProcessStream(ctx, sr, &StreamHandler{})
 }

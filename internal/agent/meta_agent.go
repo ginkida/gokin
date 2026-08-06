@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/logging"
 )
 
@@ -19,6 +20,7 @@ type AgentMonitor struct {
 	TurnCount       int
 	StuckCount      int
 	Intervened      bool
+	CancelRequested bool
 	InterventionMsg string
 }
 
@@ -35,7 +37,7 @@ func DefaultMetaAgentConfig() *MetaAgentConfig {
 	return &MetaAgentConfig{
 		Enabled:          true,
 		CheckInterval:    10 * time.Second,
-		StuckThreshold:   2 * time.Minute,
+		StuckThreshold:   config.ModelWatchdogTimeout(config.DefaultModelRoundTimeout),
 		MaxInterventions: 3,
 	}
 }
@@ -73,6 +75,13 @@ func NewMetaAgent(
 	if config == nil {
 		config = DefaultMetaAgentConfig()
 	}
+	configCopy := *config
+	if configCopy.CheckInterval <= 0 {
+		configCopy.CheckInterval = DefaultMetaAgentConfig().CheckInterval
+	}
+	if configCopy.StuckThreshold <= 0 {
+		configCopy.StuckThreshold = DefaultMetaAgentConfig().StuckThreshold
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -81,7 +90,7 @@ func NewMetaAgent(
 		coordinator:  coordinator,
 		strategyOpt:  strategyOpt,
 		typeRegistry: typeRegistry,
-		config:       config,
+		config:       &configCopy,
 		activeAgents: make(map[string]*AgentMonitor),
 		ctx:          ctx,
 		cancel:       cancel,
@@ -90,14 +99,19 @@ func NewMetaAgent(
 
 // Start begins the meta agent monitoring loop.
 func (ma *MetaAgent) Start() {
-	if !ma.config.Enabled {
+	ma.mu.RLock()
+	enabled := ma.config.Enabled
+	checkInterval := ma.config.CheckInterval
+	stuckThreshold := ma.config.StuckThreshold
+	ma.mu.RUnlock()
+	if !enabled {
 		return
 	}
 
-	go ma.monitorLoop()
+	go ma.monitorLoop(checkInterval)
 	logging.Info("meta agent started",
-		"check_interval", ma.config.CheckInterval,
-		"stuck_threshold", ma.config.StuckThreshold)
+		"check_interval", checkInterval,
+		"stuck_threshold", stuckThreshold)
 }
 
 // Stop stops the meta agent.
@@ -143,8 +157,8 @@ func (ma *MetaAgent) UpdateActivity(agentID string, toolName string, turnCount i
 }
 
 // monitorLoop is the main monitoring loop.
-func (ma *MetaAgent) monitorLoop() {
-	ticker := time.NewTicker(ma.config.CheckInterval)
+func (ma *MetaAgent) monitorLoop(checkInterval time.Duration) {
+	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
 	// Recover from panics to prevent goroutine leak
@@ -175,7 +189,7 @@ func (ma *MetaAgent) checkAgentHealth() {
 	type stuckInfo struct {
 		agentID          string
 		inactiveDuration time.Duration
-		monitor          *AgentMonitor
+		monitor          AgentMonitor
 		shouldIntervene  bool
 		shouldCancel     bool
 		stuckCount       int
@@ -188,6 +202,12 @@ func (ma *MetaAgent) checkAgentHealth() {
 	var stuckAgents []stuckInfo
 
 	for agentID, monitor := range ma.activeAgents {
+		// Cancellation is a one-way lifecycle request. The run goroutine may need
+		// time to checkpoint, clean its workspace and publish the terminal result;
+		// do not send the same request (and warning) on every monitor tick meanwhile.
+		if monitor.CancelRequested {
+			continue
+		}
 		inactiveDuration := now.Sub(monitor.LastActivity)
 
 		if inactiveDuration > ma.config.StuckThreshold {
@@ -195,14 +215,18 @@ func (ma *MetaAgent) checkAgentHealth() {
 			si := stuckInfo{
 				agentID:          agentID,
 				inactiveDuration: inactiveDuration,
-				monitor:          monitor,
 				stuckCount:       monitor.StuckCount,
 			}
 			if !monitor.Intervened && monitor.StuckCount <= ma.config.MaxInterventions {
 				si.shouldIntervene = true
+				// Latch before releasing the lock: another health check cannot
+				// schedule the same intervention while its callback is running.
+				monitor.Intervened = true
 			} else if monitor.StuckCount > ma.config.MaxInterventions {
 				si.shouldCancel = true
+				monitor.CancelRequested = true
 			}
+			si.monitor = *monitor
 			stuckAgents = append(stuckAgents, si)
 		} else {
 			monitor.StuckCount = 0
@@ -232,8 +256,32 @@ func (ma *MetaAgent) checkAgentHealth() {
 	}
 }
 
+// SetStuckThreshold updates the live inactivity watchdog. Existing agents use
+// the new value on the next health check; a cancellation already requested is
+// never retracted because its run context may already be shutting down.
+func (ma *MetaAgent) SetStuckThreshold(threshold time.Duration) {
+	if threshold <= 0 {
+		threshold = config.ModelWatchdogTimeout(config.DefaultModelRoundTimeout)
+	}
+	ma.mu.Lock()
+	ma.config.StuckThreshold = threshold
+	ma.mu.Unlock()
+}
+
+// SetModelRoundTimeout keeps MetaAgent outside the hard model-round deadline.
+func (ma *MetaAgent) SetModelRoundTimeout(timeout time.Duration) {
+	ma.SetStuckThreshold(config.ModelWatchdogTimeout(timeout))
+}
+
+// StuckThreshold returns the current live inactivity budget.
+func (ma *MetaAgent) StuckThreshold() time.Duration {
+	ma.mu.RLock()
+	defer ma.mu.RUnlock()
+	return ma.config.StuckThreshold
+}
+
 // handleStuckAgent handles an agent that appears to be stuck.
-func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
+func (ma *MetaAgent) handleStuckAgent(agentID string, monitor AgentMonitor) {
 	logging.Info("meta agent: handling stuck agent",
 		"agent_id", agentID,
 		"agent_type", monitor.AgentType,
@@ -268,10 +316,15 @@ func (ma *MetaAgent) handleStuckAgent(agentID string, monitor *AgentMonitor) {
 		interventionMsg = "I should take action now rather than waiting."
 	}
 
-	// Update monitor under lock
+	// Snapshot the callback under lock. The monitor itself is an immutable copy
+	// captured by checkAgentHealth, so unregister/activity updates cannot race
+	// these diagnostic reads after the health-check lock is released. Only write
+	// the message back when this is still the same registration; an agent ID may
+	// have been unregistered and reused while the callback path was pending.
 	ma.mu.Lock()
-	monitor.Intervened = true
-	monitor.InterventionMsg = interventionMsg
+	if current, ok := ma.activeAgents[agentID]; ok && current.StartTime == monitor.StartTime {
+		current.InterventionMsg = interventionMsg
+	}
 	callback := ma.onIntervention
 	ma.mu.Unlock()
 

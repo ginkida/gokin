@@ -13,9 +13,11 @@ import (
 	"unicode"
 
 	"gokin/internal/chat"
+	"gokin/internal/client"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
+	"gokin/internal/repl"
 )
 
 const (
@@ -110,7 +112,7 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "settings", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
 		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},
-		{"Tools", []string{"browse", "open", "pwd", "mcp", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
+		{"Tools", []string{"browse", "open", "pwd", "mcp", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "timeout", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 
@@ -322,6 +324,8 @@ func formatCompactionResult(err error, tokensBefore, tokensAfter int, pctAfter f
 			return "No-op: conversation is too short to compact. Add more messages and try again, or use /clear to start fresh."
 		case errors.Is(err, appcontext.ErrNothingToSummarize):
 			return "No-op: every message is pinned or already summarized — nothing left to compact."
+		case errors.Is(err, appcontext.ErrSummarizationInProgress):
+			return "No-op: context summarization is already running. Wait for it to finish, then retry /compact if needed."
 		default:
 			return fmt.Sprintf("Compaction failed: %v", err)
 		}
@@ -942,10 +946,21 @@ func (c *DoctorCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	var hybridAvailability *repl.Availability
+	cfg := app.GetConfig()
+	mode := ""
+	if cfg != nil {
+		mode = strings.ToLower(strings.TrimSpace(cfg.Engine.Mode))
+	}
+	if mode == "auto" || mode == "hybrid" {
+		availability := repl.Detect(ctx, app.GetWorkDir())
+		hybridAvailability = &availability
+	}
 	return RenderDoctor(DoctorOptions{
-		Version: app.GetVersion(),
-		Config:  app.GetConfig(),
-		WorkDir: app.GetWorkDir(),
+		Version:            app.GetVersion(),
+		Config:             cfg,
+		WorkDir:            app.GetWorkDir(),
+		HybridAvailability: hybridAvailability,
 	}), nil
 }
 
@@ -954,11 +969,13 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 // configuration failures can be diagnosed before a provider client or TUI
 // exists; /doctor uses the same renderer after startup.
 type DoctorOptions struct {
-	Version    string
-	Config     *config.Config
-	WorkDir    string
-	ConfigPath string
-	CLI        bool
+	Version            string
+	Config             *config.Config
+	WorkDir            string
+	ConfigPath         string
+	ExecutablePath     string
+	CLI                bool
+	HybridAvailability *repl.Availability
 }
 
 func RenderDoctor(options DoctorOptions) string {
@@ -1019,6 +1036,94 @@ func RenderDoctor(options DoctorOptions) string {
 		}
 	}
 
+	fmt.Fprintf(&sb, "\n%s─── Runtime Limits ───%s\n", colorCyan, colorReset)
+	modelRoundTimeout := effectiveModelRoundTimeout(cfg)
+	if modelRoundTimeout < config.DefaultModelRoundTimeout {
+		fmt.Fprintf(&sb, "  %s⚠%s Model round timeout: %s (recommended: %s or longer)\n",
+			colorYellow, colorReset, modelRoundTimeout, config.DefaultModelRoundTimeout)
+		issues = append(issues, fmt.Sprintf("Model round timeout is only %s", modelRoundTimeout))
+		if options.CLI {
+			solutions = append(solutions, fmt.Sprintf(
+				"Set tools.model_round_timeout to %s or longer in the config file",
+				config.DefaultModelRoundTimeout))
+		} else {
+			solutions = append(solutions, fmt.Sprintf(
+				"Run /timeout %s (or edit tools.model_round_timeout in the config file)",
+				config.DefaultModelRoundTimeout))
+		}
+	} else {
+		fmt.Fprintf(&sb, "  %s✓%s Model round timeout: %s\n",
+			colorGreen, colorReset, modelRoundTimeout)
+	}
+	providerTimeouts := client.EffectiveProviderTimeouts(cfg, backend)
+	fmt.Fprintf(&sb, "  Provider watchdogs (%s): first headers %s · stream idle %s\n",
+		backend,
+		providerTimeouts.ResponseHeaderTimeout,
+		formatOptionalTimeout(providerTimeouts.StreamIdleTimeout))
+	normalAgentTimeout := config.DefaultAgentTimeout
+	if minimum := modelRoundTimeout + config.DefaultAgentTimeoutHeadroom; minimum > normalAgentTimeout {
+		normalAgentTimeout = minimum
+	}
+	modelWatchdog := config.ModelWatchdogTimeout(modelRoundTimeout)
+	coordinateFloor := config.DefaultThoroughAgentTimeout
+	if normalAgentTimeout > coordinateFloor {
+		coordinateFloor = normalAgentTimeout
+	}
+	fmt.Fprintf(&sb, "  Orchestration: foreground idle %s · meta-agent stuck %s · normal agent %s · coordinate floor %s (DAG-aware)\n",
+		modelWatchdog, modelWatchdog, normalAgentTimeout, coordinateFloor)
+	fmt.Fprintf(&sb, "  Auxiliary LLM: compaction %s · session memory %s · semantic scoring %s · error reflection %s (inherit model round)\n",
+		modelRoundTimeout, modelRoundTimeout, modelRoundTimeout, modelRoundTimeout)
+
+	planningTimeout := modelRoundTimeout
+	planningSource := "inherits model"
+	stepTimeout := normalAgentTimeout
+	stepSource := "dynamic"
+	if cfg != nil {
+		if cfg.Plan.PlanningTimeout > 0 {
+			planningTimeout = cfg.Plan.PlanningTimeout
+			planningSource = "explicit"
+		}
+		if cfg.Plan.DefaultStepTimeout > 0 {
+			stepTimeout = cfg.Plan.DefaultStepTimeout
+			stepSource = "explicit"
+		}
+	}
+	fmt.Fprintf(&sb, "  Plan: generation %s (%s) · step %s (%s) · stuck watchdog %s\n",
+		planningTimeout, planningSource, stepTimeout, stepSource, modelWatchdog)
+	if planningTimeout < modelRoundTimeout {
+		issues = append(issues, fmt.Sprintf(
+			"Plan generation timeout %s is shorter than model round %s",
+			planningTimeout, modelRoundTimeout))
+		solutions = append(solutions,
+			"Set plan.planning_timeout to 0s to inherit tools.model_round_timeout")
+	}
+	if stepTimeout < modelRoundTimeout {
+		issues = append(issues, fmt.Sprintf(
+			"Plan step timeout %s is shorter than model round %s",
+			stepTimeout, modelRoundTimeout))
+		solutions = append(solutions,
+			"Set plan.default_step_timeout to 0s for the dynamic agent budget")
+	}
+
+	engineMode := "auto"
+	if cfg != nil && strings.TrimSpace(cfg.Engine.Mode) != "" {
+		engineMode = strings.ToLower(strings.TrimSpace(cfg.Engine.Mode))
+	}
+	fmt.Fprintf(&sb, "  Engine mode: %s\n", engineMode)
+	if engineMode == "tools" {
+		fmt.Fprintf(&sb, "  %s○%s Stateful hybrid disabled; using structured tools\n", colorYellow, colorReset)
+	} else if availability := options.HybridAvailability; availability != nil {
+		if availability.Available {
+			fmt.Fprintf(&sb, "  %s✓%s Stateful hybrid available (%s)\n", colorGreen, colorReset, availability.Backend)
+		} else if engineMode == "hybrid" {
+			fmt.Fprintf(&sb, "  %s✗%s Required secure REPL unavailable: %s\n", colorRed, colorReset, availability.Reason)
+			issues = append(issues, "Required secure hybrid runtime is unavailable")
+			solutions = append(solutions, "Install/enable python3 and the platform sandbox, or set engine.mode to auto/tools")
+		} else {
+			fmt.Fprintf(&sb, "  %s○%s Auto fallback to structured tools: %s\n", colorYellow, colorReset, availability.Reason)
+		}
+	}
+
 	fmt.Fprintf(&sb, "\n%s─── Environment ───%s\n", colorCyan, colorReset)
 
 	// Config file
@@ -1054,6 +1159,53 @@ func RenderDoctor(options DoctorOptions) string {
 		fmt.Fprintf(&sb, "  %s✓%s Working directory is a git repository\n", colorGreen, colorReset)
 	} else {
 		fmt.Fprintf(&sb, "  %s○%s Not a git repository (git tools will be limited)\n", colorYellow, colorReset)
+	}
+
+	// Developer checkout delivery check. A fixed worktree is not enough when
+	// the shell still resolves an older installed executable—the exact state in
+	// which timeout fixes appeared green in tests but users kept running the old
+	// behavior. Only recognized Gokin source roots participate.
+	if checkout, ok := findDoctorCheckout(workDir); ok && strings.TrimSpace(options.Version) != "" {
+		sourceVersion := checkout.Version
+		executablePath := strings.TrimSpace(options.ExecutablePath)
+		if executablePath == "" {
+			executablePath, _ = os.Executable()
+		}
+		if comparison, comparable := compareDoctorVersionCore(options.Version, sourceVersion); comparable {
+			switch {
+			case comparison < 0:
+				fmt.Fprintf(&sb, "  %s⚠%s Active binary %s is older than checkout %s\n",
+					colorYellow, colorReset, options.Version, sourceVersion)
+				issues = append(issues, fmt.Sprintf(
+					"Active binary %s is older than Gokin checkout %s", options.Version, sourceVersion))
+				solution := "Rebuild and reinstall Gokin from this checkout"
+				if executablePath != "" {
+					solution = fmt.Sprintf("Rebuild this checkout and replace %s", prettyHomePath(executablePath))
+				}
+				solutions = append(solutions, solution)
+			case comparison == 0:
+				if newerInput, stale := checkoutBuildInputNewerThan(checkout.Root, executablePath); stale {
+					fmt.Fprintf(&sb, "  %s⚠%s Active binary %s predates checkout change %s\n",
+						colorYellow, colorReset, options.Version, newerInput)
+					issues = append(issues, fmt.Sprintf(
+						"Active binary %s predates same-version checkout changes", options.Version))
+					solution := "Rebuild and reinstall Gokin from this checkout"
+					if executablePath != "" {
+						solution = fmt.Sprintf("Rebuild this checkout and replace %s", prettyHomePath(executablePath))
+					}
+					solutions = append(solutions, solution)
+				} else {
+					fmt.Fprintf(&sb, "  %s✓%s Active binary matches checkout version %s\n",
+						colorGreen, colorReset, sourceVersion)
+				}
+			default:
+				fmt.Fprintf(&sb, "  %s✓%s Active binary %s is newer than checkout %s\n",
+					colorGreen, colorReset, options.Version, sourceVersion)
+			}
+		} else {
+			fmt.Fprintf(&sb, "  %s○%s Checkout version %s (runtime label %s is not comparable)\n",
+				colorYellow, colorReset, sourceVersion, options.Version)
+		}
 	}
 
 	// Project instruction file (GOKIN.md/CLAUDE.md and other supported paths)
@@ -1242,6 +1394,20 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 	fmt.Fprintf(&sb, "  Temperature: %.1f\n", cfg.Model.Temperature)
 	fmt.Fprintf(&sb, "  Max Output:  %d tokens\n", cfg.Model.MaxOutputTokens)
 
+	// Runtime limits. A persisted short round cap otherwise looks like a
+	// provider failure when it fires, so surface the effective value here.
+	modelRoundTimeout := effectiveModelRoundTimeout(cfg)
+	fmt.Fprintf(&sb, "\n%s─── Runtime Limits ───%s\n", colorCyan, colorReset)
+	fmt.Fprintf(&sb, "  Model Round: %s\n", modelRoundTimeout)
+	provider := cfg.API.GetActiveProvider()
+	providerTimeouts := client.EffectiveProviderTimeouts(cfg, provider)
+	fmt.Fprintf(&sb, "  Provider:    %s headers / %s stream idle (%s)\n",
+		providerTimeouts.ResponseHeaderTimeout,
+		formatOptionalTimeout(providerTimeouts.StreamIdleTimeout),
+		provider)
+	fmt.Fprintf(&sb, "  Tool:        %s\n", cfg.Tools.Timeout)
+	fmt.Fprintf(&sb, "  Change:      /timeout <duration>\n")
+
 	// UI
 	fmt.Fprintf(&sb, "\n%s─── UI ───%s\n", colorCyan, colorReset)
 	activeTheme := activeThemeID(app)
@@ -1285,6 +1451,13 @@ func (c *ConfigCommand) Execute(ctx context.Context, args []string, app AppInter
 	fmt.Fprintf(&sb, "%sChange a setting:%s /set (lists toggles) · /set <key> on|off\n", colorCyan, colorReset)
 
 	return sb.String(), nil
+}
+
+func formatOptionalTimeout(timeout time.Duration) string {
+	if timeout <= 0 {
+		return "disabled"
+	}
+	return timeout.String()
 }
 
 // PermissionsCommand toggles permission prompts.
@@ -1570,6 +1743,7 @@ func getCommandExample(name string) string {
 		"sandbox":     "  /sandbox on           — gate bash on permission prompts\n  /sandbox off          — disable bash safety prompts (yolo)",
 		"permissions": "  /permissions on       — prompt before write/edit/bash\n  /permissions off      — auto-approve (yolo mode)",
 		"thinking":    "  /thinking auto        — reason only when the task is hard\n  /thinking on          — force reasoning every turn\n  /thinking off         — never reason\n  /thinking 16384       — force reasoning with a 16K-token budget",
+		"timeout":     "  /timeout             — show the effective model round cap\n  /timeout 20m         — apply a 20-minute cap live\n  /timeout default     — restore the recommended default",
 		"open":        "  /open main.go         — open file in $EDITOR (or vi)\n  /open internal/app/app.go",
 		"resume-plan": "  /resume-plan          — restore the plan saved by the last /clear",
 		"recovery":    "  /recovery             — show the recovery snapshot from the last unclean shutdown",
@@ -1596,7 +1770,7 @@ func getRelatedCommands(name string) string {
 		"resume-plan": "/plan",
 		"login":       "/logout, /provider, /doctor",
 		"doctor":      "/login, /config, /status",
-		"config":      "/doctor, /model, /theme",
+		"config":      "/doctor, /model, /timeout, /theme",
 		"theme":       "/config",
 		"cost":        "/stats, /compact",
 		"shortcuts":   "/help, /keys",
@@ -1628,7 +1802,8 @@ func getRelatedCommands(name string) string {
 		// v0.78.26 — fill out see-also for the rest of user-facing commands.
 		"mcp":               "/permissions, /status, /stats",
 		"memory":            "/clear, /compact, /memory-governance",
-		"thinking":          "/model, /provider",
+		"thinking":          "/model, /provider, /timeout",
+		"timeout":           "/doctor, /config, /thinking",
 		"logout":            "/login, /provider, /status",
 		"open":              "/grep, /blame, /diff, /browse",
 		"recovery":          "/journal, /resume-plan, /clear",

@@ -56,6 +56,7 @@ var planModeReadOnlyTools = map[string]bool{
 	// memory and pin_context are excluded because their write actions cannot be
 	// constrained by a name-only schema filter.
 	"history_search": true,
+	"repl_exec":      true,
 
 	// Plan lifecycle itself — how the model exits plan mode
 	"enter_plan_mode":      true,

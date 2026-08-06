@@ -269,10 +269,11 @@ func TestFallbackClient_SetRateLimiter(t *testing.T) {
 func TestFallbackClient_SetStatusCallback_Nil(t *testing.T) {
 	c1 := &fakeFallbackClientStub{id: "a"}
 	fc, _ := NewFallbackClient([]Client{c1}, []string{"test-fb-0"})
-	// nil callback should be a no-op.
+	c1.statusCB = &DefaultStatusCallback{}
+	// Auxiliary clones clear foreground status reporting with nil.
 	fc.SetStatusCallback(nil)
 	if c1.statusCB != nil {
-		t.Error("nil callback should not set anything")
+		t.Error("nil callback should clear the existing callback")
 	}
 }
 

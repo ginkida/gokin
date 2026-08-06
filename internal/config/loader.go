@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"gokin/internal/logging"
 
@@ -20,6 +21,25 @@ var configSaveMu sync.Mutex
 const (
 	maxConfigFileBytes     = MaxConfigFileBytes
 	maxExpandedConfigBytes = 8 << 20
+
+	// legacyDefaultModelRoundTimeout was serialized into full user configs by
+	// releases whose five-minute hard cap regularly killed healthy, actively
+	// streaming reasoning rounds. The runtime default is now deliberately more
+	// generous, but YAML overlays otherwise keep resurrecting this old default
+	// forever. Migrate only the exact historical user-level value; project
+	// config is loaded afterwards and remains an explicit, respected override.
+	legacyDefaultModelRoundTimeout = 5 * time.Minute
+	// Old generated full configs serialized the generic Anthropic constructor
+	// defaults here, unintentionally overriding the newer provider-specific
+	// watchdogs forever (GLM/Kimi/DeepSeek/MiniMax need more patient values).
+	// Treat only the exact historical pair as generated legacy state; either
+	// value customized independently remains an explicit user choice.
+	legacyDefaultHTTPTimeout       = 120 * time.Second
+	legacyDefaultStreamIdleTimeout = 30 * time.Second
+	// Old generated configs serialized the one-minute planning watchdog. That
+	// value is shorter than the model-round cap and therefore kills healthy
+	// planning responses first. Zero now means "follow model-round timeout".
+	legacyDefaultPlanningTimeout = 60 * time.Second
 )
 
 // Load loads configuration from file and environment variables.
@@ -38,6 +58,9 @@ func Load() (*Config, error) {
 		}
 		cfg.savePath = configPath
 	}
+	migrateLegacyModelRoundTimeout(cfg)
+	migrateLegacyProviderTimeouts(cfg)
+	migrateLegacyPlanningTimeout(cfg)
 
 	// Override with environment variables
 	loadFromEnv(cfg)
@@ -73,10 +96,56 @@ func LoadFrom(path string) (*Config, error) {
 		return nil, fmt.Errorf("load config %q: %w", absolute, err)
 	}
 	cfg.savePath = absolute
+	migrateLegacyModelRoundTimeout(cfg)
+	migrateLegacyProviderTimeouts(cfg)
+	migrateLegacyPlanningTimeout(cfg)
 	loadFromEnv(cfg)
 	loadProjectConfig(cfg)
 	migrateLegacyKimiModelName(cfg)
 	return cfg, nil
+}
+
+// migrateLegacyModelRoundTimeout upgrades the old generated five-minute user
+// default in memory. It intentionally runs after the global/--config file and
+// before the project overlay: repositories may still choose a tighter timeout,
+// while users who simply carried forward a generated legacy config receive the
+// fixed default without having to discover and edit YAML by hand.
+func migrateLegacyModelRoundTimeout(cfg *Config) {
+	if cfg == nil || cfg.Tools.ModelRoundTimeout != legacyDefaultModelRoundTimeout {
+		return
+	}
+	cfg.Tools.ModelRoundTimeout = DefaultModelRoundTimeout
+	logging.Info("upgraded legacy model round timeout",
+		"from", legacyDefaultModelRoundTimeout,
+		"to", DefaultModelRoundTimeout)
+}
+
+// migrateLegacyProviderTimeouts releases the exact old generated global pair
+// back to provider-specific defaults. It runs before project overlays, so a
+// repository that deliberately selects these values still keeps them.
+func migrateLegacyProviderTimeouts(cfg *Config) {
+	if cfg == nil ||
+		cfg.API.Retry.HTTPTimeout != legacyDefaultHTTPTimeout ||
+		cfg.API.Retry.StreamIdleTimeout != legacyDefaultStreamIdleTimeout {
+		return
+	}
+	cfg.API.Retry.HTTPTimeout = 0
+	cfg.API.Retry.StreamIdleTimeout = 0
+	logging.Info("released legacy global provider timeouts to provider defaults",
+		"http_timeout", legacyDefaultHTTPTimeout,
+		"stream_idle_timeout", legacyDefaultStreamIdleTimeout)
+}
+
+// migrateLegacyPlanningTimeout releases only the exact historical generated
+// global default. It runs before the project overlay, so a repository that
+// deliberately requests a one-minute planning cap keeps that override.
+func migrateLegacyPlanningTimeout(cfg *Config) {
+	if cfg == nil || cfg.Plan.PlanningTimeout != legacyDefaultPlanningTimeout {
+		return
+	}
+	cfg.Plan.PlanningTimeout = 0
+	logging.Info("released legacy planning timeout to model-round default",
+		"from", legacyDefaultPlanningTimeout)
 }
 
 // migrateLegacyKimiModelName rewrites retired Kimi model IDs to the
@@ -121,6 +190,8 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to load project config: %w", err)
 		}
+	} else if configDefinesModelRoundTimeout(projectConfigPath) {
+		cfg.modelRoundTimeoutProjectPath = projectConfigPath
 	}
 	cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
 
@@ -129,6 +200,10 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 
 // loadProjectConfig attempts to find and load .gokin/config.yaml from the current directory upward.
 func loadProjectConfig(cfg *Config) {
+	if cfg != nil && !cfg.modelRoundTimeoutGlobalTracked {
+		cfg.modelRoundTimeoutGlobalValue = cfg.Tools.ModelRoundTimeout
+		cfg.modelRoundTimeoutGlobalTracked = true
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		logging.Debug("failed to get working directory for project config", "error", err)
@@ -144,6 +219,8 @@ func loadProjectConfig(cfg *Config) {
 			userTrustedWorkspaces := append([]string(nil), cfg.Hooks.TrustedWorkspaces...)
 			if err := loadFromFile(cfg, projectConfig); err != nil {
 				slog.Warn("failed to load project config", "path", projectConfig, "error", err)
+			} else if configDefinesModelRoundTimeout(projectConfig) {
+				cfg.modelRoundTimeoutProjectPath = projectConfig
 			}
 			// allow_global is a user trust decision, not a capability a repository
 			// may grant itself. A project may explicitly disable it, but cannot
@@ -336,12 +413,28 @@ func loadFromEnv(cfg *Config) {
 	if backend := os.Getenv("GOKIN_BACKEND"); backend != "" {
 		cfg.API.Backend = backend
 	}
+	if mode := strings.TrimSpace(os.Getenv("GOKIN_ENGINE_MODE")); mode != "" {
+		cfg.Engine.Mode = mode
+	}
 }
 
 // Validate validates the configuration.
 func (c *Config) Validate() error {
 	if err := ValidateRetryConfig(c); err != nil {
 		return err
+	}
+	engineMode := strings.ToLower(strings.TrimSpace(c.Engine.Mode))
+	if engineMode != "auto" && engineMode != "tools" && engineMode != "hybrid" {
+		return fmt.Errorf("invalid engine.mode %q: expected auto, tools, or hybrid", c.Engine.Mode)
+	}
+	if c.Engine.REPL.CellTimeout <= 0 {
+		return fmt.Errorf("engine.repl.cell_timeout must be > 0")
+	}
+	if c.Engine.REPL.MaxCodeBytes < 1024 || c.Engine.REPL.MaxCodeBytes > 1024*1024 {
+		return fmt.Errorf("engine.repl.max_code_bytes must be between 1024 and 1048576")
+	}
+	if c.Engine.REPL.MaxResponseBytes < 64*1024 || c.Engine.REPL.MaxResponseBytes > 16*1024*1024 {
+		return fmt.Errorf("engine.repl.max_response_bytes must be between 65536 and 16777216")
 	}
 	mode := strings.ToLower(strings.TrimSpace(c.DoneGate.Mode))
 	if mode != "" && mode != "normal" && mode != "strict" {
@@ -355,6 +448,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Tools.DeltaCheck.Timeout < 0 {
 		return fmt.Errorf("tools.delta_check.timeout must be >= 0")
+	}
+	if c.Tools.ModelRoundTimeout < 0 {
+		return fmt.Errorf("tools.model_round_timeout must be >= 0")
+	}
+	if c.Plan.PlanningTimeout < 0 {
+		return fmt.Errorf("plan.planning_timeout must be >= 0")
+	}
+	if c.Plan.DefaultStepTimeout < 0 {
+		return fmt.Errorf("plan.default_step_timeout must be >= 0")
 	}
 	if c.Tools.DeltaCheck.MaxModules < 0 {
 		return fmt.Errorf("tools.delta_check.max_modules must be >= 0")
@@ -474,8 +576,16 @@ func (c *Config) Save() error {
 		return fmt.Errorf("could not determine config path")
 	}
 
-	// Marshal config to YAML with proper ordering
-	data, err := yaml.Marshal(c)
+	// Marshal config to YAML with proper ordering. When a repository overlay
+	// owns the timeout, retain the pre-project value in the user-wide file;
+	// otherwise a harmless UI/settings save in one repository would leak its
+	// local timeout into every other workspace.
+	configToSave := c
+	if c.modelRoundTimeoutProjectPath != "" && c.modelRoundTimeoutGlobalTracked {
+		configToSave = c.Clone()
+		configToSave.Tools.ModelRoundTimeout = c.modelRoundTimeoutGlobalValue
+	}
+	data, err := yaml.Marshal(configToSave)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
@@ -485,6 +595,130 @@ func (c *Config) Save() error {
 	}
 
 	return nil
+}
+
+// SaveModelRoundTimeout persists the scalar into the configuration layer that
+// supplied it. A project overlay wins over the global file at load time, so
+// writing only the global file would falsely report success while the old
+// project value returned on restart.
+func (c *Config) SaveModelRoundTimeout(timeout time.Duration) error {
+	if c == nil {
+		return fmt.Errorf("cannot save model round timeout on nil config")
+	}
+	c.Tools.ModelRoundTimeout = timeout
+	if c.modelRoundTimeoutProjectPath == "" {
+		c.modelRoundTimeoutGlobalValue = timeout
+		c.modelRoundTimeoutGlobalTracked = true
+	}
+	path := c.ModelRoundTimeoutConfigPath()
+	if path == "" {
+		return fmt.Errorf("could not determine config path")
+	}
+
+	return UpdateConfigFile(path, func(existing []byte) ([]byte, error) {
+		var document yaml.Node
+		if len(existing) > 0 {
+			if err := yaml.Unmarshal(existing, &document); err != nil {
+				return nil, fmt.Errorf("parse project config %q: %w", path, err)
+			}
+		}
+		root, err := ensureYAMLMappingDocument(&document)
+		if err != nil {
+			return nil, fmt.Errorf("update project config %q: %w", path, err)
+		}
+		toolsNode, err := ensureYAMLMappingValue(root, "tools")
+		if err != nil {
+			return nil, fmt.Errorf("update project config %q: %w", path, err)
+		}
+		setYAMLScalar(toolsNode, "model_round_timeout", timeout.String())
+		data, err := yaml.Marshal(&document)
+		if err != nil {
+			return nil, fmt.Errorf("marshal project config %q: %w", path, err)
+		}
+		return data, nil
+	})
+}
+
+// ModelRoundTimeoutConfigPath returns the layer that owns the effective
+// timeout and therefore receives runtime /timeout updates.
+func (c *Config) ModelRoundTimeoutConfigPath() string {
+	if c == nil {
+		return ""
+	}
+	if c.modelRoundTimeoutProjectPath != "" {
+		return c.modelRoundTimeoutProjectPath
+	}
+	if c.savePath != "" {
+		return c.savePath
+	}
+	return getConfigPath()
+}
+
+func configDefinesModelRoundTimeout(path string) bool {
+	data, err := ReadConfigFile(path)
+	if err != nil {
+		return false
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil || len(document.Content) == 0 {
+		return false
+	}
+	root := document.Content[0]
+	toolsNode := yamlMappingValue(root, "tools")
+	return yamlMappingValue(toolsNode, "model_round_timeout") != nil
+}
+
+func ensureYAMLMappingDocument(document *yaml.Node) (*yaml.Node, error) {
+	if document.Kind == 0 {
+		document.Kind = yaml.DocumentNode
+		document.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return nil, fmt.Errorf("root must be one YAML document")
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("root must be a mapping")
+	}
+	return root, nil
+}
+
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func ensureYAMLMappingValue(mapping *yaml.Node, key string) (*yaml.Node, error) {
+	if existing := yamlMappingValue(mapping, key); existing != nil {
+		if existing.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%s must be a mapping", key)
+		}
+		return existing, nil
+	}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+	valueNode := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	mapping.Content = append(mapping.Content, keyNode, valueNode)
+	return valueNode, nil
+}
+
+func setYAMLScalar(mapping *yaml.Node, key, value string) {
+	if existing := yamlMappingValue(mapping, key); existing != nil {
+		existing.Kind = yaml.ScalarNode
+		existing.Tag = "!!str"
+		existing.Value = value
+		existing.Content = nil
+		return
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
 }
 
 // expandTilde replaces a leading "~" with the user's home directory.

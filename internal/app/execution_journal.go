@@ -2,9 +2,11 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,12 @@ import (
 const (
 	maxRecoverySnapshotBytes int64 = 8 << 20
 	maxJournalEntryBytes           = 1 << 20
+	// Bound long-lived project journals. /journal only renders the latest 30
+	// events, while an unbounded JSONL had reached 5 MiB/14k lines in normal use
+	// and Tail retained every line in memory. Compact atomically before an append
+	// would cross 8 MiB, keeping the newest complete ~4 MiB of diagnostics.
+	maxJournalFileBytes   int64 = 8 << 20
+	journalRetentionBytes int64 = 4 << 20
 )
 
 type JournalEntry struct {
@@ -89,6 +97,9 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) error {
 	if len(b)+1 > maxJournalEntryBytes {
 		return fmt.Errorf("execution journal event %q exceeds %d-byte limit", event, maxJournalEntryBytes)
 	}
+	if err := j.compactBeforeAppendLocked(int64(len(b) + 1)); err != nil {
+		return fmt.Errorf("compact execution journal before event %q: %w", event, err)
+	}
 
 	f, err := fileutil.OpenPrivateAppend(j.journalPath)
 	if err != nil {
@@ -99,6 +110,60 @@ func (j *ExecutionJournal) Append(event string, details map[string]any) error {
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write execution journal %q event %q: %w",
 			j.journalPath, event, err)
+	}
+	return nil
+}
+
+// compactBeforeAppendLocked atomically retains the newest complete JSONL lines
+// when the next append would cross the file cap. j.mu must be held. Reading only
+// the retention window keeps recovery bounded even if an externally corrupted
+// journal is much larger than the normal cap.
+func (j *ExecutionJournal) compactBeforeAppendLocked(incomingBytes int64) error {
+	info, err := os.Lstat(j.journalPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		// Preserve the secure open helper's detailed symlink/special-file error.
+		f, openErr := fileutil.OpenPrivateRead(j.journalPath)
+		if f != nil {
+			_ = f.Close()
+		}
+		return openErr
+	}
+	if info.Size()+incomingBytes <= maxJournalFileBytes {
+		return nil
+	}
+
+	f, err := fileutil.OpenPrivateRead(j.journalPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	start := max(info.Size()-journalRetentionBytes, 0)
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return err
+	}
+	retained, err := io.ReadAll(io.LimitReader(f, journalRetentionBytes+1))
+	if err != nil {
+		return err
+	}
+	if start > 0 {
+		newline := bytes.IndexByte(retained, '\n')
+		if newline < 0 {
+			retained = nil
+		} else {
+			retained = retained[newline+1:]
+		}
+	}
+	if len(retained) > 0 && retained[len(retained)-1] != '\n' {
+		retained = append(retained, '\n')
+	}
+	if err := fileutil.AtomicWrite(j.journalPath, retained, 0o600); err != nil {
+		return err
 	}
 	return nil
 }
@@ -178,20 +243,27 @@ func (j *ExecutionJournal) Tail(n int) ([]JournalEntry, error) {
 	}
 	defer f.Close()
 
-	var lines []string
+	// Fixed-size ring: Tail(30) should never retain a multi-megabyte journal in
+	// memory merely to discard all but its final lines.
+	ring := make([]string, n)
+	lineCount := 0
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64<<10), maxJournalEntryBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
-			lines = append(lines, line)
+			ring[lineCount%n] = line
+			lineCount++
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	kept := min(lineCount, n)
+	lines := make([]string, 0, kept)
+	start := lineCount - kept
+	for i := range kept {
+		lines = append(lines, ring[(start+i)%n])
 	}
 
 	out := make([]JournalEntry, 0, len(lines))

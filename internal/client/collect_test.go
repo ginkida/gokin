@@ -1,8 +1,10 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -319,5 +321,58 @@ func TestCollect_AccumulatesParts(t *testing.T) {
 	}
 	if resp.Parts[0] != p1 || resp.Parts[1] != p2 {
 		t.Errorf("Parts not in order")
+	}
+}
+
+func TestCollectContextPreservesTimeoutWhenProducerClosesSilently(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := NewModelRoundTimeoutError(25 * time.Millisecond)
+	chunks := make(chan ResponseChunk)
+	cancel(cause)
+	close(chunks)
+
+	resp, err := (&StreamingResponse{Chunks: chunks}).CollectContext(ctx)
+	if resp == nil {
+		t.Fatal("CollectContext must return a response accumulator on timeout")
+	}
+	if !errors.Is(err, ErrModelRoundTimeout) {
+		t.Fatalf("CollectContext() error = %v, want model-round timeout", err)
+	}
+	telemetry := DetectFailureTelemetry(err)
+	if telemetry.Timeout != 25*time.Millisecond || telemetry.Partial {
+		t.Fatalf("timeout telemetry = %#v, want 25ms and partial=false", telemetry)
+	}
+}
+
+func TestCollectContextMarksAccumulatedResponsePartialOnTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	chunks := make(chan ResponseChunk)
+	type result struct {
+		resp *Response
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		resp, err := (&StreamingResponse{Chunks: chunks}).CollectContext(ctx)
+		resultCh <- result{resp: resp, err: err}
+	}()
+
+	chunks <- ResponseChunk{Text: "partial answer"}
+	cancel(NewModelRoundTimeoutError(time.Second))
+	close(chunks)
+
+	select {
+	case got := <-resultCh:
+		if got.resp == nil || got.resp.Text != "partial answer" {
+			t.Fatalf("partial response = %#v", got.resp)
+		}
+		if !errors.Is(got.err, ErrModelRoundTimeout) {
+			t.Fatalf("CollectContext() error = %v, want model-round timeout", got.err)
+		}
+		if telemetry := DetectFailureTelemetry(got.err); !telemetry.Partial {
+			t.Fatalf("timeout telemetry = %#v, want partial=true", telemetry)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CollectContext did not return after cancellation")
 	}
 }

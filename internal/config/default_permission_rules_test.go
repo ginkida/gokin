@@ -13,4 +13,10 @@ func TestDefaultPermissionRulesAllowReadOnlyAgentInfrastructure(t *testing.T) {
 			t.Errorf("default permission for %s = %q, want allow", tool, got)
 		}
 	}
+	if got := rules["repl_exec"]; got != "allow" {
+		t.Errorf("default permission for repl_exec = %q, want allow", got)
+	}
+	if got := rules["harness"]; got != "ask" {
+		t.Errorf("default permission for harness = %q, want ask", got)
+	}
 }

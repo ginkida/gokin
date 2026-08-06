@@ -87,6 +87,20 @@ func TestGetErrorGuidance_NilForUnrelated(t *testing.T) {
 	}
 }
 
+func TestGetErrorGuidance_ModelRoundTimeoutExplainsLegacyFiveMinutes(t *testing.T) {
+	g := GetErrorGuidance("model_round_timeout (5m0s): model round timeout")
+	if g == nil {
+		t.Fatal("no guidance for model round timeout")
+	}
+	if g.Title != "Model Round Timeout" {
+		t.Fatalf("title = %q, want Model Round Timeout", g.Title)
+	}
+	joined := strings.Join(g.Suggestions, " ")
+	if !strings.Contains(joined, "5m0s") || !strings.Contains(joined, "/timeout 14m") {
+		t.Fatalf("legacy timeout guidance is not actionable: %v", g.Suggestions)
+	}
+}
+
 func TestFormatErrorWithGuidance_WrapsInErrorBox(t *testing.T) {
 	styles := DefaultStyles()
 	got := FormatErrorWithGuidance(styles, "failed to start MCP server: exec: \"x\": executable file not found in $PATH")

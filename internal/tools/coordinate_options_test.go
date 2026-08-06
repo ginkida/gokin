@@ -77,6 +77,26 @@ func TestCoordinateTool_TimeoutOptionMatchesExecutorBudget(t *testing.T) {
 	}
 }
 
+func TestCoordinateTool_ImplicitWaitUsesRaisedExecutorBudget(t *testing.T) {
+	fc := &fakeCoordinator{waitResults: map[string]any{
+		"internal-1": map[string]any{"status": "completed"},
+	}}
+	tool := NewCoordinateTool()
+	tool.SetCoordinatorFactory(func() any { return fc })
+
+	outer := 46*time.Minute + coordinateCleanupTimeout + toolTimeoutCompletionGrace
+	ctx, cancel := context.WithTimeout(context.Background(), outer)
+	defer cancel()
+	result, err := tool.Execute(ctx, map[string]any{"tasks": tasksArg("a")})
+	if err != nil || !result.Success {
+		t.Fatalf("Execute failed: result=%+v err=%v", result, err)
+	}
+	want := 46 * time.Minute
+	if delta := want - fc.waitTimeout; delta < 0 || delta > time.Second {
+		t.Fatalf("implicit coordinator wait timeout = %v, want approximately %v", fc.waitTimeout, want)
+	}
+}
+
 func TestCoordinateTool_RejectsFractionalTimeout(t *testing.T) {
 	tool := NewCoordinateTool()
 	err := tool.Validate(map[string]any{

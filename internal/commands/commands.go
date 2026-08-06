@@ -243,6 +243,7 @@ func NewHandler() *Handler {
 	h.Register(&PermissionsCommand{})
 	h.Register(&SandboxCommand{})
 	h.Register(&ThinkingCommand{})
+	h.Register(&TimeoutCommand{})
 
 	// Register interactive commands
 	h.Register(&BrowseCommand{})

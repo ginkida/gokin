@@ -57,7 +57,7 @@ func (a *App) maybeAutoContinueAfterBudget() bool {
 	}
 	// Interactive foreground only: headless/eval runs one prompt, and /loop
 	// iterations have their own continuation machinery (handoff).
-	if a.program == nil {
+	if !a.hasProgram() {
 		return false
 	}
 	// The user already queued their own follow-up — never cut in line.

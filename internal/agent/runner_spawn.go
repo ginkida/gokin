@@ -254,7 +254,7 @@ func agentRunContext(ctx context.Context, agent *Agent) (context.Context, contex
 	if _, hasDeadline := ctx.Deadline(); hasDeadline {
 		return context.WithCancel(ctx)
 	}
-	if t := agent.GetTimeout(); t > 0 {
+	if t := agent.EffectiveRunTimeout(); t > 0 {
 		return context.WithTimeout(ctx, t)
 	}
 	return context.WithCancel(ctx)
@@ -411,6 +411,17 @@ func (r *Runner) SpawnWithContext(
 // SpawnAsync creates and starts a new agent asynchronously.
 // agentType should be "explore", "bash", "general", "plan", "claude-code-guide", or "coordinator".
 func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string, maxTurns int, model string) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Background ownership transfers to Runner when this method accepts the
+	// spawn. Refuse an already-cancelled request now; after a non-empty ID is
+	// returned, ordinary caller/tool-context cleanup must not race the worker's
+	// goroutine and retroactively cancel an accepted background task.
+	if err := ctx.Err(); err != nil {
+		logging.Debug("refusing async agent from cancelled context", "error", err)
+		return ""
+	}
 	r.cleanupOldResults()
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
@@ -518,28 +529,6 @@ func (r *Runner) SpawnAsync(ctx context.Context, agentType string, prompt string
 		// Store cancel func for explicit Agent.Cancel()
 		agent.SetCancelFunc(agentCancel)
 
-		// Check if original context is already cancelled
-		select {
-		case <-ctx.Done():
-			if deps.metaAgent != nil {
-				deps.metaAgent.UnregisterAgent(agentID)
-			}
-			cancelledResult := &AgentResult{
-				AgentID:   agentID,
-				Type:      agent.Type,
-				Status:    AgentStatusCancelled,
-				Error:     ctx.Err().Error(),
-				Completed: true,
-			}
-			r.finalizeAgentWorkspace(agent, cancelledResult)
-			r.mu.Lock()
-			r.results[agentID] = cancelledResult
-			r.mu.Unlock()
-			r.notifyResultReady(agentID)
-			return
-		default:
-		}
-
 		// Start progress ticker for periodic updates
 		progressTicker := time.NewTicker(2 * time.Second)
 		defer progressTicker.Stop()
@@ -633,6 +622,13 @@ func (r *Runner) SpawnAsyncWithStreaming(
 	onText func(string),
 	onProgress func(id string, progress *AgentProgress),
 ) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		logging.Debug("refusing streaming async agent from cancelled context", "error", err)
+		return ""
+	}
 	deps := r.snapshotAgentDeps()
 	agent := r.newConfiguredAgent(ctx, deps, agentType, maxTurns, model, deps.permissions)
 	runLease, leaseErr := r.acquireAgentRunLease(agent.ID)
@@ -774,28 +770,6 @@ func (r *Runner) SpawnAsyncWithStreaming(
 				}
 			}
 		}()
-
-		// Check if original context is already cancelled
-		select {
-		case <-ctx.Done():
-			if deps.metaAgent != nil {
-				deps.metaAgent.UnregisterAgent(agentID)
-			}
-			cancelledResult := &AgentResult{
-				AgentID:   agentID,
-				Type:      agent.Type,
-				Status:    AgentStatusCancelled,
-				Error:     ctx.Err().Error(),
-				Completed: true,
-			}
-			r.finalizeAgentWorkspace(agent, cancelledResult)
-			r.mu.Lock()
-			r.results[agentID] = cancelledResult
-			r.mu.Unlock()
-			r.notifyResultReady(agentID)
-			return
-		default:
-		}
 
 		startTime := time.Now()
 		var err error

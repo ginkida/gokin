@@ -7,9 +7,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gokin/internal/client"
+	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 )
@@ -64,7 +66,7 @@ func DefaultTreePlannerConfig() *TreePlannerConfig {
 		MaxTreeNodes:      1000,
 		ReplanOnFailure:   true,
 		MaxReplans:        3,
-		PlanningTimeout:   60 * time.Second,
+		PlanningTimeout:   config.DefaultModelRoundTimeout,
 		SuccessProbWeight: 0.4,
 		CostWeight:        0.3,
 		ProgressWeight:    0.3,
@@ -81,13 +83,11 @@ func (tp *TreePlanner) ApplyThoroughness(t tools.Thoroughness) {
 		tp.config.MCTSIterations = 50
 		tp.config.MaxTreeDepth = 5
 		tp.config.MaxReplans = 1
-		tp.config.PlanningTimeout = 30 * time.Second
 	case tools.ThoroughnessThorough:
 		tp.config.BeamWidth = 7
 		tp.config.MCTSIterations = 200
 		tp.config.MaxTreeDepth = 15
 		tp.config.MaxReplans = 5
-		tp.config.PlanningTimeout = 120 * time.Second
 	}
 }
 
@@ -109,6 +109,10 @@ type TreePlanner struct {
 	trees      map[string]*PlanTree
 	lastTreeID string
 	mu         sync.RWMutex
+	// planningTimeout is independent from search-shape thoroughness. The
+	// agent's outer run deadline already bounds quick/thorough work; keeping a
+	// second 30/120-second model watchdog made healthy responses fail early.
+	planningTimeout atomic.Int64
 
 	// Callbacks for plan events
 	onNodeStart    func(tree *PlanTree, node *PlanNode)
@@ -124,13 +128,39 @@ func NewTreePlanner(config *TreePlannerConfig, strategyOpt *StrategyOptimizer, r
 		config = DefaultTreePlannerConfig()
 	}
 
-	return &TreePlanner{
+	tp := &TreePlanner{
 		config:      config,
 		strategyOpt: strategyOpt,
 		reflector:   reflector,
 		client:      c,
 		trees:       make(map[string]*PlanTree),
 	}
+	tp.SetPlanningTimeout(config.PlanningTimeout)
+	return tp
+}
+
+// SetPlanningTimeout updates the hard cap used by future plan-generation
+// model calls. Non-positive values restore the model-round default.
+func (tp *TreePlanner) SetPlanningTimeout(timeout time.Duration) {
+	if tp == nil {
+		return
+	}
+	if timeout <= 0 {
+		timeout = config.DefaultModelRoundTimeout
+	}
+	tp.planningTimeout.Store(int64(timeout))
+}
+
+// PlanningTimeout returns the effective plan-generation model-call cap.
+func (tp *TreePlanner) PlanningTimeout() time.Duration {
+	if tp == nil {
+		return config.DefaultModelRoundTimeout
+	}
+	timeout := time.Duration(tp.planningTimeout.Load())
+	if timeout <= 0 {
+		return config.DefaultModelRoundTimeout
+	}
+	return timeout
 }
 
 // SetCallbacks sets event callbacks for plan execution.
@@ -1285,11 +1315,9 @@ func (tp *TreePlanner) generateActionsWithLLM(ctx context.Context, prompt string
 	}
 
 	// Timeout for LLM call
-	timeout := tp.config.PlanningTimeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-	llmCtx, cancel := context.WithTimeout(ctx, timeout)
+	timeout := tp.PlanningTimeout()
+	llmCtx, cancel := context.WithTimeoutCause(
+		ctx, timeout, client.NewModelRoundTimeoutError(timeout))
 	defer cancel()
 
 	// Build planning prompt
@@ -1329,9 +1357,18 @@ streamLoop:
 			if len(actions) > 0 {
 				return actions, nil // Return partial plan on timeout
 			}
-			return nil, llmCtx.Err()
+			return nil, client.ContextErr(llmCtx)
 		case chunk, ok := <-stream.Chunks:
 			if !ok {
+				// A provider may close the channel while cancellation races
+				// with its terminal error chunk. Preserve the typed model-round
+				// cause instead of degrading it to "no valid actions parsed".
+				if err := client.ContextErr(llmCtx); err != nil {
+					if len(actions) > 0 {
+						return actions, nil
+					}
+					return nil, err
+				}
 				break streamLoop
 			}
 			if chunk.Error != nil {

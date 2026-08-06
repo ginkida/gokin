@@ -12,6 +12,7 @@ import (
 
 	"gokin/internal/agent"
 	"gokin/internal/client"
+	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/donegate"
 	"gokin/internal/logging"
@@ -30,11 +31,12 @@ const (
 	planStepVerifyTimeout = 2 * time.Minute
 	// planSummaryMaxChars is the max characters for previous steps summary context.
 	planSummaryMaxChars = 2000
-	// messageIdleTimeout is the maximum time without any model activity
+	// messageIdleTimeout is the minimum time without any model activity
 	// (text, tool calls, thinking) before we cancel message processing.
 	// Unlike a wall-clock timeout, this survives system sleep/wake cycles
-	// because the heartbeat freezes during sleep and resumes on wake.
-	messageIdleTimeout = 10 * time.Minute
+	// because the heartbeat freezes during sleep and resumes on wake. The live
+	// budget grows beyond a raised model-round cap via messageIdleBudget.
+	messageIdleTimeout = config.DefaultModelWatchdogFloor
 	// idleCheckInterval is how often we check for idle timeout.
 	idleCheckInterval = 30 * time.Second
 )
@@ -51,8 +53,18 @@ func (a *App) startMessageIdleWatchdog(
 	a.safeGo("idle-timeout-watcher", func() {
 		ticker := time.NewTicker(idleCheckInterval)
 		defer ticker.Stop()
-		a.watchMessageIdle(ctx, cancel, headlessTurn, messageIdleTimeout, ticker.C)
+		a.watchMessageIdle(ctx, cancel, headlessTurn, a.messageIdleBudget(), ticker.C)
 	})
+}
+
+func (a *App) messageIdleBudget() time.Duration {
+	modelRound := config.DefaultModelRoundTimeout
+	if a != nil && a.executor != nil {
+		modelRound = a.executor.ModelRoundTimeout()
+	} else if a != nil && a.config != nil && a.config.Tools.ModelRoundTimeout > 0 {
+		modelRound = a.config.Tools.ModelRoundTimeout
+	}
+	return config.ModelWatchdogTimeout(modelRound)
 }
 
 // watchMessageIdle contains the deterministic watchdog state machine. Keeping
@@ -375,7 +387,8 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// thinking) for messageIdleTimeout. Unlike wall-clock context.WithTimeout,
 	// this survives system sleep/wake — heartbeat freezes during sleep, and
 	// resumes when callbacks fire on wake.
-	// PlanningTimeout is for individual plan-step LLM calls (default 60s)
+	// PlanningTimeout is for individual plan-generation LLM calls (by default
+	// it follows the model-round cap)
 	// and must NOT be used here — it would kill normal conversations.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -808,6 +821,10 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 		cancelled := errors.Is(err, context.Canceled)
 		ft := client.DetectFailureTelemetry(err)
+		failureProvider := ft.Provider
+		if failureProvider == "" {
+			failureProvider = runtimeProvider
+		}
 		journalEvent := "request_failed"
 		if cancelled {
 			journalEvent = "request_cancelled"
@@ -927,8 +944,13 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			attempt, delay, ok := a.scheduleRateLimitAutoRetry(message)
 			if ok {
 				a.journalEvent("rate_limit_auto_retry_scheduled", map[string]any{
-					"attempt": attempt,
-					"delay":   delay.String(),
+					"attempt":        attempt,
+					"max_attempts":   maxAutoRateLimitRetries,
+					"delay":          delay.String(),
+					"failure_reason": ft.Reason,
+					"partial":        ft.Partial,
+					"timeout":        ft.Timeout.String(),
+					"provider":       failureProvider,
 				})
 				// Name the provider in the toast so the user can tell at a
 				// glance whether it's their active backend or something in
@@ -1022,14 +1044,27 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// long-running tasks. The compaction is the key recovery: a smaller
 		// context → less reasoning → the model finishes within the timeout.
 		// Mirrors the rate-limit auto-retry pattern (safeGo + timer).
-		if resumeAttempt, resumeDelay, ok := a.scheduleAutoResume(originalMessage, err); ok {
+		// The failed executor may have committed partial assistant text and
+		// completed tool pairs. Resume from that progress instead of replaying
+		// the bare request, which invites duplicate prose and tool intent. Budget
+		// the exact executable payload from its first schedule — this also keeps
+		// the cap intact when persistence fails and recovery stays in-process.
+		// A recovery turn keeps its already-anchored payload byte-for-byte stable,
+		// so later attempts use the same retry identity.
+		resumeMsg := nextAutoResumeMessageAfterProgress(
+			originalMessage, history, a.session.GetHistory(), recoveryTurn)
+		if resumeAttempt, resumeDelay, ok := a.scheduleAutoResume(resumeMsg, err); ok {
 			reason := autoResumeReason(err)
 			a.journalEvent("auto_resume_scheduled", map[string]any{
-				"attempt":  resumeAttempt,
-				"delay":    resumeDelay.String(),
-				"reason":   reason,
-				"error":    err.Error(),
-				"provider": ft.Provider,
+				"attempt":        resumeAttempt,
+				"max_attempts":   maxAutoResumeAttempts,
+				"delay":          resumeDelay.String(),
+				"reason":         reason,
+				"failure_reason": ft.Reason,
+				"partial":        ft.Partial,
+				"timeout":        ft.Timeout.String(),
+				"error":          err.Error(),
+				"provider":       failureProvider,
 			})
 			logging.Info("auto-resume scheduled after terminal error",
 				"reason", reason,
@@ -1042,16 +1077,21 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			// context would hit the same timeout.
 			removed := a.performAutoResumeCompaction()
 
-			// If compaction removed nothing AND the error is context-size-
-			// driven (model round timeout), the retry would hit the same 14m
-			// cap with an unchanged context — a guaranteed re-failure. Refund
-			// the budget and surface the error instead of wasting ~14m15s per
-			// attempt. Transient errors (HTTP/stream-idle/network) still retry
-			// since the provider may have recovered on its own.
-			if removed == 0 && isContextSizeError(err) {
-				logging.Info("auto-resume skipped: compaction removed nothing for a context-size error",
-					"reason", reason, "error", err.Error())
-				a.refundAutoResume(originalMessage)
+			// An unchanged FIRST retry is worthwhile even for model timeout:
+			// provider latency/reasoning length are nondeterministic, and compact
+			// prompts have nothing to remove. Stop only after that unchanged retry
+			// also times out, avoiding an unproductive second 14m cycle. Other
+			// transient errors retain both attempts because provider recovery alone
+			// can resolve them.
+			if removed == 0 && shouldSkipUnchangedAutoResume(err, resumeAttempt) {
+				logging.Info("auto-resume skipped: repeated model timeout with unchanged context",
+					"reason", reason, "attempt", resumeAttempt, "error", err.Error())
+				a.refundAutoResume(resumeMsg)
+				a.safeSendToProgram(ui.StatusUpdateMsg{
+					Type: ui.StatusWarning,
+					Message: "Model timed out again with an already-compact context; automatic retry stopped. " +
+						"Use /timeout 20m for this workload or continue with a narrower prompt.",
+				})
 				a.safeSendToProgram(ui.ResponseDoneMsg{})
 				a.safeSendToProgram(ui.ErrorMsg(err))
 				return
@@ -1061,20 +1101,23 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			compactNote := ""
 			if removed > 0 {
 				compactNote = fmt.Sprintf(", compacted %d messages", removed)
+			} else if errors.Is(err, client.ErrModelRoundTimeout) {
+				compactNote = ", context already compact — retrying transiently"
 			}
 			a.safeSendToProgram(ui.StatusUpdateMsg{
 				Type:    ui.StatusRetry,
 				Message: fmt.Sprintf("%s — auto-resume %d/%d in %v%s", reason, resumeAttempt, maxAutoResumeAttempts, resumeDelay.Round(time.Second), compactNote),
 				Details: map[string]any{
-					"attempt":     resumeAttempt,
-					"maxAttempts": maxAutoResumeAttempts,
-					"reason":      reason,
-					"provider":    provider,
+					"attempt":           resumeAttempt,
+					"maxAttempts":       maxAutoResumeAttempts,
+					"reason":            reason,
+					"provider":          provider,
+					"compactedMessages": removed,
 				},
 			})
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
 
-			resumeMsg, resumeWait := originalMessage, resumeDelay
+			resumeWait := resumeDelay
 			resumeSessionID := turnLineage.sessionID
 			resumeEpoch := turnLineage.epoch
 			recoveryCheckpoints := a.sideEffectRecoverySnapshot()
@@ -1963,7 +2006,14 @@ func (a *App) getStepTimeout(step *plan.Step) time.Duration {
 	if a.config.Plan.DefaultStepTimeout > 0 {
 		return a.config.Plan.DefaultStepTimeout
 	}
-	return 5 * time.Minute
+	timeout := config.DefaultAgentTimeout
+	if a.executor != nil {
+		minimum := a.executor.ModelRoundTimeout() + config.DefaultAgentTimeoutHeadroom
+		if minimum > timeout {
+			timeout = minimum
+		}
+	}
+	return timeout
 }
 
 // executeDirectStep executes a single step in the direct (same-session) mode.
@@ -3177,6 +3227,22 @@ func nextRetryMessageAfterProgress(originalMessage string, preAttempt, cleaned [
 	return buildContinuationRetryMessage(originalMessage, newPortion)
 }
 
+// nextAutoResumeMessageAfterProgress gives the first durable timeout recovery
+// the same continuation anchor as an in-process stream retry. Once executing a
+// persisted/in-process recovery, the payload itself is the stable retry
+// identity; keep it unchanged even if that attempt made more progress so its
+// bounded retry counter cannot migrate to a new message hash each round.
+func nextAutoResumeMessageAfterProgress(
+	originalMessage string,
+	preAttempt, committed []*genai.Content,
+	recoveryTurn bool,
+) string {
+	if recoveryTurn {
+		return originalMessage
+	}
+	return nextRetryMessageAfterProgress(originalMessage, preAttempt, committed)
+}
+
 func buildContinuationRetryMessage(baseMessage string, history []*genai.Content) string {
 	baseMessage = strings.TrimSpace(baseMessage)
 	last := lastModelText(history)
@@ -3240,7 +3306,11 @@ func lastModelText(history []*genai.Content) string {
 
 		var sb strings.Builder
 		for _, part := range msg.Parts {
-			if part != nil && strings.TrimSpace(part.Text) != "" {
+			// Thinking is provider protocol state, not assistant-facing prose.
+			// Quoting it into a synthetic user continuation can leak hidden
+			// reasoning and, for signed-thinking providers, detach it from the
+			// signature that makes replay valid.
+			if part != nil && !part.Thought && strings.TrimSpace(part.Text) != "" {
 				sb.WriteString(part.Text)
 			}
 		}

@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gokin/internal/client"
 
 	"google.golang.org/genai"
 )
@@ -56,6 +59,17 @@ type blockedSummarySummarizer struct {
 	summary string
 }
 
+type deadlineCauseSummarizer struct {
+	cause chan error
+}
+
+func (d *deadlineCauseSummarizer) Summarize(ctx context.Context, _ []*genai.Content, _ string) (string, error) {
+	<-ctx.Done()
+	cause := context.Cause(ctx)
+	d.cause <- cause
+	return "", cause
+}
+
 func (b *blockedSummarySummarizer) Summarize(ctx context.Context, history []*genai.Content, prompt string) (string, error) {
 	close(b.started)
 	select {
@@ -77,7 +91,7 @@ func longHistory() []*genai.Content {
 // TestSessionMemoryManager_ExtractWithLLM_NoOverlap (round 5) pins the fix:
 // Extract() used to launch `go s.extractWithLLM(...)` on every qualifying
 // (every-3rd) extraction with NO tracking of whether a prior such goroutine
-// was still running. A burst of qualifying extractions within the ~30s LLM
+// was still running. A burst of qualifying extractions within the LLM
 // call window (token/tool-call thresholds firing in quick succession, or
 // concurrent sub-agent tool activity — CLAUDE.md notes sub-agent tool
 // activity counts toward the extraction thresholds too) could launch TWO
@@ -119,6 +133,25 @@ func TestSessionMemoryManager_ExtractWithLLM_NoOverlap(t *testing.T) {
 	summarizer.mu.Unlock()
 	if maxConcur > 1 {
 		t.Fatalf("max concurrent Summarize() calls = %d, want <= 1 — overlapping LLM extractions raced to set s.content", maxConcur)
+	}
+}
+
+func TestSessionMemoryLLMExtractionUsesLiveModelRoundTimeout(t *testing.T) {
+	mgr := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
+	mgr.SetModelRoundTimeout(20 * time.Millisecond)
+	summarizer := &deadlineCauseSummarizer{cause: make(chan error, 1)}
+	mgr.SetSummarizer(summarizer)
+
+	start := time.Now()
+	mgr.extractWithLLM(nil, "fallback", 0)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("LLM extraction timeout took %v, want ~20ms", elapsed)
+	}
+	if cause := <-summarizer.cause; !errors.Is(cause, client.ErrModelRoundTimeout) {
+		t.Fatalf("extraction context cause = %v, want typed model-round timeout", cause)
+	}
+	if got := mgr.ModelRoundTimeout(); got != 20*time.Millisecond {
+		t.Fatalf("live session-memory timeout = %v, want 20ms", got)
 	}
 }
 
@@ -262,7 +295,7 @@ func (e *errorSummarizer) Summarize(ctx context.Context, history []*genai.Conten
 
 // TestSessionMemoryManager_ExtractionFailedCallback pins the fix for
 // invisible quota-burning background LLM calls (round-14 #7): a failed
-// LLM-backed extraction (a real ~30s API call on a quota-limited provider)
+// LLM-backed extraction (a real model-round API call on a quota-limited provider)
 // was Debug-log only. SetOnExtractionFailed must fire on a genuine failure.
 func TestSessionMemoryManager_ExtractionFailedCallback(t *testing.T) {
 	mgr := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())

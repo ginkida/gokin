@@ -587,7 +587,7 @@ func (ta *TaskAnalyzer) decomposeWithLLM(ctx context.Context, message string) (*
 		return nil, fmt.Errorf("LLM request failed: %w", err)
 	}
 
-	resp, err := stream.Collect()
+	resp, err := stream.CollectContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("LLM response collection failed: %w", err)
 	}

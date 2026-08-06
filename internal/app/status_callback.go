@@ -15,7 +15,7 @@ type appStatusCallback struct {
 
 // OnRetry is called when the client is retrying a failed request.
 func (c *appStatusCallback) OnRetry(attempt, maxAttempts int, delay time.Duration, reason string) {
-	if c.app == nil || c.app.program == nil {
+	if c.app == nil || !c.app.hasProgram() {
 		return
 	}
 
@@ -39,7 +39,7 @@ func (c *appStatusCallback) OnRetry(attempt, maxAttempts int, delay time.Duratio
 // when multiple providers are configured — users asked "which one
 // throttled me?" and previously had to infer from the status bar.
 func (c *appStatusCallback) OnRateLimit(waitTime time.Duration) {
-	if c.app == nil || c.app.program == nil {
+	if c.app == nil || !c.app.hasProgram() {
 		return
 	}
 
@@ -58,7 +58,7 @@ func (c *appStatusCallback) OnRateLimit(waitTime time.Duration) {
 
 // OnStreamIdle is called when the streaming response has been idle for a while.
 func (c *appStatusCallback) OnStreamIdle(elapsed time.Duration) {
-	if c.app == nil || c.app.program == nil {
+	if c.app == nil || !c.app.hasProgram() {
 		return
 	}
 
@@ -78,7 +78,7 @@ func (c *appStatusCallback) OnStreamIdle(elapsed time.Duration) {
 
 // OnThinkingIdle is called when a thinking-enabled model is in its silent reasoning phase.
 func (c *appStatusCallback) OnThinkingIdle(elapsed time.Duration, provider string) {
-	if c.app == nil || c.app.program == nil {
+	if c.app == nil || !c.app.hasProgram() {
 		return
 	}
 
@@ -99,7 +99,7 @@ func (c *appStatusCallback) OnThinkingIdle(elapsed time.Duration, provider strin
 
 // OnStreamResume is called when the stream resumes after being idle.
 func (c *appStatusCallback) OnStreamResume() {
-	if c.app == nil || c.app.program == nil {
+	if c.app == nil || !c.app.hasProgram() {
 		return
 	}
 
@@ -112,7 +112,7 @@ func (c *appStatusCallback) OnStreamResume() {
 
 // OnError is called when an error occurs.
 func (c *appStatusCallback) OnError(err error, recoverable bool) {
-	if c.app == nil || c.app.program == nil {
+	if c.app == nil || !c.app.hasProgram() {
 		return
 	}
 

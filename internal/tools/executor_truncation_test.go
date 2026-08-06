@@ -319,6 +319,80 @@ func TestExecutorExecuteLoop_HungModelStreamTimesOut(t *testing.T) {
 	}
 }
 
+func TestExecutorExecuteLoop_ModelTimeoutReturnsPartialText(t *testing.T) {
+	const partial = "I inspected the relevant files."
+	cl := &scriptedExecutorClient{
+		model:     "glm-5.1",
+		responses: []*client.StreamingResponse{buildExecutorTestPartialHungStream(partial)},
+	}
+
+	exec := NewExecutor(NewRegistry(), cl, time.Second)
+	exec.preFlightChecks = false
+	exec.SetModelRoundTimeout(20 * time.Millisecond)
+
+	history, finalText, err := exec.Execute(context.Background(), nil, "inspect the timeout")
+	if !errors.Is(err, client.ErrModelRoundTimeout) {
+		t.Fatalf("Execute() error = %v, want ErrModelRoundTimeout", err)
+	}
+	if finalText != partial {
+		t.Fatalf("Execute() finalText = %q, want preserved partial text", finalText)
+	}
+	if got := strings.Join(flattenHistoryTexts(history), "\n"); !strings.Contains(got, partial) {
+		t.Fatalf("Execute() history lost partial text: %q", got)
+	}
+	if telemetry := client.DetectFailureTelemetry(err); !telemetry.Partial {
+		t.Fatalf("timeout telemetry = %#v, want partial=true", telemetry)
+	}
+}
+
+func TestExecutorExecuteLoop_FunctionResponseTimeoutDoesNotRepeatTools(t *testing.T) {
+	const partial = "The tool result shows"
+	registry := NewRegistry()
+	readTool := &scriptedReadTool{}
+	if err := registry.Register(readTool); err != nil {
+		t.Fatal(err)
+	}
+	cl := &scriptedExecutorClient{
+		model: "glm-5.1",
+		responses: []*client.StreamingResponse{
+			buildExecutorTestReadStream("read-before-timeout"),
+			buildExecutorTestPartialHungStream(partial),
+		},
+	}
+
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+	exec.SetModelRoundTimeout(20 * time.Millisecond)
+
+	history, finalText, err := exec.Execute(context.Background(), nil, "inspect one file")
+	if !errors.Is(err, client.ErrModelRoundTimeout) {
+		t.Fatalf("Execute() error = %v, want ErrModelRoundTimeout", err)
+	}
+	if readTool.calls != 1 {
+		t.Fatalf("read tool calls = %d, want exactly one completed execution", readTool.calls)
+	}
+	if cl.next != 2 {
+		t.Fatalf("model calls = %d, want initial call plus one function-response call", cl.next)
+	}
+	if finalText != partial {
+		t.Fatalf("Execute() finalText = %q, want partial function response", finalText)
+	}
+	var hasCompletedToolResult bool
+	for _, content := range history {
+		for _, part := range content.Parts {
+			if part != nil && part.FunctionResponse != nil &&
+				part.FunctionResponse.ID == "read-before-timeout" {
+				hasCompletedToolResult = true
+			}
+		}
+	}
+	historyText := strings.Join(flattenHistoryTexts(history), "\n")
+	if !hasCompletedToolResult || !strings.Contains(historyText, partial) {
+		t.Fatalf("history lost completed tool pair (%v) or partial response: %q",
+			hasCompletedToolResult, historyText)
+	}
+}
+
 func buildExecutorTestMaxTokensTextStream(text string) *client.StreamingResponse {
 	return buildExecutorTestMaxTokensTextStreamWithUsage(text, 0, 0)
 }
@@ -376,4 +450,10 @@ func buildExecutorTestHungStream() *client.StreamingResponse {
 		Chunks: make(chan client.ResponseChunk),
 		Done:   make(chan struct{}),
 	}
+}
+
+func buildExecutorTestPartialHungStream(text string) *client.StreamingResponse {
+	chunks := make(chan client.ResponseChunk, 1)
+	chunks <- client.ResponseChunk{Text: text, InputTokens: 20, OutputTokens: 7}
+	return &client.StreamingResponse{Chunks: chunks, Done: make(chan struct{})}
 }

@@ -5,14 +5,25 @@ import (
 	"fmt"
 	"time"
 
+	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/ui"
 )
 
 const (
 	stepWatchdogInterval = 20 * time.Second
-	stepStuckTimeout     = 3 * time.Minute
+	stepStuckTimeout     = config.DefaultModelWatchdogFloor
 )
+
+func (a *App) planStepStuckBudget() time.Duration {
+	modelRound := config.DefaultModelRoundTimeout
+	if a != nil && a.executor != nil {
+		modelRound = a.executor.ModelRoundTimeout()
+	} else if a != nil && a.config != nil && a.config.Tools.ModelRoundTimeout > 0 {
+		modelRound = a.config.Tools.ModelRoundTimeout
+	}
+	return config.ModelWatchdogTimeout(modelRound)
+}
 
 func (a *App) touchStepHeartbeat() {
 	a.stepHeartbeatMu.Lock()
@@ -31,6 +42,7 @@ func (a *App) stepHeartbeatAge() time.Duration {
 
 func (a *App) startPlanWatchdog(ctx context.Context, cancel context.CancelFunc, planID string) {
 	a.touchStepHeartbeat()
+	stuckBudget := a.planStepStuckBudget()
 
 	a.safeGo("plan-watchdog", func() {
 		ticker := time.NewTicker(stepWatchdogInterval)
@@ -51,7 +63,7 @@ func (a *App) startPlanWatchdog(ctx context.Context, cancel context.CancelFunc, 
 				}
 
 				age := a.stepHeartbeatAge()
-				if age > 0 && age > stepStuckTimeout {
+				if age > 0 && age > stuckBudget {
 					logging.Warn("plan step appears stuck; pausing execution",
 						"plan_id", planID, "step_id", stepID, "idle", age.String())
 

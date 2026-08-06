@@ -23,10 +23,7 @@ func (a *App) surfacePersistenceResult(key, message string, err error) {
 	logging.Warn("persistence subsystem failing",
 		"subsystem", key, "error", err)
 
-	a.programMu.RLock()
-	programAvailable := a.program != nil
-	a.programMu.RUnlock()
-	if !programAvailable || !a.persistenceFailures.shouldNotify(key, true) {
+	if !a.hasProgram() || !a.persistenceFailures.shouldNotify(key, true) {
 		return
 	}
 	a.safeSendToProgramAsync(ui.StatusUpdateMsg{
