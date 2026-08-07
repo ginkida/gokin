@@ -406,6 +406,15 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 	}
 
+	// Headless is a second exit path that never reaches gracefulShutdown, so it
+	// must flush the durable stores itself. Without this the lifetime tool
+	// counts are lost in exactly the mode that runs evals and scripts — the
+	// traffic the measurement most needs. A telemetry failure must not change
+	// the headless exit status, so this is logged, not returned.
+	if err := a.toolUsage.Flush(); err != nil {
+		logging.Debug("tool usage ledger flush failed in headless", "error", err)
+	}
+
 	a.mu.Lock()
 	lastErr := a.lastError
 	a.mu.Unlock()
