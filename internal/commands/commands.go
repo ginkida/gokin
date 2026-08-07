@@ -47,6 +47,19 @@ type ModelSetter interface {
 }
 
 // AppInterface defines what commands need from the application.
+// LifetimeToolUsage reports how often each tool has been invoked across every
+// session on this machine. It exists to make "has anyone ever reached for this?"
+// answerable — session metrics reset on /clear and cannot answer it.
+//
+// NeverUsed is data, not a verdict: a tool can be legitimately rare (ssh,
+// notify) without being dead. It is the starting point for a wire-or-tombstone
+// decision, not the decision.
+type LifetimeToolUsage struct {
+	Counts    map[string]int64
+	NeverUsed []string
+	Total     int64
+}
+
 type AppInterface interface {
 	GetSession() *chat.Session
 	GetHistoryManager() (*chat.HistoryManager, error)
@@ -61,6 +74,7 @@ type AppInterface interface {
 	GetTodoTool() *tools.TodoTool
 	GetConfig() *config.Config
 	GetTokenStats() TokenStats
+	GetLifetimeToolUsage() LifetimeToolUsage
 	GetModelSetter() ModelSetter
 	GetProjectInfo() *appcontext.ProjectInfo
 	GetPlanManager() *plan.Manager

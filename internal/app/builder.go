@@ -35,6 +35,7 @@ import (
 	"gokin/internal/security"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
+	"gokin/internal/toolusage"
 	"gokin/internal/ui"
 	"gokin/internal/undo"
 	"gokin/internal/watcher"
@@ -2753,6 +2754,7 @@ func (b *Builder) assembleApp() *App {
 		searchCache:           b.searchCache,
 		rateLimiter:           b.rateLimiter,
 		auditLogger:           b.auditLogger,
+		toolUsage:             toolusage.NewLedger(filepath.Join(b.configDir, "tool_usage.json")),
 		fileWatcher:           b.fileWatcher,
 		codeIntelProvider:     b.codeIntelProvider,
 		replManager:           b.replManager,

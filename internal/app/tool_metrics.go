@@ -198,6 +198,9 @@ func (a *App) recordToolPhaseOutcome(tool string, d time.Duration, success bool)
 		}
 		a.toolMetrics.Record(tool, d, success, kind)
 	}
+	// Lifetime counter: survives /clear and restarts, so a tool nobody ever
+	// reaches for is visible as such instead of being assumed useful.
+	a.toolUsage.Record(tool)
 	if a.taskRouter != nil {
 		a.taskRouter.TrackOperation(tool, success)
 	}

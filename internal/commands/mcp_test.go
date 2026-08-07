@@ -53,6 +53,7 @@ func (f *fakeAppForMCP) RevokeGrantedDir(path string) (bool, error)      { retur
 func (f *fakeAppForMCP) ListAllowedDirs() []string                       { return nil }
 func (f *fakeAppForMCP) GetTodoTool() *tools.TodoTool                    { return nil }
 func (f *fakeAppForMCP) GetTokenStats() TokenStats                       { return TokenStats{} }
+func (f *fakeAppForMCP) GetLifetimeToolUsage() LifetimeToolUsage         { return LifetimeToolUsage{} }
 func (f *fakeAppForMCP) GetModelSetter() ModelSetter                     { return nil }
 func (f *fakeAppForMCP) GetProjectInfo() *appcontext.ProjectInfo         { return nil }
 func (f *fakeAppForMCP) GetPlanManager() *plan.Manager                   { return nil }

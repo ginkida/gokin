@@ -574,6 +574,10 @@ func (a *App) handleSubAgentActivity(agentID, agentType, prompt, toolName string
 			"agent_id": agentID,
 		})
 	case "tool_end":
+		// Sub-agent tool calls never reach recordToolPhaseOutcome (that is the
+		// foreground executor's observer), so counting only there would report
+		// a delegation-only tool as never used.
+		a.toolUsage.Record(toolName)
 		a.touchStepHeartbeat()
 		a.journalEvent("tool_end", map[string]any{
 			"tool":     toolName,

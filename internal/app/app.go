@@ -39,6 +39,7 @@ import (
 	"gokin/internal/router"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
+	"gokin/internal/toolusage"
 	"gokin/internal/ui"
 	"gokin/internal/undo"
 	"gokin/internal/watcher"
@@ -272,6 +273,10 @@ type App struct {
 	searchCache *cache.SearchCache
 	rateLimiter *ratelimit.Limiter
 	auditLogger *audit.Logger
+	// toolUsage is the LIFETIME per-tool invocation counter. Unlike
+	// toolMetrics it is deliberately NOT reset by /clear — its whole
+	// purpose is to answer whether a tool has ever been reached for.
+	toolUsage   *toolusage.Ledger
 	fileWatcher *watcher.Watcher
 	// codeIntelProvider owns the lazy, workspace-scoped gopls process. It is
 	// separate from user MCP servers and must be closed explicitly.
@@ -3565,6 +3570,23 @@ func (a *App) shortActiveProviderName() string {
 }
 
 // GetTokenStats returns token usage statistics for the session.
+// GetLifetimeToolUsage reports the persisted per-tool invocation counts.
+//
+// The never-used set is computed against this App's own registry: a tool that
+// was never registered here cannot be judged on not having been chosen.
+func (a *App) GetLifetimeToolUsage() commands.LifetimeToolUsage {
+	counts := a.toolUsage.Snapshot()
+	var total int64
+	for _, count := range counts {
+		total += count
+	}
+	usage := commands.LifetimeToolUsage{Counts: counts, Total: total}
+	if a.registry != nil {
+		usage.NeverUsed = a.toolUsage.NeverUsed(a.registry.Names())
+	}
+	return usage
+}
+
 func (a *App) GetTokenStats() commands.TokenStats {
 	var promptCache client.CacheStats
 	if a.executor != nil {

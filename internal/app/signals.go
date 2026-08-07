@@ -408,6 +408,12 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	// shutdown without anyone knowing. Now Flush returns the error;
 	// surface it the same way as session save (Error log + stderr
 	// since TUI is torn down by this point).
+	// Lifetime tool-usage counts flush between periodic writes only, so the
+	// final calls of a session would otherwise be lost.
+	if err := a.toolUsage.Flush(); err != nil {
+		logging.Warn("tool usage ledger flush failed during shutdown", "error", err)
+	}
+
 	if a.auditLogger != nil {
 		logging.Debug("flushing audit logger")
 		if err := a.auditLogger.Flush(); err != nil {

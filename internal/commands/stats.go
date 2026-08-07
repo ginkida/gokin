@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -137,6 +138,13 @@ func (c *StatsCommand) Execute(ctx context.Context, args []string, app AppInterf
 		sb.WriteString(perf)
 	}
 
+	// Lifetime tool usage — the only figure here that survives /clear and
+	// restarts, and therefore the only one that can answer whether a tool has
+	// ever been reached for at all.
+	if usage := formatLifetimeToolUsage(app.GetLifetimeToolUsage()); usage != "" {
+		sb.WriteString(usage)
+	}
+
 	// MCP section — only shown when at least one server is configured so we
 	// don't clutter /stats for users who never opted in.
 	if mgr := app.GetMCPManager(); mgr != nil {
@@ -210,3 +218,56 @@ func formatNumber(n int64) string {
 	}
 	return string(out)
 }
+
+// formatLifetimeToolUsage renders the persisted invocation counts. It reports
+// what was measured and stops there: a never-invoked tool may be genuinely
+// dead or merely rare, and the difference is a judgement the reader makes with
+// context this command does not have.
+func formatLifetimeToolUsage(usage LifetimeToolUsage) string {
+	if usage.Total == 0 && len(usage.NeverUsed) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Tool Usage (lifetime, all sessions)\n")
+	fmt.Fprintf(&sb, "  Invocations:     %s across %d tool(s)\n",
+		formatNumber(usage.Total), len(usage.Counts))
+
+	type entry struct {
+		name  string
+		count int64
+	}
+	ranked := make([]entry, 0, len(usage.Counts))
+	for name, count := range usage.Counts {
+		ranked = append(ranked, entry{name, count})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].count != ranked[j].count {
+			return ranked[i].count > ranked[j].count
+		}
+		return ranked[i].name < ranked[j].name
+	})
+	for i, e := range ranked {
+		if i >= lifetimeUsageTopN {
+			break
+		}
+		fmt.Fprintf(&sb, "    %-18s %s\n", e.name, formatNumber(e.count))
+	}
+
+	if len(usage.NeverUsed) > 0 {
+		shown := usage.NeverUsed
+		suffix := ""
+		if len(shown) > lifetimeUnusedListMax {
+			shown = shown[:lifetimeUnusedListMax]
+			suffix = fmt.Sprintf(", +%d more", len(usage.NeverUsed)-lifetimeUnusedListMax)
+		}
+		fmt.Fprintf(&sb, "  Never invoked:   %d — %s%s\n",
+			len(usage.NeverUsed), strings.Join(shown, ", "), suffix)
+	}
+	sb.WriteByte('\n')
+	return sb.String()
+}
+
+const (
+	lifetimeUsageTopN     = 5
+	lifetimeUnusedListMax = 8
+)
