@@ -224,7 +224,12 @@ func formatNumber(n int64) string {
 // dead or merely rare, and the difference is a judgement the reader makes with
 // context this command does not have.
 func formatLifetimeToolUsage(usage LifetimeToolUsage) string {
-	if usage.Total == 0 && len(usage.NeverUsed) == 0 {
+	// With nothing recorded the ledger has no opinion, and saying so out loud
+	// would be worse than silence: NeverUsed is the whole registry on a fresh
+	// install, so the section would report read, write and bash — the tools
+	// being used at that very moment — as never invoked. "No measurements yet"
+	// and "measured, and dead" must never render the same.
+	if usage.Total == 0 {
 		return ""
 	}
 	var sb strings.Builder
