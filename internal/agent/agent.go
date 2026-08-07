@@ -651,12 +651,28 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 }
 
 // createFilteredRegistryFromList creates a registry with only the specified tools.
+// foregroundOnlyTools never reach a sub-agent, whatever its type allows.
+//
+// repl_exec drives ONE Python kernel bound to the foreground workspace, and
+// Manager.Execute serializes every cell behind a single mutex — so handing it
+// to sub-agents means shared globals, one agent's action=reset wiping another's
+// mid-analysis state, and a long cell blocking everyone else's REPL work.
+// AgentTypeGeneral allows every tool, so without this the sharing was live
+// rather than theoretical. Excluding it here also keeps its schema out of
+// sub-agent prompts instead of advertising a tool that would only fail.
+var foregroundOnlyTools = map[string]bool{
+	"repl_exec": true,
+}
+
 func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.ToolRegistry) *tools.Registry {
 	filtered := tools.NewRegistry()
 
 	if len(allowedTools) == 0 {
 		// All tools allowed - copy all from base registry
 		for _, tool := range baseRegistry.List() {
+			if foregroundOnlyTools[tool.Name()] {
+				continue
+			}
 			_ = filtered.Register(cloneToolForAgent(tool))
 		}
 		return bindTaskToolCapabilityCeiling(filtered)
@@ -668,7 +684,7 @@ func createFilteredRegistryFromList(allowedTools []string, baseRegistry tools.To
 	}
 
 	for _, tool := range baseRegistry.List() {
-		if allowedMap[tool.Name()] {
+		if allowedMap[tool.Name()] && !foregroundOnlyTools[tool.Name()] {
 			_ = filtered.Register(cloneToolForAgent(tool))
 		}
 	}
@@ -1347,32 +1363,10 @@ func generateAgentID() string {
 
 // createFilteredRegistry creates a registry with only allowed tools for the agent type.
 func createFilteredRegistry(agentType AgentType, baseRegistry tools.ToolRegistry) *tools.Registry {
-	allowedTools := agentType.AllowedTools()
-
-	// If nil, all tools are allowed (general type)
-	if allowedTools == nil {
-		// Copy all tools to a new Registry
-		filtered := tools.NewRegistry()
-		for _, tool := range baseRegistry.List() {
-			_ = filtered.Register(cloneToolForAgent(tool))
-		}
-		return bindTaskToolCapabilityCeiling(filtered)
-	}
-
-	// Create new registry with filtered tools
-	filtered := tools.NewRegistry()
-	allowedMap := make(map[string]bool)
-	for _, name := range allowedTools {
-		allowedMap[name] = true
-	}
-
-	for _, tool := range baseRegistry.List() {
-		if allowedMap[tool.Name()] {
-			_ = filtered.Register(cloneToolForAgent(tool))
-		}
-	}
-
-	return bindTaskToolCapabilityCeiling(filtered)
+	// Delegates so the two filters cannot drift: this one and the list form
+	// were byte-identical apart from their nil-vs-empty check, which meant every
+	// rule about what a sub-agent may hold had to be written twice.
+	return createFilteredRegistryFromList(agentType.AllowedTools(), baseRegistry)
 }
 
 // RequestTool dynamically adds a tool from the base registry to the agent's active registry.

@@ -290,3 +290,25 @@ func TestCloneToolForWorkDir_UndoManagerPropagated(t *testing.T) {
 		t.Errorf("MkdirTool clone lost undoManager: ok=%v got=%p want=%p", ok, mkdirClone.undoManager, um)
 	}
 }
+
+// Second layer behind agent.foregroundOnlyTools: even if some path hands the
+// REPL tool to another workspace, the clone must not carry the foreground
+// kernel with it. A shared manager would mean shared Python globals and a reset
+// from one agent wiping another's state.
+func TestCloneToolForWorkDir_ReplExecDropsForegroundKernel(t *testing.T) {
+	original := NewReplExecTool(nil)
+	cloned := CloneToolForWorkDir(original, t.TempDir())
+	if cloned == Tool(original) {
+		t.Fatal("clone returned the shared foreground instance")
+	}
+	replClone, ok := cloned.(*ReplExecTool)
+	if !ok {
+		t.Fatalf("clone changed type: %T", cloned)
+	}
+	replClone.mu.RLock()
+	manager := replClone.manager
+	replClone.mu.RUnlock()
+	if manager != nil {
+		t.Fatal("clone must start without a kernel so it degrades honestly")
+	}
+}

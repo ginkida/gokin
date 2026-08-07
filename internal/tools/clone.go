@@ -271,6 +271,18 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		// it lets the agent loop's incomplete-work continuation read foreign
 		// todos. A fresh list keeps each agent's progress its own.
 		return NewTodoTool()
+	case *ReplExecTool:
+		// The REPL kernel is a single Python subprocess bound to the foreground
+		// workspace, and Manager.Execute serializes every cell behind one mutex.
+		// Sharing the foreground instance would leak globals between agents, let
+		// one agent's action=reset wipe another's mid-analysis state, and let a
+		// long cell block everyone else's REPL work. A clone therefore gets NO
+		// manager, which degrades honestly ("stateful REPL is unavailable in
+		// this session") instead of reaching into the foreground kernel.
+		//
+		// Sub-agents do not receive the tool at all (agent.foregroundOnlyTools);
+		// this is the second layer, for any path that hands it over anyway.
+		return NewReplExecTool(nil)
 	default:
 		return tool
 	}
