@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"gokin/internal/tools"
@@ -36,5 +37,43 @@ func TestSubAgentRegistryExcludesForegroundOnlyTools(t *testing.T) {
 	}
 	if _, ok := explicit.Get("todo"); !ok {
 		t.Fatal("the allowlist path dropped a permitted tool")
+	}
+}
+
+// The registry filter alone does not hold: RequestTool pulls from the BASE
+// registry, and an unrestricted type (general returns a nil allowlist) skips
+// the authorization check entirely — so without an explicit guard a general
+// sub-agent could request the excluded tool straight back.
+func TestRequestToolRefusesForegroundOnlyTools(t *testing.T) {
+	base := tools.NewRegistry()
+	if err := base.Register(tools.NewReplExecTool(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Register(tools.NewTodoTool()); err != nil {
+		t.Fatal(err)
+	}
+	agent := &Agent{
+		registry:     createFilteredRegistry(AgentTypeGeneral, base),
+		baseRegistry: base,
+		workDir:      t.TempDir(),
+	}
+
+	err := agent.RequestTool("repl_exec")
+	if err == nil {
+		t.Fatal("a general agent recovered a foreground-only tool through RequestTool")
+	}
+	if !strings.Contains(err.Error(), "foreground") {
+		t.Fatalf("refusal should say why: %v", err)
+	}
+	if _, ok := agent.registry.Get("repl_exec"); ok {
+		t.Fatal("the refused tool was still added to the agent registry")
+	}
+
+	// An ordinary tool must still be requestable, or the guard is too broad.
+	if err := agent.RequestTool("todo"); err != nil {
+		t.Fatalf("ordinary tool request failed: %v", err)
+	}
+	if _, ok := agent.registry.Get("todo"); !ok {
+		t.Fatal("ordinary tool was not added")
 	}
 }

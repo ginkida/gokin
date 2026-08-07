@@ -1376,6 +1376,15 @@ func (a *Agent) RequestTool(name string) error {
 		return nil // Already have this tool
 	}
 
+	// Checked before the per-type authorization below, which it deliberately
+	// does not depend on: an unrestricted type (AgentTypeGeneral returns a nil
+	// allowlist) skips that check entirely and pulls straight from the base
+	// registry, so a foreground-only tool filtered out of this agent's registry
+	// would come back through here. The registry filter alone does not hold.
+	if foregroundOnlyTools[name] {
+		return fmt.Errorf("tool %q runs only in the foreground session and cannot be requested by an agent", name)
+	}
+
 	a.stateMu.RLock()
 	restricted := a.requestedToolsRestricted
 	_, authorized := a.allowedRequestedTools[name]
