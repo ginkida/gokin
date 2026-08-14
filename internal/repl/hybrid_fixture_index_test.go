@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -157,11 +158,7 @@ timeouts = [document["timeout"] for document in documents]
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			workDir, err := filepath.Abs(filepath.Join("..", "..", "evals", "hybrid", "fixtures", test.fixture))
-			if err != nil {
-				t.Fatal(err)
-			}
-			manager := testManager(t, workDir, nil)
+			manager := testManager(t, hybridFixtureWorkspace(t, test.fixture), nil)
 			result, err := manager.Execute(t.Context(), test.code)
 			if err != nil || result.Error != nil || result.Value != test.wantValue {
 				t.Fatalf("one-cell result=%+v err=%v, want value %s", result, err, test.wantValue)
@@ -260,6 +257,61 @@ func hybridScanOperationCount(operations map[string]int) int {
 		count += operations[operation]
 	}
 	return count
+}
+
+// hybridFixtureWorkspace materializes a fixture in an isolated repository, the
+// way the eval runner does. These scenarios exercise the production index,
+// which prefers Git's native ignore semantics — and Git's authority is the
+// repository that CONTAINS the directory. Run in place, the answers would
+// instead depend on how the gokin repository happens to track the fixture's
+// deliberately-ignored trap files: `git ls-files --cached` returns
+// tracked-but-ignored paths by design, so committing a trap (which a fresh
+// clone needs, or the scenario silently stops discriminating) would flip the
+// expected counts. Copying decouples the fixture's own .gitignore from ours.
+func hybridFixtureWorkspace(t *testing.T, fixture string) string {
+	t.Helper()
+	source, err := filepath.Abs(filepath.Join("..", "..", "evals", "hybrid", "fixtures", fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	copyFixtureTree(t, source, workDir)
+	// Untracked files under a real repository is the shape a user's workspace
+	// has, and it keeps the primary Git-backed index path under test. Without
+	// git the manager falls back to the matcher, which honors the same rules.
+	if git, lookErr := exec.LookPath("git"); lookErr == nil {
+		if out, initErr := exec.Command(git, "-C", workDir, "init", "-q").CombinedOutput(); initErr != nil {
+			t.Fatalf("git init fixture workspace: %v: %s", initErr, out)
+		}
+	}
+	return workDir
+}
+
+func copyFixtureTree(t *testing.T, source, destination string) {
+	t.Helper()
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		from := filepath.Join(source, entry.Name())
+		to := filepath.Join(destination, entry.Name())
+		switch {
+		case entry.IsDir():
+			if err := os.MkdirAll(to, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			copyFixtureTree(t, from, to)
+		case entry.Type().IsRegular():
+			data, readErr := os.ReadFile(from)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if err := os.WriteFile(to, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }
 
 func hybridFixtureIndexPaths(t *testing.T, workDir string) map[string]bool {

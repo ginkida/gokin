@@ -302,8 +302,16 @@ copy["forged"] = "value"
 	if err != nil || isolated.Error != nil || isolated.Value != "[False, True]" {
 		t.Fatalf("analytical mutable module values were not isolated: result=%+v python_error=%+v err=%v", isolated, isolated.Error, err)
 	}
-	runtimeLeak, err := manager.Execute(t.Context(), `import datetime
-datetime.sys`)
+	// Which runtime module an analytical one re-exports is a CPython packaging
+	// detail, not a property of this guard: the previous probe `datetime.sys`
+	// exists on 3.11 but is deleted on 3.12+ once the C accelerator loads, so
+	// the guard never ran there and the assertion failed on the stdlib rather
+	// than on a leak. `json` is pure Python and imports codecs on every
+	// supported version. If a future runtime drops it, this fails loudly with
+	// AttributeError — pick another attribute from the same family (base64.struct,
+	// re.enum, statistics.sys) rather than relaxing the expected error.
+	runtimeLeak, err := manager.Execute(t.Context(), `import json
+json.codecs`)
 	if err != nil || runtimeLeak.Error == nil || runtimeLeak.Error.Type != "PermissionError" {
 		t.Fatalf("analytical module leaked runtime dependency: result=%+v err=%v", runtimeLeak, err)
 	}
@@ -393,7 +401,7 @@ func TestManagerLargeValueBecomesArtifact(t *testing.T) {
 
 func TestManagerCapsHugeScalarWithoutResettingKernel(t *testing.T) {
 	manager := testManager(t, t.TempDir(), func(opts *Options) {
-		opts.MaxMemoryBytes = 80 * 1024 * 1024
+		opts.MaxMemoryBytes = 192 * 1024 * 1024
 	})
 	result, err := manager.Execute(t.Context(), `"x" * (32 * 1024 * 1024)`)
 	if err != nil {
@@ -573,7 +581,7 @@ clean`)
 
 func TestManagerMemoryLimitDiscardsGenerationAndRecovers(t *testing.T) {
 	manager := testManager(t, t.TempDir(), func(opts *Options) {
-		opts.MaxMemoryBytes = 48 * 1024 * 1024
+		opts.MaxMemoryBytes = memoryLimitTestBytes
 		opts.CellTimeout = 3 * time.Second
 	})
 	limited, err := manager.Execute(t.Context(), memoryLimitProbeCode())
@@ -602,7 +610,7 @@ func TestParentMemoryMonitorSurvivesWorkerTimerTampering(t *testing.T) {
 	if !residentMemorySupported() {
 		t.Skip("parent resident-memory monitor is unavailable in this build")
 	}
-	const limit = 48 * 1024 * 1024
+	const limit = memoryLimitTestBytes
 	manager := testManager(t, t.TempDir(), func(opts *Options) {
 		opts.MaxMemoryBytes = limit
 		opts.CellTimeout = 3 * time.Second
@@ -641,10 +649,19 @@ while time.monotonic() < deadline:
 "cell survived"`, limit)
 }
 
+// memoryLimitTestBytes is deliberately above the smallest limit configuration
+// accepts (engine.repl.max_memory_bytes >= 64 MiB) and well above what a bare
+// interpreter occupies. A fresh CPython 3.12 on Ubuntu peaks near 54 MiB, so
+// the earlier 48 MiB tests asserted a precondition their own runtime could not
+// meet: the RECOVERY generation tripped the limit before running anything, and
+// only on that platform. A test limit below the product's documented floor is
+// testing a configuration the product forbids.
+const memoryLimitTestBytes = 128 * 1024 * 1024
+
 func memoryLimitProbeCode() string {
 	return `import time
 try:
-    payload = "x" * (64 * 1024 * 1024)
+    payload = "x" * (256 * 1024 * 1024)
     deadline = time.monotonic() + 1
     while time.monotonic() < deadline:
         pass

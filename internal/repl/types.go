@@ -120,6 +120,22 @@ type ExecutionError struct {
 	Traceback string `json:"traceback,omitempty"`
 }
 
+// String makes a Result carrying this pointer self-describing under %v/%+v.
+// Without it a failure report prints `Error:0xc0003ba540`, which is exactly
+// what happened when a CI-only memory-watchdog failure had to be diagnosed
+// from the log alone: the one field that says WHY was an address. The
+// traceback is deliberately omitted — the type and message identify the
+// failure, and cell tracebacks can be long.
+func (e *ExecutionError) String() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Message == "" {
+		return e.Type
+	}
+	return e.Type + ": " + e.Message
+}
+
 // Result is one completed cell evaluation.
 type Result struct {
 	Generation uint64 `json:"generation"`
