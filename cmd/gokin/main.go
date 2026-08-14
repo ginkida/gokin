@@ -34,7 +34,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version              = "0.100.137"
+	version              = "0.100.138"
 	cfgFile              string
 	model                string
 	provider             string
@@ -435,9 +435,12 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	// Create the application
+	startupToolDenies := optionalRuntimeDeniesForCLIRules(resolvedDeniedToolRules)
 	application, err := app.NewWithOptions(cfg, workDir, app.BuildOptions{
-		NonInteractive: effectiveHeadless,
-		Bare:           bare,
+		NonInteractive:               effectiveHeadless,
+		Bare:                         bare,
+		StartupToolCapabilityAllowed: toolCeiling,
+		StartupToolCapabilityDenied:  startupToolDenies,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create application: %w", err)
@@ -931,6 +934,14 @@ func capabilityDeniesForCLIRules(available, rules []string) ([]string, error) {
 				matched = true
 			}
 		}
+		// Optional runtimes may be absent because this invocation's own deny
+		// policy let Builder skip their startup. Retain that deny in the final
+		// executor ceiling instead of rejecting it as an unknown tool.
+		for _, name := range []string{"repl_exec", "harness"} {
+			if !availableSet[name] && permission.ToolDenyRuleMatchesName(rule, name) {
+				matched = true
+			}
+		}
 		if !strings.ContainsRune(rule, '*') && !matched && !availableSet[rule] {
 			return nil, fmt.Errorf(
 				"unknown tool in --disallowedTools/--disallowed-tools: %s", rule)
@@ -945,6 +956,22 @@ func capabilityDeniesForCLIRules(available, rules []string) ([]string, error) {
 		return nil, nil
 	}
 	return denied, nil
+}
+
+func optionalRuntimeDeniesForCLIRules(rules []string) []string {
+	denied := make([]string, 0, 2)
+	for _, name := range []string{"repl_exec", "harness"} {
+		for _, rule := range rules {
+			if !strings.ContainsRune(rule, '(') && permission.ToolDenyRuleMatchesName(rule, name) {
+				denied = append(denied, name)
+				break
+			}
+		}
+	}
+	if len(denied) == 0 {
+		return nil
+	}
+	return denied
 }
 
 type headlessInputRunner interface {
