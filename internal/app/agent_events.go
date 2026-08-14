@@ -3,12 +3,15 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
 	appcontext "gokin/internal/context"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
+	"gokin/internal/repl"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
 )
@@ -150,10 +153,19 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			}
 
 			present().ToolEnd(name, args, result)
-			a.journalEvent("tool_end", map[string]any{
+			details := map[string]any{
 				"tool":    name,
 				"success": result.Success,
-			})
+			}
+			if name == "repl_exec" {
+				if operations := replOperationsForJournal(result.Data); len(operations) > 0 {
+					details["repl_operations"] = operations
+				}
+				if refreshes := replFileIndexRefreshesForJournal(result.Data); refreshes > 0 {
+					details["repl_file_index_refreshes"] = refreshes
+				}
+			}
+			a.journalEvent("tool_end", details)
 
 			// Refresh token count after each tool completes (context grew).
 			// safeGo, not raw go: refreshTokenCount makes a count_tokens API call
@@ -309,6 +321,131 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			}
 		},
 	}
+}
+
+const (
+	maxJournalREPLOperations     = 64
+	maxJournalREPLOperationCount = 1_000_000
+)
+
+// replOperationsForJournal keeps only bounded execution metadata emitted by
+// the REPL worker. Cell code, arguments, stdout, and values remain
+// outside the tool_end event: evals need to know which efficient primitive ran,
+// not what repository content it processed.
+func replOperationsForJournal(data any) map[string]int {
+	source := replResultOperations(data)
+	if len(source) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(source))
+	for name, count := range source {
+		if count > 0 && len(name) > 0 && len(name) <= 64 && isREPLOperationName(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > maxJournalREPLOperations {
+		names = names[:maxJournalREPLOperations]
+	}
+	operations := make(map[string]int, len(names))
+	for _, name := range names {
+		count := source[name]
+		if count > maxJournalREPLOperationCount {
+			count = maxJournalREPLOperationCount
+		}
+		operations[name] = count
+	}
+	return operations
+}
+
+// replResultOperations and replResultFileIndexRefreshes accept BOTH the typed
+// result a tool returns and the generic JSON shape the executor's secret
+// redactor leaves behind. Step 11 of doExecuteTool runs result.Data through
+// RedactAny, which JSON round-trips every struct into map[string]any BEFORE
+// OnToolEnd observes it — so a type switch over repl.Result alone silently
+// journaled nothing in the real app while unit tests over a synthetic typed
+// value passed. Read the runtime shape, not the one the producer sent.
+func replResultOperations(data any) map[string]int {
+	switch value := data.(type) {
+	case repl.Result:
+		return value.Operations
+	case *repl.Result:
+		if value != nil {
+			return value.Operations
+		}
+	case map[string]any:
+		raw, ok := value["operations"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		counts := make(map[string]int, len(raw))
+		for name, encoded := range raw {
+			if count, ok := journalCountValue(encoded); ok {
+				counts[name] = count
+			}
+		}
+		return counts
+	}
+	return nil
+}
+
+func replResultFileIndexRefreshes(data any) int {
+	switch value := data.(type) {
+	case repl.Result:
+		return value.FileIndexRefreshes
+	case *repl.Result:
+		if value != nil {
+			return value.FileIndexRefreshes
+		}
+	case map[string]any:
+		if count, ok := journalCountValue(value["file_index_refreshes"]); ok {
+			return count
+		}
+	}
+	return 0
+}
+
+// journalCountValue accepts only whole, in-range numbers. A JSON round-trip
+// produces float64; the integer cases keep a directly-passed typed result
+// working. Anything else (string, bool, fraction, overflow) is not a count.
+func journalCountValue(value any) (int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		if typed != math.Trunc(typed) || typed < math.MinInt32 || typed > math.MaxInt32 {
+			return 0, false
+		}
+		return int(typed), true
+	case int:
+		return typed, true
+	case int64:
+		if typed < math.MinInt32 || typed > math.MaxInt32 {
+			return 0, false
+		}
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func replFileIndexRefreshesForJournal(data any) int {
+	refreshes := replResultFileIndexRefreshes(data)
+	if refreshes <= 0 {
+		return 0
+	}
+	if refreshes > maxJournalREPLOperationCount {
+		return maxJournalREPLOperationCount
+	}
+	return refreshes
+}
+
+func isREPLOperationName(name string) bool {
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // tuiPresenter routes agent output to the Bubble Tea program. Every send goes
