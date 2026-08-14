@@ -1,8 +1,6 @@
 package tools
 
-import (
-	"google.golang.org/genai"
-)
+import "google.golang.org/genai"
 
 // Static tool declarations for lazy loading.
 // These are used to register tools with AI models without instantiating the tools.

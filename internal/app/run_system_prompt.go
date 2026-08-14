@@ -100,8 +100,12 @@ func (a *App) composeRunSystemInstruction(base string) string {
 		}
 		result += strings.TrimLeft(structured, "\r\n")
 	}
-	if a.harnessStore != nil {
-		if harnessPrompt := a.harnessStore.RenderPrompt(); harnessPrompt != "" {
+	store := a.harnessStore
+	if _, deferredStore := a.deferredHybrid.components(); deferredStore != nil {
+		store = deferredStore
+	}
+	if store != nil {
+		if harnessPrompt := store.RenderPrompt(); harnessPrompt != "" {
 			if result != "" {
 				result = strings.TrimRight(result, "\r\n") + "\n\n"
 			}

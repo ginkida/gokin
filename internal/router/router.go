@@ -11,6 +11,7 @@ import (
 	"gokin/internal/agent"
 	"gokin/internal/client"
 	"gokin/internal/config"
+	"gokin/internal/hybrid"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 
@@ -50,6 +51,9 @@ type Router struct {
 	// intent; selectThinkingBudget honors it. Guarded by clientMu — same
 	// write-on-ApplyConfig / read-on-request shape as client.
 	thinkingMode string
+	// engineMode controls whether the optional computation plane is disabled,
+	// explicit, or exposed adaptively for the current request.
+	engineMode string
 	// planMode mirrors the app's planning-mode toggle. When true, Execute must
 	// NOT re-add mutating tools via per-request FilteredGeminiTools — plan mode's
 	// hard schema defense (write/edit/bash removed) would otherwise be defeated.
@@ -181,6 +185,7 @@ type RouterConfig struct {
 	CostAware          bool             // Enable cost-aware model selection
 	FastModel          string           // Model for simple tasks (e.g., "glm-5-turbo", "deepseek-v4-flash")
 	ModelCapability    *ModelCapability // Model capability for adaptive routing
+	EngineMode         string           // tools, auto (default), or hybrid
 }
 
 // NewRouter creates a new task router
@@ -207,6 +212,7 @@ func NewRouter(cfg *RouterConfig, executor *tools.Executor, agentRunner AgentRun
 		costAware:          cfg.CostAware,
 		fastModel:          cfg.FastModel,
 		modelCapability:    cfg.ModelCapability,
+		engineMode:         cfg.EngineMode,
 		routingHistory:     make([]routingRecord, 0, 100),
 	}
 }
@@ -227,6 +233,15 @@ func (r *Router) Route(message string) *RoutingDecision {
 // LLM-backed decomposition. Prefer this when a context is available so the
 // operation can be cancelled by parent timeout.
 func (r *Router) RouteWithContext(ctx context.Context, message string) *RoutingDecision {
+	return r.routeWithContext(ctx, message, true)
+}
+
+// routeWithContext optionally derives request tool sets for callers that use
+// the RoutingDecision directly. Execute derives its model-visible schema from
+// the original policy message later, so calculating SuggestedToolSets while
+// routing its possibly augmented retry message would be both unused and an
+// avoidable second hybrid-policy scan.
+func (r *Router) routeWithContext(ctx context.Context, message string, includeSuggestedTools bool) *RoutingDecision {
 	analysis := r.analyzer.Analyze(message)
 
 	// Model capability adjustments: weaker models decompose earlier
@@ -288,7 +303,9 @@ func (r *Router) RouteWithContext(ctx context.Context, message string) *RoutingD
 			decision.Decomposition = decomposition
 			decision.Reasoning = fmt.Sprintf("Auto-decomposition: %d subtasks (%s)",
 				len(decomposition.Subtasks), decomposition.Reasoning)
-			decision.SuggestedToolSets = r.selectToolSets(analysis)
+			if includeSuggestedTools {
+				decision.SuggestedToolSets = r.selectToolSetsForMessage(analysis, message)
+			}
 
 			logging.Info("task decomposed",
 				"message", message,
@@ -333,7 +350,9 @@ func (r *Router) RouteWithContext(ctx context.Context, message string) *RoutingD
 	decision.ThinkingBudget = r.selectThinkingBudget(analysis)
 
 	// Per-request tool filtering
-	decision.SuggestedToolSets = r.selectToolSets(analysis)
+	if includeSuggestedTools {
+		decision.SuggestedToolSets = r.selectToolSetsForMessage(analysis, message)
+	}
 
 	return decision
 }
@@ -362,6 +381,22 @@ func (r *Router) SetThinkingMode(mode string) {
 	r.clientMu.Lock()
 	r.thinkingMode = config.ResolveThinkingMode(mode)
 	r.clientMu.Unlock()
+}
+
+// SetEngineMode synchronizes request-level hybrid eligibility with the App's
+// boot-pinned engine mode when the long-lived router receives a new client.
+// Changing engine.mode itself requires a restart because registry shape and
+// secure-runtime ownership cannot be partially rebuilt in place.
+func (r *Router) SetEngineMode(mode string) {
+	r.clientMu.Lock()
+	r.engineMode = mode
+	r.clientMu.Unlock()
+}
+
+func (r *Router) getEngineMode() string {
+	r.clientMu.RLock()
+	defer r.clientMu.RUnlock()
+	return r.engineMode
 }
 
 // SetModelCapability updates the model-dependent routing policy after a live
@@ -416,11 +451,56 @@ func (r *Router) isPlanMode() bool {
 
 // Execute routes the task to the appropriate handler and returns the result
 func (r *Router) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
+	return r.ExecuteWithPolicyMessage(ctx, history, message, message)
+}
+
+// ExecuteWithPolicyMessage routes message while deriving request-scoped tool
+// exposure from policyMessage. Automatic retries may prepend internal
+// continuation context to the executable message; that scaffolding must not
+// silently change the hybrid policy selected for the user's original request.
+func (r *Router) ExecuteWithPolicyMessage(
+	ctx context.Context,
+	history []*genai.Content,
+	message string,
+	policyMessage string,
+) ([]*genai.Content, string, error) {
+	if strings.TrimSpace(policyMessage) == "" {
+		policyMessage = message
+	}
+	mode := r.getEngineMode()
+	policyDecision := hybrid.Decide(mode, policyMessage)
+	autoDecision := policyDecision
+	if strings.EqualFold(strings.TrimSpace(mode), "hybrid") {
+		// Explicit hybrid exposure is not a reason to steer ordinary targeted
+		// work into the REPL, so its hint still uses auto eligibility. Every
+		// other accepted/default mode either disables the REPL or already uses
+		// the auto decision, making a second prompt scan unnecessary.
+		autoDecision = hybrid.Decide("auto", policyMessage)
+	}
+	return r.ExecuteWithPolicyDecisions(
+		ctx, history, message, mode, policyDecision, autoDecision,
+	)
+}
+
+// ExecuteWithPolicyDecisions is ExecuteWithPolicyMessage with an immutable
+// engine-mode snapshot and request-level hybrid decisions supplied by the
+// caller. App request setup already computes these to establish the
+// authoritative schema ceiling and journal event; reusing them here keeps
+// routing, schema exposure, and prompt guidance consistent while avoiding
+// repeated prompt scans.
+func (r *Router) ExecuteWithPolicyDecisions(
+	ctx context.Context,
+	history []*genai.Content,
+	message string,
+	engineMode string,
+	policyDecision hybrid.Decision,
+	autoDecision hybrid.Decision,
+) ([]*genai.Content, string, error) {
 	// Preserve the user's original message for the history record — the routing
 	// scaffolding below augments `message` with analysis/thinking hints we don't
 	// want persisted.
 	originalMessage := message
-	decision := r.RouteWithContext(ctx, message)
+	decision := r.routeWithContext(ctx, message, false)
 
 	cl := r.getClient()
 
@@ -433,15 +513,28 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 	// the schema and defeat plan mode's hard schema defense. Setting the plan set
 	// unconditionally (even with no SuggestedToolSets) keeps the schema safe
 	// regardless of what tools a prior request left on the shared client.
+	replExposed := false
 	if r.registry != nil {
 		var schema []*genai.Tool
 		switch {
 		case r.isPlanMode():
 			schema = r.registry.PlanModeGeminiTools()
-		case len(decision.SuggestedToolSets) > 0:
-			schema = r.registry.FilteredGeminiTools(decision.SuggestedToolSets...)
+			if !policyDecision.Enabled {
+				schema = tools.FilterGeminiToolsExcluding(schema, "repl_exec", "harness")
+			}
+		default:
+			// RouteWithContext classifies the executable retry message for
+			// handler selection, while hybrid exposure stays anchored to the
+			// original request through policyMessage.
+			sets := r.selectToolSetsForDecision(decision.Analysis, engineMode, policyDecision)
+			if len(sets) > 0 {
+				schema = r.registry.FilteredGeminiTools(sets...)
+			}
 		}
 		if schema != nil {
+			if ceiling, restricted := tools.ToolSchemaCeilingFromContext(ctx, r.executor); restricted {
+				schema = tools.FilterGeminiToolsByCapability(schema, ceiling)
+			}
 			// The per-request schema is pushed onto the SHARED client, so it
 			// replaces whatever the invocation capability ceiling
 			// (--tools/--disallowedTools) filtered at startup. Re-apply it here
@@ -450,12 +543,13 @@ func (r *Router) Execute(ctx context.Context, history []*genai.Content, message 
 			if ceiling, restricted := tools.ToolCapabilityCeilingFromContext(ctx); restricted {
 				schema = tools.FilterGeminiToolsByCapability(schema, ceiling)
 			}
+			replExposed = schemaContainsDeclaration(schema, "repl_exec")
 			cl.SetTools(schema)
 		}
 	}
 
 	// Add tool usage hint based on task type
-	if hint := r.toolHint(decision.Analysis); hint != "" {
+	if hint := r.toolHintForDecision(decision.Analysis, autoDecision, replExposed); hint != "" {
 		message = hint + "\n\n" + message
 	}
 
@@ -1283,6 +1377,32 @@ func (r *Router) selectToolSets(analysis *TaskComplexity) []tools.ToolSet {
 	return r.filterToolSetsByCapability(sets)
 }
 
+// selectToolSetsForMessage layers request-level hybrid policy on top of the
+// task router's ordinary capability selection. Hybrid is appended after model
+// tier filtering: explicit mode is a user choice, and auto's high-precision
+// gate already prevents weak/simple requests from paying for the declaration.
+func (r *Router) selectToolSetsForMessage(analysis *TaskComplexity, message string) []tools.ToolSet {
+	mode := r.getEngineMode()
+	decision := hybrid.Decide(mode, message)
+	return r.selectToolSetsForDecision(analysis, mode, decision)
+}
+
+func (r *Router) selectToolSetsForDecision(
+	analysis *TaskComplexity,
+	mode string,
+	decision hybrid.Decision,
+) []tools.ToolSet {
+	sets := r.selectToolSets(analysis)
+	if !decision.Enabled {
+		return sets
+	}
+	sets = append(sets, tools.ToolSetHybrid)
+	if strings.EqualFold(strings.TrimSpace(mode), "hybrid") {
+		sets = append(sets, tools.ToolSetHarness)
+	}
+	return sets
+}
+
 // filterToolSetsByCapability drops tool sets that historically confused
 // weaker models. The policy has been narrowed over time as specific
 // "stripped but actually useful" bugs surfaced — each exclusion needs
@@ -1342,6 +1462,35 @@ func (r *Router) toolHint(analysis *TaskComplexity) string {
 	default:
 		return ""
 	}
+}
+
+func (r *Router) toolHintForRequest(analysis *TaskComplexity, message string, replExposed bool) string {
+	return r.toolHintForDecision(analysis, hybrid.Decide("auto", message), replExposed)
+}
+
+func (r *Router) toolHintForDecision(
+	analysis *TaskComplexity,
+	autoDecision hybrid.Decision,
+	replExposed bool,
+) string {
+	if hint := hybrid.AnalysisHintForDecision(autoDecision, replExposed); hint != "" {
+		return hint
+	}
+	return r.toolHint(analysis)
+}
+
+func schemaContainsDeclaration(schema []*genai.Tool, name string) bool {
+	for _, envelope := range schema {
+		if envelope == nil {
+			continue
+		}
+		for _, declaration := range envelope.FunctionDeclarations {
+			if declaration != nil && declaration.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TrackOperation records an operation outcome for context awareness.

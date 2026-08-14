@@ -15,6 +15,7 @@ const (
 	DefaultCellTimeout      = 30 * time.Second
 	DefaultMaxCodeBytes     = 64 * 1024
 	DefaultMaxResponseBytes = 1024 * 1024
+	DefaultMaxMemoryBytes   = 256 * 1024 * 1024
 	DefaultMaxCallbacks     = 16
 )
 
@@ -39,13 +40,18 @@ const (
 type Options struct {
 	WorkDir    string
 	PythonPath string
+	// pythonExecPaths is the validated runtime-owned process-exec allowlist for
+	// platforms whose Python launcher transfers control to another executable.
+	// It is deliberately not configurable by users or repository files.
+	pythonExecPaths []string
 	// GitPath is runtime-owned discovery state, not a user/project setting.
-	// Empty disables context.git_status/git_diff without disabling the kernel.
+	// Empty disables Git-native inventory and falls back to the bounded matcher.
 	GitPath          string
 	Backend          Backend
 	CellTimeout      time.Duration
 	MaxCodeBytes     int
 	MaxResponseBytes int
+	MaxMemoryBytes   int64
 	MaxCallbacks     int
 }
 
@@ -58,6 +64,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxResponseBytes <= 0 {
 		o.MaxResponseBytes = DefaultMaxResponseBytes
+	}
+	if o.MaxMemoryBytes <= 0 {
+		o.MaxMemoryBytes = DefaultMaxMemoryBytes
 	}
 	if o.MaxCallbacks <= 0 {
 		o.MaxCallbacks = DefaultMaxCallbacks
@@ -113,27 +122,45 @@ type ExecutionError struct {
 
 // Result is one completed cell evaluation.
 type Result struct {
-	Generation uint64          `json:"generation"`
-	Stdout     string          `json:"stdout,omitempty"`
-	Stderr     string          `json:"stderr,omitempty"`
-	Value      string          `json:"value,omitempty"`
-	Artifact   *ArtifactRef    `json:"artifact,omitempty"`
-	Truncated  bool            `json:"truncated,omitempty"`
-	Error      *ExecutionError `json:"error,omitempty"`
+	Generation uint64 `json:"generation"`
+	Stdout     string `json:"stdout,omitempty"`
+	Stderr     string `json:"stderr,omitempty"`
+	Value      string `json:"value,omitempty"`
+	// Operations is a compact runtime-generated count of context API calls made
+	// by this cell. It deliberately contains neither cell code nor arguments, so
+	// operational eval evidence can be journaled without leaking repository data
+	// or duplicating model-visible output.
+	Operations map[string]int `json:"operations,omitempty"`
+	// FileIndexRefreshes is assigned by the Go parent from observed protocol
+	// callbacks, rather than trusted from the Python response. Directory-scale
+	// scans share a bounded per-scope inventory within one cell, but refresh
+	// between cells or after crossing into the mutable orchestration plane.
+	FileIndexRefreshes int `json:"file_index_refreshes,omitempty"`
+	// Artifact is the primary overflow artifact retained for compatibility.
+	// Artifacts preserves every independently bounded channel so a large value
+	// cannot hide simultaneously large stdout or stderr.
+	Artifact  *ArtifactRef            `json:"artifact,omitempty"`
+	Artifacts map[string]*ArtifactRef `json:"artifacts,omitempty"`
+	Truncated bool                    `json:"truncated,omitempty"`
+	// KernelReset reports that the worker discarded this generation after a
+	// fatal resource breach. The result remains useful, but no globals survive.
+	KernelReset bool            `json:"kernel_reset,omitempty"`
+	Error       *ExecutionError `json:"error,omitempty"`
 }
 
 // Stats is a bounded operational snapshot for diagnostics and model-visible
 // recovery decisions. It contains no code, prompts, paths, or artifact data.
 type Stats struct {
-	Generation        uint64    `json:"generation"`
-	Running           bool      `json:"running"`
-	Restarts          uint64    `json:"restarts"`
-	ManualResets      uint64    `json:"manual_resets"`
-	Executions        uint64    `json:"executions"`
-	TransportFailures uint64    `json:"transport_failures"`
-	Timeouts          uint64    `json:"timeouts"`
-	LastError         string    `json:"last_error,omitempty"`
-	LastFailureAt     time.Time `json:"last_failure_at,omitempty"`
+	Generation            uint64    `json:"generation"`
+	Running               bool      `json:"running"`
+	Restarts              uint64    `json:"restarts"`
+	ManualResets          uint64    `json:"manual_resets"`
+	Executions            uint64    `json:"executions"`
+	TransportFailures     uint64    `json:"transport_failures"`
+	Timeouts              uint64    `json:"timeouts"`
+	ResourceLimitFailures uint64    `json:"resource_limit_failures"`
+	LastError             string    `json:"last_error,omitempty"`
+	LastFailureAt         time.Time `json:"last_failure_at,omitempty"`
 }
 
 func (r Result) OK() bool { return r.Error == nil }

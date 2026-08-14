@@ -65,6 +65,14 @@ type AgentTypeProvider interface {
 	SnapshotAgentTypes() []AgentTypeDefinition
 }
 
+// VersionedAgentTypeProvider lets TaskTool retain an immutable declaration
+// until the provider publishes another catalog revision. Providers that cannot
+// offer a coherent revision retain the previous always-refresh behavior.
+type VersionedAgentTypeProvider interface {
+	AgentTypeProvider
+	AgentTypeRevision() uint64
+}
+
 // TaskTool spawns subagents to handle complex tasks.
 type TaskTool struct {
 	mu                       sync.RWMutex
@@ -73,6 +81,10 @@ type TaskTool struct {
 	toolCapabilityCeiling    []string
 	toolCapabilityRestricted bool
 	backgroundAllowed        bool
+	schemaRevision           uint64
+	declarationLocalRev      uint64
+	declarationProviderRev   uint64
+	declarationCache         *genai.FunctionDeclaration
 }
 
 // taskForegroundTimeout mirrors the agent package's per-type normal/quick/
@@ -147,7 +159,7 @@ func taskNeedsModelRoundHeadroom(args map[string]any) bool {
 
 // NewTaskTool creates a new TaskTool instance.
 func NewTaskTool() *TaskTool {
-	return &TaskTool{backgroundAllowed: true}
+	return &TaskTool{backgroundAllowed: true, schemaRevision: 1}
 }
 
 // SetRunner sets the agent runner for spawning subagents.
@@ -162,6 +174,9 @@ func (t *TaskTool) SetRunner(runner AgentRunner) {
 // the next declaration/validation snapshot.
 func (t *TaskTool) SetAgentTypeProvider(provider AgentTypeProvider) {
 	t.mu.Lock()
+	if t.agentTypes != nil || provider != nil {
+		t.schemaRevision++
+	}
 	t.agentTypes = provider
 	t.mu.Unlock()
 }
@@ -182,6 +197,9 @@ func (t *TaskTool) SetToolCapabilityCeiling(names []string) {
 // and process lifetime deterministic.
 func (t *TaskTool) SetBackgroundAllowed(allowed bool) {
 	t.mu.Lock()
+	if t.backgroundAllowed != allowed {
+		t.schemaRevision++
+	}
 	t.backgroundAllowed = allowed
 	t.mu.Unlock()
 }
@@ -190,12 +208,30 @@ func (t *TaskTool) Name() string {
 	return "task"
 }
 
+func (*TaskTool) runtimeDynamicDeclaration() {}
+
 func (t *TaskTool) Description() string {
 	return taskToolDescription(t.agentTypeSnapshot())
 }
 
 func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
 	state := t.snapshot()
+	providerRevision := uint64(0)
+	cacheable := state.agentTypes == nil
+	if provider, ok := state.agentTypes.(VersionedAgentTypeProvider); ok {
+		providerRevision = provider.AgentTypeRevision()
+		cacheable = true
+	}
+	if cacheable {
+		t.mu.RLock()
+		cached := t.declarationCache
+		cachedLocal := t.declarationLocalRev
+		cachedProvider := t.declarationProviderRev
+		t.mu.RUnlock()
+		if cached != nil && cachedLocal == state.schemaRevision && cachedProvider == providerRevision {
+			return cached
+		}
+	}
 	agentTypes := agentTypeSnapshot(state.agentTypes)
 	typeNames := agentTypeNames(agentTypes)
 	declaration := &genai.FunctionDeclaration{
@@ -250,6 +286,23 @@ func (t *TaskTool) Declaration() *genai.FunctionDeclaration {
 	}
 	if !state.backgroundAllowed {
 		delete(declaration.Parameters.Properties, "run_in_background")
+	}
+	if cacheable {
+		// Do not retain a mixed provider snapshot if a concurrent registration
+		// changed its revision while the declaration was being built.
+		providerStillCurrent := true
+		if provider, ok := state.agentTypes.(VersionedAgentTypeProvider); ok {
+			providerStillCurrent = provider.AgentTypeRevision() == providerRevision
+		}
+		if providerStillCurrent {
+			t.mu.Lock()
+			if t.schemaRevision == state.schemaRevision {
+				t.declarationCache = declaration
+				t.declarationLocalRev = state.schemaRevision
+				t.declarationProviderRev = providerRevision
+			}
+			t.mu.Unlock()
+		}
 	}
 	return declaration
 }
@@ -354,6 +407,7 @@ type taskToolState struct {
 	toolCapabilityCeiling    []string
 	toolCapabilityRestricted bool
 	backgroundAllowed        bool
+	schemaRevision           uint64
 }
 
 func (t *TaskTool) snapshot() taskToolState {
@@ -365,6 +419,7 @@ func (t *TaskTool) snapshot() taskToolState {
 		toolCapabilityCeiling:    cloneTaskToolNames(t.toolCapabilityCeiling),
 		toolCapabilityRestricted: t.toolCapabilityRestricted,
 		backgroundAllowed:        t.backgroundAllowed,
+		schemaRevision:           t.schemaRevision,
 	}
 }
 

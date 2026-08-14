@@ -7,11 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
-
-	"gokin/internal/git"
 )
 
 // Detect probes secure backends instead of trusting executable presence. Some
@@ -19,13 +16,58 @@ import (
 // mode must quietly fall back rather than advertise a runtime that fails on the
 // first cell.
 func Detect(ctx context.Context, workDir string) Availability {
-	root, err := canonicalWorkDir(workDir)
+	manager, availability := OpenDetected(ctx, Options{WorkDir: workDir})
+	if manager != nil {
+		_ = manager.Close()
+	}
+	return availability
+}
+
+// Preflight checks only static prerequisites and never starts Python or the OS
+// sandbox. Auto mode uses it before advertising a lazy repl_exec so hosts that
+// plainly lack Python/a supported launcher do not spend a model round on a
+// capability that cannot work. Available here means "worth probing", not that
+// isolation has been verified; OpenDetected remains the fail-closed boundary.
+func Preflight(workDir string) Availability {
+	_, err := canonicalWorkDir(workDir)
 	if err != nil {
 		return Availability{Reason: err.Error()}
 	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		return Availability{Reason: "python3 was not found in PATH"}
+	}
+	var backend Backend
+	switch runtime.GOOS {
+	case "darwin":
+		backend = BackendSandboxExec
+	case "linux":
+		backend = BackendBubblewrap
+	default:
+		return Availability{PythonPath: python, Reason: "no supported sandbox backend for " + runtime.GOOS}
+	}
+	if err := backendExecutableAvailable(backend); err != nil {
+		return Availability{PythonPath: python, Reason: err.Error()}
+	}
+	return Availability{Available: true, PythonPath: python, Backend: backend}
+}
+
+// OpenDetected probes the platform sandbox and returns the already-started,
+// verified manager on success. Callers that intend to use the REPL can retain
+// it instead of paying for a throwaway probe worker followed by a second
+// Python/sandbox startup. The probe itself does not count as a user execution.
+func OpenDetected(ctx context.Context, opts Options) (*Manager, Availability) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workDir := opts.WorkDir
+	root, err := canonicalWorkDir(workDir)
+	if err != nil {
+		return nil, Availability{Reason: err.Error()}
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		return nil, Availability{Reason: "python3 was not found in PATH"}
 	}
 
 	var candidates []Backend
@@ -35,7 +77,7 @@ func Detect(ctx context.Context, workDir string) Availability {
 	case "linux":
 		candidates = []Backend{BackendBubblewrap}
 	default:
-		return Availability{PythonPath: python, Reason: "no supported sandbox backend for " + runtime.GOOS}
+		return nil, Availability{PythonPath: python, Reason: "no supported sandbox backend for " + runtime.GOOS}
 	}
 
 	reasons := make([]string, 0, len(candidates))
@@ -45,21 +87,24 @@ func Detect(ctx context.Context, workDir string) Availability {
 			continue
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		manager, err := newManager(Options{
-			WorkDir: root, PythonPath: python, Backend: backend,
-			CellTimeout: 3 * time.Second,
-		}, false)
+		candidateOpts := opts
+		candidateOpts.WorkDir = root
+		candidateOpts.PythonPath = python
+		candidateOpts.Backend = backend
+		manager, err := newManager(candidateOpts, false)
 		if err == nil {
-			_, err = manager.Execute(probeCtx, "1 + 1")
-			_ = manager.Close()
+			err = manager.Probe(probeCtx)
 		}
 		cancel()
 		if err == nil {
-			return Availability{Available: true, PythonPath: python, Backend: backend}
+			return manager, Availability{Available: true, PythonPath: manager.opts.PythonPath, Backend: backend}
+		}
+		if manager != nil {
+			_ = manager.Close()
 		}
 		reasons = append(reasons, fmt.Sprintf("%s probe failed: %v", backend, err))
 	}
-	return Availability{PythonPath: python, Reason: strings.Join(reasons, "; ")}
+	return nil, Availability{PythonPath: python, Reason: strings.Join(reasons, "; ")}
 }
 
 func backendExecutableAvailable(backend Backend) error {
@@ -102,11 +147,13 @@ func canonicalWorkDir(workDir string) (string, error) {
 	return resolved, nil
 }
 
-func sandboxProfile(workDir, runtimeDir string) string {
+func sandboxProfile(workDir, runtimeDir string, pythonPaths ...string) string {
 	// Python on macOS needs broad access to system frameworks and its dynamic
 	// runtime, whose exact locations vary between Apple, Xcode and Homebrew
 	// builds. Start from read-only system access, then carve out user/temp/mount
-	// roots and re-allow only this workspace + this ephemeral runtime. Unlike an
+	// roots and re-allow reads only from this workspace + ephemeral runtime. The
+	// parent publishes inventory/Git snapshots there; Python never needs write
+	// authority. Unlike an
 	// `(allow default)` profile this grants no Mach IPC, network, or unrelated
 	// operation classes; arbitrary subprocesses inherit the same boundaries.
 	sensitiveRoots := []string{
@@ -123,18 +170,25 @@ func sandboxProfile(workDir, runtimeDir string) string {
 		}
 		fmt.Fprintf(&deniedReads, " (subpath %s)", sandboxString(path))
 	}
+	var execRule strings.Builder
+	if len(pythonPaths) > 0 {
+		execRule.WriteString("(allow process-exec")
+		for _, path := range pythonPaths {
+			fmt.Fprintf(&execRule, " (literal %s)", sandboxString(path))
+		}
+		execRule.WriteString(")\n")
+	}
 	return fmt.Sprintf(`(version 1)
 (deny default)
-(allow process*)
-(allow signal (target self))
+%s(allow signal (target self))
 (allow sysctl-read)
 (allow file-read-metadata)
 (allow file-read*)
 (deny file-read*%s)
 (allow file-read* (subpath %s) (subpath %s) (literal "/dev/null") (literal "/dev/urandom"))
-(allow file-write* (subpath %s) (literal "/dev/null"))
+(allow file-write* (literal "/dev/null"))
 (deny network*)
-`, deniedReads.String(), sandboxString(workDir), sandboxString(runtimeDir), sandboxString(runtimeDir))
+`, execRule.String(), deniedReads.String(), sandboxString(workDir), sandboxString(runtimeDir))
 }
 
 func sandboxString(value string) string {
@@ -143,47 +197,16 @@ func sandboxString(value string) string {
 	return `"` + value + `"`
 }
 
-// ignoredTopLevelDirs returns workspace-relative top-level directories that
-// .gitignore excludes. It reuses the repository's own matcher rather than
-// re-deriving ignore semantics in Python, and stays TOP-LEVEL on purpose: the
-// hazard is large vendored/build trees, one shallow readdir keeps worker
-// startup cheap, and a narrow rule cannot accidentally hide source the user
-// wanted analysed. Failure to read .gitignore is not fatal — the walker simply
-// keeps its previous behaviour.
-func ignoredTopLevelDirs(workDir string) []string {
-	workDir = strings.TrimSpace(workDir)
-	if workDir == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(workDir)
-	if err != nil {
-		return nil
-	}
-	matcher := git.NewGitIgnore(workDir)
-	if err := matcher.Load(); err != nil {
-		return nil
-	}
-	var ignored []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if matcher.IsIgnored(filepath.Join(workDir, name)) {
-			ignored = append(ignored, name)
-		}
-	}
-	sort.Strings(ignored)
-	return ignored
-}
-
 func buildWorkerCommand(ctx context.Context, opts Options, runtimeDir, workerPath string, generation uint64) (*exec.Cmd, error) {
-	args := []string{"-I", "-u", workerPath, opts.WorkDir, fmt.Sprint(generation), opts.GitPath, string(opts.Backend)}
+	args := []string{
+		"-I", "-u", workerPath, opts.WorkDir, fmt.Sprint(generation),
+		string(opts.Backend), fmt.Sprint(opts.MaxMemoryBytes),
+	}
 	var cmd *exec.Cmd
 	switch opts.Backend {
 	case BackendSandboxExec:
 		profilePath := filepath.Join(runtimeDir, "sandbox.sb")
-		if err := os.WriteFile(profilePath, []byte(sandboxProfile(opts.WorkDir, runtimeDir)), 0600); err != nil {
+		if err := os.WriteFile(profilePath, []byte(sandboxProfile(opts.WorkDir, runtimeDir, opts.pythonExecPaths...)), 0600); err != nil {
 			return nil, fmt.Errorf("write sandbox profile: %w", err)
 		}
 		sandboxExec, err := exec.LookPath("sandbox-exec")
@@ -197,23 +220,14 @@ func buildWorkerCommand(ctx context.Context, opts Options, runtimeDir, workerPat
 		if err != nil {
 			return nil, err
 		}
-		bwrapArgs := []string{
-			"--die-with-parent", "--new-session", "--unshare-all",
-			"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-			"--ro-bind", opts.WorkDir, opts.WorkDir,
-			"--bind", runtimeDir, runtimeDir,
-			"--chdir", opts.WorkDir,
-			"--setenv", "HOME", runtimeDir,
-			"--setenv", "TMPDIR", "/tmp",
+		seccomp, err := openWorkerSeccompFilter(runtimeDir)
+		if err != nil {
+			return nil, fmt.Errorf("build worker seccomp filter: %w", err)
 		}
-		for _, path := range []string{"/usr", "/bin", "/lib", "/lib64", "/usr/local"} {
-			if _, err := os.Stat(path); err == nil {
-				bwrapArgs = append(bwrapArgs, "--ro-bind", path, path)
-			}
-		}
-		bwrapArgs = append(bwrapArgs, opts.PythonPath)
-		bwrapArgs = append(bwrapArgs, args...)
-		cmd = exec.CommandContext(ctx, bwrap, bwrapArgs...)
+		cmd = buildBubblewrapCommand(
+			ctx, bwrap, opts.WorkDir, runtimeDir,
+			opts.PythonPath, args, seccomp,
+		)
 	case BackendTest:
 		cmd = exec.CommandContext(ctx, opts.PythonPath, args...)
 	default:
@@ -229,14 +243,50 @@ func buildWorkerCommand(ctx context.Context, opts Options, runtimeDir, workerPat
 		"PYTHONIOENCODING=utf-8",
 		"PYTHONDONTWRITEBYTECODE=1",
 	}
-	// Analysis that silently includes ignored trees produces confidently wrong
-	// answers: in this very repository a gitignored 266 MB Go toolchain cache
-	// made a "which packages have the most TODOs" ranking return the standard
-	// library — reported with truncated=False, so nothing in the answer hinted
-	// at it. Grep's noise is visible in the transcript; the walker's is not.
-	if ignored := ignoredTopLevelDirs(opts.WorkDir); len(ignored) > 0 {
-		cmd.Env = append(cmd.Env, "GOKIN_REPL_IGNORE_DIRS="+strings.Join(ignored, string(os.PathListSeparator)))
-	}
 	configureProcessGroup(cmd)
 	return cmd, nil
+}
+
+func buildBubblewrapCommand(
+	ctx context.Context,
+	bwrap, workDir, runtimeDir, executable string,
+	args []string,
+	seccomp *os.File,
+) *exec.Cmd {
+	bwrapArgs := []string{
+		"--die-with-parent", "--new-session", "--unshare-all",
+		"--seccomp", "3",
+		"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+		// The worker does not need scratch-write authority: its bytecode cache is
+		// disabled and the parent publishes immutable snapshots in runtimeDir.
+		// The empty tmpfs is remounted below so native code cannot fill it after
+		// bypassing Python's audit hook. It cannot be replaced with a bind of
+		// runtimeDir because that directory normally resides underneath /tmp.
+		"--ro-bind", workDir, workDir,
+		"--ro-bind", runtimeDir, runtimeDir,
+		"--chdir", workDir,
+		"--setenv", "HOME", runtimeDir,
+		"--setenv", "TMPDIR", "/tmp",
+	}
+	for _, path := range []string{"/usr", "/bin", "/lib", "/lib64", "/usr/local"} {
+		if _, err := os.Stat(path); err == nil {
+			bwrapArgs = append(bwrapArgs, "--ro-bind", path, path)
+		}
+	}
+	// Bubblewrap builds a fresh tmpfs root. It is usually non-writable to the
+	// invoking uid, but root-run containers are common; remount every remaining
+	// synthetic filesystem read-only so the hard boundary does not depend on uid
+	// ownership. A read-only /dev still permits I/O through existing device nodes
+	// such as /dev/null and /dev/urandom.
+	bwrapArgs = append(bwrapArgs,
+		"--remount-ro", "/",
+		"--remount-ro", "/proc",
+		"--remount-ro", "/dev",
+		"--remount-ro", "/tmp",
+	)
+	bwrapArgs = append(bwrapArgs, executable)
+	bwrapArgs = append(bwrapArgs, args...)
+	cmd := exec.CommandContext(ctx, bwrap, bwrapArgs...)
+	cmd.ExtraFiles = []*os.File{seccomp}
+	return cmd
 }

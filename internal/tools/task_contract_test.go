@@ -12,6 +12,19 @@ func (p staticAgentTypeProvider) SnapshotAgentTypes() []AgentTypeDefinition {
 	return append([]AgentTypeDefinition(nil), p...)
 }
 
+type versionedAgentTypeProvider struct {
+	revision uint64
+	types    []AgentTypeDefinition
+}
+
+func (p *versionedAgentTypeProvider) SnapshotAgentTypes() []AgentTypeDefinition {
+	return append([]AgentTypeDefinition(nil), p.types...)
+}
+
+func (p *versionedAgentTypeProvider) AgentTypeRevision() uint64 {
+	return p.revision
+}
+
 func TestTaskToolBackgroundPolicyIsDeclaredValidatedAndCloned(t *testing.T) {
 	task := NewTaskTool()
 	task.SetBackgroundAllowed(false)
@@ -80,6 +93,56 @@ func TestLazyRegistryUsesLiveTaskDeclaration(t *testing.T) {
 	}
 	if !taskDeclarationFound {
 		t.Fatal("lazy task declaration missing")
+	}
+}
+
+func TestTaskDeclarationCacheTracksLocalAndProviderRevisions(t *testing.T) {
+	provider := &versionedAgentTypeProvider{
+		revision: 1,
+		types: []AgentTypeDefinition{{
+			Name: "reviewer", Description: "Reviews changes",
+		}},
+	}
+	task := NewTaskTool()
+	task.SetAgentTypeProvider(provider)
+
+	first := task.Declaration()
+	if got := task.Declaration(); got != first {
+		t.Fatal("unchanged versioned task catalog rebuilt its declaration")
+	}
+
+	provider.types = append(provider.types, AgentTypeDefinition{
+		Name: "auditor", Description: "Audits changes",
+	})
+	provider.revision++
+	second := task.Declaration()
+	if second == first {
+		t.Fatal("provider revision change retained the stale task declaration")
+	}
+	if !containsTaskContractString(second.Parameters.Properties["subagent_type"].Enum, "auditor") {
+		t.Fatalf("updated task enum = %v", second.Parameters.Properties["subagent_type"].Enum)
+	}
+	if got := task.Declaration(); got != second {
+		t.Fatal("updated task declaration was not cached")
+	}
+
+	task.SetBackgroundAllowed(false)
+	third := task.Declaration()
+	if third == second {
+		t.Fatal("local task policy change retained the stale declaration")
+	}
+	if _, ok := third.Parameters.Properties["run_in_background"]; ok {
+		t.Fatal("updated task declaration retained disabled background execution")
+	}
+}
+
+func TestTaskDeclarationDoesNotCacheUnversionedProvider(t *testing.T) {
+	task := NewTaskTool()
+	task.SetAgentTypeProvider(staticAgentTypeProvider{{
+		Name: "reviewer", Description: "Reviews changes",
+	}})
+	if first, second := task.Declaration(), task.Declaration(); first == second {
+		t.Fatal("unversioned provider declaration was cached")
 	}
 }
 

@@ -26,6 +26,7 @@ const (
 	// would cross 8 MiB, keeping the newest complete ~4 MiB of diagnostics.
 	maxJournalFileBytes   int64 = 8 << 20
 	journalRetentionBytes int64 = 4 << 20
+	evalRuntimeDirEnv           = "GOKIN_EVAL_RUNTIME_DIR"
 )
 
 type JournalEntry struct {
@@ -56,7 +57,28 @@ type ExecutionJournal struct {
 }
 
 func NewExecutionJournal(workDir string) (*ExecutionJournal, error) {
-	dir := filepath.Join(workDir, ".gokin")
+	return newExecutionJournalInDir(filepath.Join(workDir, ".gokin"))
+}
+
+// NewExecutionJournalInDir creates journal storage in a caller-owned absolute
+// directory. The eval runner uses a sibling of the model-writable workspace so
+// runtime evidence cannot be replaced through ordinary file or bash tools.
+// Interactive sessions continue to use NewExecutionJournal and .gokin.
+func NewExecutionJournalInDir(dir string) (*ExecutionJournal, error) {
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("execution journal directory must be absolute")
+	}
+	return newExecutionJournalInDir(dir)
+}
+
+func newExecutionJournalForWorkDir(workDir string) (*ExecutionJournal, error) {
+	if dir := strings.TrimSpace(os.Getenv(evalRuntimeDirEnv)); dir != "" {
+		return NewExecutionJournalInDir(dir)
+	}
+	return NewExecutionJournal(workDir)
+}
+
+func newExecutionJournalInDir(dir string) (*ExecutionJournal, error) {
 	if err := fileutil.EnsurePrivateDir(dir); err != nil {
 		return nil, fmt.Errorf("secure journal dir: %w", err)
 	}

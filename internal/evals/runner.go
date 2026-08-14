@@ -2,24 +2,32 @@ package evals
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"gokin/internal/hybrid"
 	"gokin/internal/tools"
 )
 
 const outputPreviewLimit = 6000
+
+const maxJournalREPLOperationCount = 1_000_000
+
+const maxResultLineBytes = 16 << 20
 
 // RunOptions configures a coding eval run.
 type RunOptions struct {
@@ -31,10 +39,13 @@ type RunOptions struct {
 	ScenarioIDs    []string
 	Providers      []string
 	Models         []string
+	EngineModes    []string
+	Repeat         int
 	FaultProfiles  []string
 	FaultUpstream  string
 	Timeout        time.Duration
 	KeepWorkspaces bool
+	Resume         bool
 	DryRun         bool
 }
 
@@ -42,10 +53,15 @@ type RunOptions struct {
 type Result struct {
 	ScenarioID       string                 `json:"scenario_id"`
 	ScenarioSpecHash string                 `json:"scenario_spec_hash,omitempty"`
+	RunSpecHash      string                 `json:"run_spec_hash,omitempty"`
 	Category         string                 `json:"category"`
 	Difficulty       string                 `json:"difficulty"`
+	HybridCandidate  *bool                  `json:"hybrid_candidate,omitempty"`
 	Provider         string                 `json:"provider,omitempty"`
 	Model            string                 `json:"model,omitempty"`
+	EngineMode       string                 `json:"engine_mode,omitempty"`
+	Trial            int                    `json:"trial,omitempty"`
+	TrialCount       int                    `json:"trial_count,omitempty"`
 	FaultProfile     string                 `json:"fault_profile,omitempty"`
 	Status           string                 `json:"status"`
 	Workspace        string                 `json:"workspace,omitempty"`
@@ -86,28 +102,58 @@ type ScoreSummary struct {
 
 // JournalSummary captures eval-relevant evidence from .gokin/execution_journal.jsonl.
 type JournalSummary struct {
-	Path                          string   `json:"path,omitempty"`
-	ToolCalls                     int      `json:"tool_calls"`
-	Tools                         []string `json:"tools,omitempty"`
-	FilesRead                     []string `json:"files_read,omitempty"`
-	FilesEdited                   []string `json:"files_edited,omitempty"`
-	VerificationCommands          []string `json:"verification_commands,omitempty"`
-	FalseFileClaims               []string `json:"false_file_claims,omitempty"`
-	ParseErrors                   []string `json:"parse_errors,omitempty"`
-	RequestFailures               int      `json:"request_failures,omitempty"`
-	RetriesScheduled              int      `json:"retries_scheduled,omitempty"`
-	RecoveriesPersisted           int      `json:"recoveries_persisted,omitempty"`
-	RecoveriesClaimed             int      `json:"recoveries_claimed,omitempty"`
-	RecoveriesCleared             int      `json:"recoveries_cleared,omitempty"`
-	UnsafeRetryBlocks             int      `json:"unsafe_retry_blocks,omitempty"`
-	DuplicateReuses               int      `json:"duplicate_side_effect_reuses,omitempty"`
-	CheckpointReplays             int      `json:"checkpoint_replays,omitempty"`
-	DivergentBlocks               int      `json:"divergent_side_effect_blocks,omitempty"`
-	DuplicateSideEffectExecutions []string `json:"duplicate_side_effect_executions,omitempty"`
+	Path                          string                  `json:"path,omitempty"`
+	TrustedRuntime                bool                    `json:"trusted_runtime,omitempty"`
+	ToolCalls                     int                     `json:"tool_calls"`
+	Tools                         []string                `json:"tools,omitempty"`
+	ToolCounts                    map[string]int          `json:"tool_counts,omitempty"`
+	ReplOperations                map[string]int          `json:"repl_operations,omitempty"`
+	ReplFileIndexRefreshes        int                     `json:"repl_file_index_refreshes,omitempty"`
+	FilesRead                     []string                `json:"files_read,omitempty"`
+	FilesEdited                   []string                `json:"files_edited,omitempty"`
+	VerificationCommands          []string                `json:"verification_commands,omitempty"`
+	FalseFileClaims               []string                `json:"false_file_claims,omitempty"`
+	ParseErrors                   []string                `json:"parse_errors,omitempty"`
+	RequestFailures               int                     `json:"request_failures,omitempty"`
+	RetriesScheduled              int                     `json:"retries_scheduled,omitempty"`
+	RecoveriesPersisted           int                     `json:"recoveries_persisted,omitempty"`
+	RecoveriesClaimed             int                     `json:"recoveries_claimed,omitempty"`
+	RecoveriesCleared             int                     `json:"recoveries_cleared,omitempty"`
+	UnsafeRetryBlocks             int                     `json:"unsafe_retry_blocks,omitempty"`
+	DuplicateReuses               int                     `json:"duplicate_side_effect_reuses,omitempty"`
+	CheckpointReplays             int                     `json:"checkpoint_replays,omitempty"`
+	DivergentBlocks               int                     `json:"divergent_side_effect_blocks,omitempty"`
+	DuplicateSideEffectExecutions []string                `json:"duplicate_side_effect_executions,omitempty"`
+	HeadlessMetrics               *HeadlessMetricsSummary `json:"headless_metrics,omitempty"`
+	HybridPolicy                  *HybridPolicySummary    `json:"hybrid_policy,omitempty"`
 
 	requestGeneration int
 	statefulOrdinal   int
 	seenSideEffects   map[string]sideEffectSeen
+}
+
+type HybridPolicySummary struct {
+	Mode           string `json:"mode"`
+	Strategy       string `json:"strategy,omitempty"`
+	REPLEligible   bool   `json:"repl_eligible"`
+	REPLEnabled    bool   `json:"repl_enabled"`
+	HarnessEnabled bool   `json:"harness_enabled,omitempty"`
+	ExposureGap    bool   `json:"exposure_gap,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// HeadlessMetricsSummary captures the invocation-level efficiency ledger that
+// Gokin emits after the final model/tool loop completes.
+type HeadlessMetricsSummary struct {
+	InputTokens           int     `json:"input_tokens"`
+	OutputTokens          int     `json:"output_tokens"`
+	CacheReadInputTokens  int     `json:"cache_read_input_tokens"`
+	TotalTokens           int     `json:"total_tokens"`
+	TokenBreakdownTracked bool    `json:"token_breakdown_tracked,omitempty"`
+	ModelRounds           int     `json:"model_rounds"`
+	DurationMillis        int64   `json:"duration_ms"`
+	EstimatedUSD          float64 `json:"estimated_usd"`
+	CostTracked           bool    `json:"cost_tracked"`
 }
 
 type sideEffectSeen struct {
@@ -145,7 +191,11 @@ func Run(ctx context.Context, opts RunOptions) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	matrix, err := buildRunMatrix(opts.Providers, opts.Models, opts.FaultProfiles)
+	matrix, err := buildRunMatrix(opts.Providers, opts.Models, opts.EngineModes, opts.FaultProfiles)
+	if err != nil {
+		return nil, err
+	}
+	matrix, err = expandRunTrials(matrix, opts.Repeat)
 	if err != nil {
 		return nil, err
 	}
@@ -175,36 +225,69 @@ func Run(ctx context.Context, opts RunOptions) ([]Result, error) {
 		defer os.RemoveAll(tempRoot)
 	}
 
-	var out *os.File
+	runSpecHash := evalRunSpecHash(manifest, scenarios, matrix, opts)
+	var checkpoint *resultCheckpoint
+	results := make([]Result, 0, len(scenarios)*len(matrix))
 	if opts.OutputPath != "" {
-		if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
-			return nil, fmt.Errorf("create output dir: %w", err)
-		}
-		out, err = os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		checkpoint, results, err = openResultCheckpoint(opts.OutputPath, opts.Resume)
 		if err != nil {
-			return nil, fmt.Errorf("open output: %w", err)
+			return nil, err
 		}
-		defer out.Close()
+		if err := validateResumePrefix(scenarios, matrix, opts, runSpecHash, results); err != nil {
+			return nil, fmt.Errorf("resume result checkpoint %q: %w", checkpoint.path, err)
+		}
+	} else if opts.Resume {
+		return nil, fmt.Errorf("resume requires an output path")
 	}
 
-	results := make([]Result, 0, len(scenarios)*len(matrix))
+	resultIndex := 0
 	for _, scenario := range scenarios {
 		for _, variant := range matrix {
+			if resultIndex < len(results) {
+				resultIndex++
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return results, interruptedEvalRunError(err, checkpoint, len(results))
+			}
 			result := runScenarioVariant(ctx, manifest, scenario, opts, workRoot, variant)
+			// A parent cancellation can terminate the active command midway through
+			// a paid scenario. Do not checkpoint that synthetic failure: resuming
+			// must retry the interrupted row, not silently treat it as completed.
+			if err := ctx.Err(); err != nil {
+				return results, interruptedEvalRunError(err, checkpoint, len(results))
+			}
+			result.RunSpecHash = runSpecHash
 			results = append(results, result)
-			if out != nil {
-				if err := writeJSONL(out, result); err != nil {
-					return results, err
+			resultIndex++
+			if checkpoint != nil {
+				if err := checkpoint.append(result); err != nil {
+					return results, fmt.Errorf("persist result checkpoint %q: %w", checkpoint.path, err)
 				}
 			}
+		}
+	}
+	if checkpoint != nil {
+		if err := checkpoint.publish(); err != nil {
+			return results, fmt.Errorf("publish result output %q (checkpoint retained at %q): %w", opts.OutputPath, checkpoint.path, err)
 		}
 	}
 	return results, nil
 }
 
+func interruptedEvalRunError(err error, checkpoint *resultCheckpoint, completed int) error {
+	if checkpoint == nil {
+		return fmt.Errorf("eval run interrupted after %d completed result(s): %w", completed, err)
+	}
+	return fmt.Errorf("eval run interrupted after %d completed result(s); resume with --resume using checkpoint %q: %w", completed, checkpoint.path, err)
+}
+
 type matrixEntry struct {
 	Provider     string
 	Model        string
+	EngineMode   string
+	Trial        int
+	TrialCount   int
 	FaultProfile string
 	BaseURL      string
 }
@@ -236,38 +319,32 @@ func failedFaultSetupResult(manifest *Manifest, scenario Scenario, variant matri
 	now := time.Now()
 	return Result{
 		ScenarioID: scenario.ID, Category: scenario.Category, Difficulty: scenario.Difficulty,
-		Provider: variant.Provider, Model: variant.Model, FaultProfile: variant.FaultProfile,
+		HybridCandidate: scenario.HybridCandidate,
+		Provider:        variant.Provider, Model: variant.Model, EngineMode: variant.EngineMode,
+		Trial: variant.Trial, TrialCount: variant.TrialCount, FaultProfile: variant.FaultProfile,
 		Status: "setup_failed", StartedAt: now, FinishedAt: now,
 		Metrics: map[string]bool{}, Score: ScoreSummary{}, Error: err.Error(),
-		Metadata: map[string]string{"manifest": manifest.Name, "fixture": scenario.Fixture},
+		Metadata: resultMetadata(manifest, scenario, variant),
 	}
 }
 
 func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opts RunOptions, workRoot string, variant matrixEntry) (result Result) {
 	start := time.Now()
 	result = Result{
-		ScenarioID:   scenario.ID,
-		Category:     scenario.Category,
-		Difficulty:   scenario.Difficulty,
-		Provider:     variant.Provider,
-		Model:        variant.Model,
-		FaultProfile: variant.FaultProfile,
-		Status:       "running",
-		StartedAt:    start,
-		Metrics:      make(map[string]bool),
-		Metadata: map[string]string{
-			"manifest": manifest.Name,
-			"fixture":  scenario.Fixture,
-		},
-	}
-	if variant.Provider != "" {
-		result.Metadata["provider"] = variant.Provider
-	}
-	if variant.Model != "" {
-		result.Metadata["model"] = variant.Model
-	}
-	if variant.FaultProfile != "" {
-		result.Metadata["fault_profile"] = variant.FaultProfile
+		ScenarioID:      scenario.ID,
+		Category:        scenario.Category,
+		Difficulty:      scenario.Difficulty,
+		HybridCandidate: scenario.HybridCandidate,
+		Provider:        variant.Provider,
+		Model:           variant.Model,
+		EngineMode:      variant.EngineMode,
+		Trial:           variant.Trial,
+		TrialCount:      variant.TrialCount,
+		FaultProfile:    variant.FaultProfile,
+		Status:          "running",
+		StartedAt:       start,
+		Metrics:         make(map[string]bool),
+		Metadata:        resultMetadata(manifest, scenario, variant),
 	}
 	defer func() {
 		result.FinishedAt = time.Now()
@@ -309,9 +386,19 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 		result.Error = "agent command is required unless dry_run is true"
 		return result
 	}
+	runtimeDir, err := os.MkdirTemp(workRoot, ".gokin-eval-runtime-")
+	if err != nil {
+		result.Status = "setup_failed"
+		result.Error = fmt.Sprintf("create trusted eval runtime: %v", err)
+		return result
+	}
+	if !opts.KeepWorkspaces {
+		defer os.RemoveAll(runtimeDir)
+	}
 
 	agentCommand := expandCommandTemplate(opts.AgentCommand, manifest, scenario, workspace, variant)
-	result.Agent = runShellCommand(ctx, workspace, agentCommand, opts.Timeout, evalEnv(manifest, scenario, workspace, variant), true)
+	agentEnv := append(evalEnv(manifest, scenario, workspace, variant), "GOKIN_EVAL_RUNTIME_DIR="+runtimeDir)
+	result.Agent = runShellCommand(ctx, workspace, agentCommand, opts.Timeout, agentEnv, true)
 
 	afterAgent, _ := snapshotFiles(workspace)
 	result.ChangedFiles = diffSnapshots(before, afterAgent)
@@ -323,7 +410,7 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 
 	afterVerify, _ := snapshotFiles(workspace)
 	result.ChangedFiles = diffSnapshots(before, afterVerify)
-	result.Journal = summarizeExecutionJournal(workspace, result.Agent.OutputPreview, result.ChangedFiles)
+	result.Journal = summarizeTrustedExecutionJournal(runtimeDir, workspace, result.Agent.OutputPreview, result.ChangedFiles)
 	result.Metrics = scoreScenario(scenario, result)
 	result.Score = summarizeScore(result.Metrics)
 
@@ -367,7 +454,7 @@ func finalizeReliability(result *Result) {
 	}
 	faultInjected := result.Fault != nil && result.Fault.Injected == 1
 	retryObserved := result.Fault != nil && result.Fault.MessageRequestsAfterInjection > 0
-	journalPresent := result.Journal != nil && result.Journal.Path != ""
+	journalPresent := result.Journal != nil && result.Journal.TrustedRuntime && result.Journal.Path != ""
 	noDuplicates := journalPresent && len(result.Journal.DuplicateSideEffectExecutions) == 0
 	recovered := result.Error == "" && agentDeliveredAnswer(*result) && allCommandsSuccessful(result.Verification) && behavioralAssertionsSatisfied(result.Metrics)
 	reliability := &ReliabilitySummary{
@@ -389,9 +476,8 @@ func finalizeReliability(result *Result) {
 }
 
 // behavioralAssertionsSatisfied reports whether every DECLARED behavioral
-// assertion metric (answer_contains_required / required_files_changed /
-// protected_files_unchanged — present in `metrics` only when the scenario
-// declares the corresponding assertion, see scoreScenario) is true. A
+// assertion metric emitted by scoreScenario is true. These include answer and
+// file/workspace contracts plus request-level engine-policy classification. A
 // scenario with no declared assertions vacuously satisfies this.
 //
 // Without this, Status was computed ONLY from Agent.Success + verification
@@ -403,7 +489,14 @@ func finalizeReliability(result *Result) {
 // for the default pass/fail gate (invisible unless the caller separately
 // adds --fail-metric for that specific metric name).
 func behavioralAssertionsSatisfied(metrics map[string]bool) bool {
-	for _, key := range []string{"answer_contains_required", "required_files_changed", "protected_files_unchanged"} {
+	for _, key := range []string{
+		"answer_contains_required",
+		"required_files_changed",
+		"protected_files_unchanged",
+		"workspace_unchanged",
+		"hybrid_policy_expected",
+		"hybrid_efficient_path",
+	} {
 		if v, ok := metrics[key]; ok && !v {
 			return false
 		}
@@ -470,8 +563,34 @@ func buildProviderModelMatrix(providers, models []string) []matrixEntry {
 	return entries
 }
 
-func buildRunMatrix(providers, models, faultProfiles []string) ([]matrixEntry, error) {
+func buildRunMatrix(providers, models, engineModes, faultProfiles []string) ([]matrixEntry, error) {
 	base := buildProviderModelMatrix(providers, models)
+	rawModes := compactNonEmptyUnique(engineModes)
+	if len(rawModes) == 0 {
+		rawModes = []string{"auto"}
+	}
+	modes := make([]string, 0, len(rawModes))
+	seenModes := make(map[string]bool, len(rawModes))
+	for _, rawMode := range rawModes {
+		mode := strings.ToLower(strings.TrimSpace(rawMode))
+		switch mode {
+		case "auto", "tools", "hybrid":
+			if !seenModes[mode] {
+				seenModes[mode] = true
+				modes = append(modes, mode)
+			}
+		default:
+			return nil, fmt.Errorf("invalid engine mode %q: expected auto, tools, or hybrid", mode)
+		}
+	}
+	modeEntries := make([]matrixEntry, 0, len(base)*len(modes))
+	for _, entry := range base {
+		for _, mode := range modes {
+			entry.EngineMode = mode
+			modeEntries = append(modeEntries, entry)
+		}
+	}
+	base = modeEntries
 	rawProfiles := compactNonEmptyUnique(faultProfiles)
 	if len(rawProfiles) == 0 {
 		return base, nil
@@ -498,6 +617,95 @@ func buildRunMatrix(providers, models, faultProfiles []string) ([]matrixEntry, e
 	return entries, nil
 }
 
+// expandRunTrials creates independent repetitions of the full matrix. Entries
+// are grouped into paired provider/model/fault cohorts. Cohort order is
+// cyclically rotated, while the engine order within each cohort follows Latin
+// rotations and, for three modes, a reversed second block. This balances engine
+// position over three trials and directed engine carry-over over six trials. It
+// also keeps paired engines temporally close without letting one engine or
+// cohort always inherit the same provider-cache/load position. A single/default
+// run preserves the legacy zero-valued trial provenance and workspace names.
+func expandRunTrials(entries []matrixEntry, repeat int) ([]matrixEntry, error) {
+	if repeat == 0 {
+		repeat = 1
+	}
+	if repeat < 1 {
+		return nil, fmt.Errorf("repeat must be at least 1")
+	}
+	if repeat > 100 {
+		return nil, fmt.Errorf("repeat must not exceed 100")
+	}
+	if repeat == 1 || len(entries) == 0 {
+		return entries, nil
+	}
+
+	type cohortKey struct {
+		Provider     string
+		Model        string
+		FaultProfile string
+	}
+	type cohort struct {
+		entries []matrixEntry
+	}
+
+	cohorts := make([]cohort, 0, len(entries))
+	cohortIndexes := make(map[cohortKey]int, len(entries))
+	cohortModes := make([]map[string]bool, 0, len(entries))
+	for _, entry := range entries {
+		key := cohortKey{
+			Provider:     entry.Provider,
+			Model:        entry.Model,
+			FaultProfile: entry.FaultProfile,
+		}
+		cohortIndex, ok := cohortIndexes[key]
+		if !ok {
+			cohortIndex = len(cohorts)
+			cohortIndexes[key] = cohortIndex
+			cohorts = append(cohorts, cohort{})
+			cohortModes = append(cohortModes, make(map[string]bool))
+		}
+		if cohortModes[cohortIndex][entry.EngineMode] {
+			return nil, fmt.Errorf(
+				"run matrix repeats engine mode %q for provider=%q model=%q fault=%q",
+				entry.EngineMode, entry.Provider, entry.Model, entry.FaultProfile,
+			)
+		}
+		cohortModes[cohortIndex][entry.EngineMode] = true
+		cohorts[cohortIndex].entries = append(cohorts[cohortIndex].entries, entry)
+	}
+
+	out := make([]matrixEntry, 0, len(entries)*repeat)
+	for trial := 1; trial <= repeat; trial++ {
+		cohortOffset := (trial - 1) % len(cohorts)
+		for cohortPosition := 0; cohortPosition < len(cohorts); cohortPosition++ {
+			current := cohorts[(cohortPosition+cohortOffset)%len(cohorts)]
+			for enginePosition := 0; enginePosition < len(current.entries); enginePosition++ {
+				engineIndex := counterbalancedEngineIndex(enginePosition, trial, len(current.entries))
+				entry := current.entries[engineIndex]
+				entry.Trial = trial
+				entry.TrialCount = repeat
+				out = append(out, entry)
+			}
+		}
+	}
+	return out, nil
+}
+
+// counterbalancedEngineIndex returns one row of a deterministic Latin rotation.
+// Production matrices contain at most the three supported engine modes. For
+// three modes, alternate complete blocks are reversed: the first three trials
+// balance positions and the first six additionally balance every directed
+// adjacent pair. Reversing a two-mode block only duplicates the neighboring
+// row, so two modes retain the optimal AB/BA alternation.
+func counterbalancedEngineIndex(position, trial, size int) int {
+	row := (trial - 1) % size
+	block := (trial - 1) / size
+	if size < 3 || block%2 == 0 {
+		return (position + row) % size
+	}
+	return (row + size - 1 - position) % size
+}
+
 func compactNonEmptyUnique(items []string) []string {
 	seen := make(map[string]bool, len(items))
 	out := make([]string, 0, len(items))
@@ -522,11 +730,23 @@ func matrixLabel(entry matrixEntry) string {
 	case entry.Model != "":
 		base = entry.Model
 	}
+	if entry.EngineMode != "" {
+		if base != "" {
+			base += "-"
+		}
+		base += "engine-" + entry.EngineMode
+	}
 	if entry.FaultProfile != "" {
 		if base != "" {
 			base += "-"
 		}
 		base += "fault-" + entry.FaultProfile
+	}
+	if entry.Trial > 0 {
+		if base != "" {
+			base += "-"
+		}
+		base += "trial-" + strconv.Itoa(entry.Trial)
 	}
 	return base
 }
@@ -695,9 +915,17 @@ func evalEnv(manifest *Manifest, scenario Scenario, workspace string, variant ma
 		"GOKIN_EVAL_WORKSPACE=" + workspace,
 		"GOKIN_EVAL_PROVIDER=" + variant.Provider,
 		"GOKIN_EVAL_MODEL=" + variant.Model,
+		"GOKIN_EVAL_ENGINE_MODE=" + variant.EngineMode,
+		"GOKIN_ENGINE_MODE=" + variant.EngineMode,
+		"GOKIN_EVAL_TRIAL=" + strconv.Itoa(variant.Trial),
+		"GOKIN_EVAL_TRIAL_COUNT=" + strconv.Itoa(variant.TrialCount),
 		"GOKIN_EVAL_FAULT_PROFILE=" + variant.FaultProfile,
 		"GOKIN_EVAL_BASE_URL=" + variant.BaseURL,
 		"GOKIN_EVAL_PROMPT=" + scenario.Prompt,
+		// Explicitly clear a possibly inherited value. runScenario appends the
+		// per-run trusted directory only for the agent process; verification
+		// commands must never learn or mutate the evidence channel.
+		"GOKIN_EVAL_RUNTIME_DIR=",
 	}
 }
 
@@ -711,6 +939,9 @@ func expandCommandTemplate(command string, manifest *Manifest, scenario Scenario
 		"{{workspace}}":     shellQuote(workspace),
 		"{{provider}}":      shellQuote(variant.Provider),
 		"{{model}}":         shellQuote(variant.Model),
+		"{{engine_mode}}":   shellQuote(variant.EngineMode),
+		"{{trial}}":         shellQuote(strconv.Itoa(variant.Trial)),
+		"{{trial_count}}":   shellQuote(strconv.Itoa(variant.TrialCount)),
 		"{{fault_profile}}": shellQuote(variant.FaultProfile),
 		"{{base_url}}":      shellQuote(variant.BaseURL),
 		"{{prompt}}":        shellQuote(scenario.Prompt),
@@ -720,6 +951,28 @@ func expandCommandTemplate(command string, manifest *Manifest, scenario Scenario
 		out = strings.ReplaceAll(out, key, value)
 	}
 	return out
+}
+
+func resultMetadata(manifest *Manifest, scenario Scenario, variant matrixEntry) map[string]string {
+	metadata := map[string]string{
+		"manifest":    manifest.Name,
+		"fixture":     scenario.Fixture,
+		"engine_mode": variant.EngineMode,
+	}
+	if variant.Provider != "" {
+		metadata["provider"] = variant.Provider
+	}
+	if variant.Model != "" {
+		metadata["model"] = variant.Model
+	}
+	if variant.Trial > 0 {
+		metadata["trial"] = strconv.Itoa(variant.Trial)
+		metadata["trial_count"] = strconv.Itoa(variant.TrialCount)
+	}
+	if variant.FaultProfile != "" {
+		metadata["fault_profile"] = variant.FaultProfile
+	}
+	return metadata
 }
 
 func snapshotFiles(root string) (map[string]string, error) {
@@ -813,6 +1066,15 @@ const maxJournalLineBytes = 8 << 20 // 8 MiB
 
 func summarizeExecutionJournal(workspace, output string, changed []string) *JournalSummary {
 	journalPath := filepath.Join(workspace, ".gokin", "execution_journal.jsonl")
+	return summarizeExecutionJournalFile(journalPath, ".gokin/execution_journal.jsonl", workspace, output, changed, false)
+}
+
+func summarizeTrustedExecutionJournal(runtimeDir, workspace, output string, changed []string) *JournalSummary {
+	journalPath := filepath.Join(runtimeDir, "execution_journal.jsonl")
+	return summarizeExecutionJournalFile(journalPath, "<eval-runtime>/execution_journal.jsonl", workspace, output, changed, true)
+}
+
+func summarizeExecutionJournalFile(journalPath, displayPath, workspace, output string, changed []string, trusted bool) *JournalSummary {
 	f, err := os.Open(journalPath)
 	if err != nil {
 		// No journal → no files-read evidence; claims are judged against
@@ -825,7 +1087,8 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 			return &JournalSummary{FalseFileClaims: falseClaims}
 		}
 		return &JournalSummary{
-			Path:            ".gokin/execution_journal.jsonl",
+			Path:            displayPath,
+			TrustedRuntime:  trusted,
 			FalseFileClaims: falseClaims,
 			ParseErrors:     []string{err.Error()},
 		}
@@ -833,7 +1096,9 @@ func summarizeExecutionJournal(workspace, output string, changed []string) *Jour
 	defer f.Close()
 
 	summary := &JournalSummary{
-		Path:            ".gokin/execution_journal.jsonl",
+		Path:            displayPath,
+		TrustedRuntime:  trusted,
+		ToolCounts:      make(map[string]int),
 		seenSideEffects: make(map[string]sideEffectSeen),
 	}
 	// Read line-by-line with a bufio.Reader (not a Scanner): a single
@@ -914,6 +1179,39 @@ func recordJournalEvent(summary *JournalSummary, workspace string, event journal
 		}
 	case "tool_start":
 		recordJournalToolStart(summary, workspace, event.Details)
+	case "tool_end":
+		recordJournalToolEnd(summary, event.Details)
+	case "headless_metrics":
+		summary.HeadlessMetrics = &HeadlessMetricsSummary{
+			InputTokens:           detailInt(event.Details, "input_tokens"),
+			OutputTokens:          detailInt(event.Details, "output_tokens"),
+			CacheReadInputTokens:  detailInt(event.Details, "cache_read_input_tokens"),
+			TotalTokens:           detailInt(event.Details, "total_tokens"),
+			TokenBreakdownTracked: detailsContainNonNegativeIntegers(event.Details, "input_tokens", "output_tokens", "cache_read_input_tokens", "total_tokens"),
+			ModelRounds:           detailInt(event.Details, "model_rounds"),
+			DurationMillis:        int64(detailInt(event.Details, "duration_ms")),
+			EstimatedUSD:          detailFloat(event.Details, "estimated_usd"),
+			CostTracked:           detailBool(event.Details, "cost_tracked"),
+		}
+	case "engine_policy":
+		// Preserve the first decision: structured-output correction turns may
+		// follow, but they are not the scenario prompt whose eligibility matters.
+		if summary.HybridPolicy == nil {
+			replEnabled := detailBool(event.Details, "repl_enabled")
+			replEligible := replEnabled // old journals recorded only this field
+			if _, present := event.Details["repl_eligible"]; present {
+				replEligible = detailBool(event.Details, "repl_eligible")
+			}
+			summary.HybridPolicy = &HybridPolicySummary{
+				Mode:           detailString(event.Details, "mode"),
+				Strategy:       detailString(event.Details, "strategy"),
+				REPLEligible:   replEligible,
+				REPLEnabled:    replEnabled,
+				HarnessEnabled: detailBool(event.Details, "harness_enabled"),
+				ExposureGap:    replEligible && !replEnabled,
+				Reason:         detailString(event.Details, "reason"),
+			}
+		}
 	case "plan_step_verification_passed":
 		if text := detailString(event.Details, "summary", "command"); text != "" {
 			appendUniqueString(&summary.VerificationCommands, text)
@@ -923,6 +1221,96 @@ func recordJournalEvent(summary *JournalSummary, workspace string, event journal
 	}
 }
 
+func recordJournalToolEnd(summary *JournalSummary, details map[string]any) {
+	if summary == nil || !strings.EqualFold(detailString(details, "tool", "name", "tool_name"), "repl_exec") {
+		return
+	}
+	if refreshes := detailInt(details, "repl_file_index_refreshes"); refreshes > 0 {
+		if refreshes > maxJournalREPLOperationCount {
+			refreshes = maxJournalREPLOperationCount
+		}
+		if summary.ReplFileIndexRefreshes >= maxJournalREPLOperationCount-refreshes {
+			summary.ReplFileIndexRefreshes = maxJournalREPLOperationCount
+		} else {
+			summary.ReplFileIndexRefreshes += refreshes
+		}
+	}
+	raw, ok := details["repl_operations"]
+	if !ok {
+		return
+	}
+	operations := make(map[string]int)
+	switch values := raw.(type) {
+	case map[string]any:
+		for name, value := range values {
+			operations[name] = journalOperationCount(value)
+		}
+	case map[string]int:
+		for name, value := range values {
+			operations[name] = value
+		}
+	default:
+		return
+	}
+
+	names := make([]string, 0, len(operations))
+	for name, count := range operations {
+		if count > 0 && validHybridOperationName(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > 64 {
+		names = names[:64]
+	}
+	if summary.ReplOperations == nil {
+		summary.ReplOperations = make(map[string]int)
+	}
+	for _, name := range names {
+		count := operations[name]
+		if count > maxJournalREPLOperationCount {
+			count = maxJournalREPLOperationCount
+		}
+		total := summary.ReplOperations[name]
+		if total >= maxJournalREPLOperationCount-count {
+			total = maxJournalREPLOperationCount
+		} else {
+			total += count
+		}
+		summary.ReplOperations[name] = total
+	}
+}
+
+func journalOperationCount(value any) int {
+	switch count := value.(type) {
+	case float64:
+		if count <= 0 || math.Trunc(count) != count {
+			return 0
+		}
+		if count >= maxJournalREPLOperationCount {
+			return maxJournalREPLOperationCount
+		}
+		return int(count)
+	case int:
+		return count
+	case int64:
+		if count >= maxJournalREPLOperationCount {
+			return maxJournalREPLOperationCount
+		}
+		return int(count)
+	case json.Number:
+		parsed, err := count.Int64()
+		if err != nil {
+			return 0
+		}
+		if parsed >= maxJournalREPLOperationCount {
+			return maxJournalREPLOperationCount
+		}
+		return int(parsed)
+	}
+	return 0
+}
+
 func recordJournalToolStart(summary *JournalSummary, workspace string, details map[string]any) {
 	tool := detailString(details, "tool", "name", "tool_name")
 	if tool == "" {
@@ -930,6 +1318,10 @@ func recordJournalToolStart(summary *JournalSummary, workspace string, details m
 	}
 	summary.ToolCalls++
 	appendUniqueString(&summary.Tools, tool)
+	if summary.ToolCounts == nil {
+		summary.ToolCounts = make(map[string]int)
+	}
+	summary.ToolCounts[tool]++
 
 	args, _ := details["args"].(map[string]any)
 	recordStatefulExecution(summary, tool, args)
@@ -1062,6 +1454,81 @@ func detailString(details map[string]any, keys ...string) string {
 	return ""
 }
 
+func detailInt(details map[string]any, key string) int {
+	if details == nil {
+		return 0
+	}
+	switch value := details[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case json.Number:
+		n, _ := value.Int64()
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func detailFloat(details map[string]any, key string) float64 {
+	if details == nil {
+		return 0
+	}
+	switch value := details[key].(type) {
+	case float64:
+		return value
+	case int:
+		return float64(value)
+	case json.Number:
+		n, _ := value.Float64()
+		return n
+	default:
+		return 0
+	}
+}
+
+func detailBool(details map[string]any, key string) bool {
+	if details == nil {
+		return false
+	}
+	value, _ := details[key].(bool)
+	return value
+}
+
+func detailsContainNonNegativeIntegers(details map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		value, ok := details[key]
+		if !ok {
+			return false
+		}
+		switch number := value.(type) {
+		case float64:
+			if number < 0 || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number {
+				return false
+			}
+		case int:
+			if number < 0 {
+				return false
+			}
+		case int64:
+			if number < 0 {
+				return false
+			}
+		case json.Number:
+			parsed, err := number.Int64()
+			if err != nil || parsed < 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func appendUniqueString(items *[]string, value string) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1160,7 +1627,120 @@ func scoreScenario(scenario Scenario, result Result) map[string]bool {
 	if len(scenario.FileMustNotChange) > 0 {
 		metrics["protected_files_unchanged"] = noPathPresent(result.ChangedFiles, scenario.FileMustNotChange)
 	}
+	if scenario.WorkspaceMustRemainUnchanged {
+		metrics["workspace_unchanged"] = len(result.ChangedFiles) == 0
+	}
+	if scenario.HybridCandidate != nil {
+		metrics["hybrid_policy_expected"] = hybridPolicyMatchesScenario(scenario, result)
+	}
+	if scenario.HasHybridEfficiencyAssertion() &&
+		!strings.EqualFold(strings.TrimSpace(result.EngineMode), "tools") {
+		metrics["hybrid_efficient_path"] = hybridEfficientPathMatchesScenario(scenario, result)
+	}
 	return metrics
+}
+
+func hybridPolicyMatchesScenario(scenario Scenario, result Result) bool {
+	if scenario.HybridCandidate == nil || result.Journal == nil || !result.Journal.TrustedRuntime ||
+		result.Journal.HybridPolicy == nil {
+		return false
+	}
+	expected := *scenario.HybridCandidate
+	mode := strings.ToLower(strings.TrimSpace(result.EngineMode))
+	observedMode := strings.ToLower(strings.TrimSpace(result.Journal.HybridPolicy.Mode))
+	if mode != "" && observedMode != mode {
+		return false
+	}
+	switch mode {
+	case "tools":
+		expected = false
+	case "hybrid":
+		expected = true
+	case "auto", "":
+		// Keep the manifest's request classification.
+	default:
+		return false
+	}
+	policy := result.Journal.HybridPolicy
+	if policy.REPLEligible != expected || policy.REPLEnabled != expected {
+		return false
+	}
+	expectedStrategy := ""
+	if mode != "tools" && scenario.HybridCandidate != nil && *scenario.HybridCandidate {
+		decision := hybrid.Decide("auto", scenario.Prompt)
+		if !decision.Enabled {
+			return false
+		}
+		expectedStrategy = string(decision.Strategy)
+	}
+	return strings.TrimSpace(policy.Strategy) == expectedStrategy
+}
+
+func hybridEfficientPathMatchesScenario(scenario Scenario, result Result) bool {
+	mode := strings.ToLower(strings.TrimSpace(result.EngineMode))
+	if mode != "auto" && mode != "hybrid" {
+		return false
+	}
+	if !hybridPolicyMatchesScenario(scenario, result) || result.Journal == nil ||
+		result.Journal.ToolCounts["repl_exec"] <= 0 {
+		return false
+	}
+	for _, operation := range scenario.HybridRequiredOperations {
+		if result.Journal.ReplOperations[operation] <= 0 {
+			return false
+		}
+	}
+	if len(scenario.HybridRequiredAnyOperations) > 0 {
+		matched := false
+		for _, operation := range scenario.HybridRequiredAnyOperations {
+			if result.Journal.ReplOperations[operation] > 0 {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if scenario.HybridMaxReplCalls > 0 &&
+		result.Journal.ToolCounts["repl_exec"] > scenario.HybridMaxReplCalls {
+		return false
+	}
+	if scenario.HybridMaxScanOperations > 0 &&
+		(replScanOperationCount(result.Journal.ReplOperations) > scenario.HybridMaxScanOperations ||
+			result.Journal.ReplFileIndexRefreshes > scenario.HybridMaxScanOperations) {
+		return false
+	}
+	if result.Journal.ReplFileIndexRefreshes < scenario.HybridMinFileIndexRefreshes {
+		return false
+	}
+	return true
+}
+
+// replScanOperationCount prefers the worker-owned lowest-layer inventory count
+// when present. New runtimes emit it for every logical traversal, including a
+// same-cell snapshot replay or introspective private-helper call. Legacy
+// journals remain readable through the public-operation fallback. Sample
+// markers are modes of the same scan and are never counted separately.
+func replScanOperationCount(operations map[string]int) int {
+	if count := operations["file_inventory"]; count > 0 {
+		if count >= maxJournalREPLOperationCount {
+			return maxJournalREPLOperationCount
+		}
+		return count
+	}
+	total := 0
+	for _, name := range []string{"count_code", "count_code_many", "search_code", "list_files", "file_stats"} {
+		count := operations[name]
+		if count <= 0 {
+			continue
+		}
+		if total >= maxJournalREPLOperationCount-count {
+			return maxJournalREPLOperationCount
+		}
+		total += count
+	}
+	return total
 }
 
 // answerContainsAll reports whether the agent's final answer contains EVERY
@@ -1380,15 +1960,6 @@ func mentionsVerification(output string, commands []string) bool {
 	return false
 }
 
-func writeJSONL(w io.Writer, result Result) error {
-	b, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(append(b, '\n'))
-	return err
-}
-
 func trimPreview(s string, limit int) string {
 	s = strings.TrimSpace(s)
 	runes := []rune(s)
@@ -1428,17 +1999,119 @@ func ReadResults(path string) ([]Result, error) {
 	defer f.Close()
 
 	var results []Result
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	reader := bufio.NewReader(f)
+	for lineNo := 1; ; lineNo++ {
+		raw, atEOF, err := readBoundedResultLine(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read result line %d: %w", lineNo, err)
+		}
+		line := bytes.TrimSpace(raw)
+		if len(line) == 0 {
+			if atEOF {
+				break
+			}
 			continue
 		}
 		var result Result
-		if err := json.Unmarshal([]byte(line), &result); err != nil {
-			return nil, err
+		if err := decodeStrictJSON(line, &result); err != nil {
+			return nil, fmt.Errorf("parse result line %d: %w", lineNo, err)
+		}
+		if err := validateResultRecord(result); err != nil {
+			return nil, fmt.Errorf("validate result line %d: %w", lineNo, err)
 		}
 		results = append(results, result)
+		if atEOF {
+			break
+		}
 	}
-	return results, scanner.Err()
+	return results, nil
+}
+
+func validateResultRecord(result Result) error {
+	if strings.TrimSpace(result.ScenarioID) == "" {
+		return fmt.Errorf("scenario_id is required")
+	}
+	if result.RunSpecHash != "" {
+		if !validSHA256Hex(result.RunSpecHash) {
+			return fmt.Errorf("run_spec_hash must be a SHA-256 hex digest")
+		}
+	}
+	if result.ScenarioSpecHash != "" && !validSHA256Hex(result.ScenarioSpecHash) {
+		return fmt.Errorf("scenario_spec_hash must be a SHA-256 hex digest")
+	}
+	switch result.Status {
+	case "passed", "failed", "dry_run", "setup_failed", "fixture_missing", "agent_command_missing":
+	default:
+		return fmt.Errorf("invalid status %q", result.Status)
+	}
+	switch strings.ToLower(strings.TrimSpace(result.EngineMode)) {
+	case "", "tools", "auto", "hybrid":
+	default:
+		return fmt.Errorf("invalid engine_mode %q", result.EngineMode)
+	}
+	if result.Score.Passed < 0 || result.Score.Total < 0 || result.Score.Passed > result.Score.Total ||
+		result.Score.Ratio < 0 || result.Score.Ratio > 1 {
+		return fmt.Errorf("invalid score %+v", result.Score)
+	}
+	if result.DurationMillis < 0 {
+		return fmt.Errorf("duration_ms must not be negative")
+	}
+	if result.Trial < 0 || result.TrialCount < 0 ||
+		(result.Trial == 0) != (result.TrialCount == 0) || result.Trial > result.TrialCount {
+		return fmt.Errorf("invalid trial provenance %d/%d", result.Trial, result.TrialCount)
+	}
+	if result.Journal == nil {
+		return nil
+	}
+	journal := result.Journal
+	if journal.TrustedRuntime && strings.TrimSpace(journal.Path) == "" {
+		return fmt.Errorf("trusted_runtime journal requires path")
+	}
+	if journal.ToolCalls < 0 || journal.ReplFileIndexRefreshes < 0 {
+		return fmt.Errorf("journal counters must not be negative")
+	}
+	for name, count := range journal.ToolCounts {
+		if strings.TrimSpace(name) == "" || count < 0 {
+			return fmt.Errorf("invalid tool count %q=%d", name, count)
+		}
+	}
+	for name, count := range journal.ReplOperations {
+		if !validHybridOperationName(name) || count < 0 {
+			return fmt.Errorf("invalid REPL operation count %q=%d", name, count)
+		}
+	}
+	if metrics := journal.HeadlessMetrics; metrics != nil {
+		if metrics.InputTokens < 0 || metrics.OutputTokens < 0 || metrics.CacheReadInputTokens < 0 ||
+			metrics.TotalTokens < 0 || metrics.ModelRounds < 0 || metrics.DurationMillis < 0 ||
+			metrics.EstimatedUSD < 0 {
+			return fmt.Errorf("headless metric counters must not be negative")
+		}
+		if metrics.CacheReadInputTokens > metrics.InputTokens {
+			return fmt.Errorf("cache_read_input_tokens must not exceed input_tokens")
+		}
+		if metrics.TokenBreakdownTracked && metrics.TotalTokens != metrics.InputTokens+metrics.OutputTokens {
+			return fmt.Errorf("tracked token breakdown must satisfy total_tokens=input_tokens+output_tokens")
+		}
+	}
+	return nil
+}
+
+func readBoundedResultLine(reader *bufio.Reader) (line []byte, atEOF bool, err error) {
+	for {
+		fragment, readErr := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > maxResultLineBytes {
+			return nil, false, fmt.Errorf("JSONL record exceeds %d-byte limit", maxResultLineBytes)
+		}
+		line = append(line, fragment...)
+		switch readErr {
+		case nil:
+			return line, false, nil
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			return line, true, nil
+		default:
+			return nil, false, readErr
+		}
+	}
 }

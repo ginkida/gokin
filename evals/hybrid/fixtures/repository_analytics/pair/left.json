@@ -1,0 +1,5 @@
+{
+  "endpoint": "https://example.invalid",
+  "retries": 3,
+  "timeout": 10
+}

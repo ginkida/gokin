@@ -1188,6 +1188,37 @@ func TestCapabilityDeniesForCLIRulesHidesOnlyBareMatches(t *testing.T) {
 	}
 }
 
+func TestOptionalRuntimeDeniesForCLIRules(t *testing.T) {
+	rules, err := resolveCLIDeniedToolRules([]string{
+		"Read", "repl_exec", "Bash(git status *)", "harn*",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Argument-scoped rules are execution policy, not a reason to remove an
+	// unrelated optional runtime. Bare/wildcard rules can safely skip startup.
+	if got := strings.Join(optionalRuntimeDeniesForCLIRules(rules), ","); got != "repl_exec,harness" {
+		t.Fatalf("optional runtime denies = %q", got)
+	}
+	if got := optionalRuntimeDeniesForCLIRules([]string{"bash(git status *)"}); got != nil {
+		t.Fatalf("scoped bash deny disabled an optional runtime: %v", got)
+	}
+}
+
+func TestCapabilityDeniesAcceptsPhysicallySkippedOptionalRuntime(t *testing.T) {
+	rules, err := resolveCLIDeniedToolRules([]string{"repl_exec", "harness"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied, err := capabilityDeniesForCLIRules([]string{"read", "grep"}, rules)
+	if err != nil {
+		t.Fatalf("physically skipped optional runtime was rejected: %v", err)
+	}
+	if len(denied) != 0 {
+		t.Fatalf("absent optional runtime leaked into final registry ceiling: %v", denied)
+	}
+}
+
 type zeroReader struct{}
 
 func (zeroReader) Read(p []byte) (int, error) {

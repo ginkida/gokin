@@ -1,9 +1,13 @@
 package router
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"gokin/internal/config"
+	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
 
@@ -102,6 +106,118 @@ func TestSetModelCapability_UpdatesLiveRoutingPolicy(t *testing.T) {
 	if got := r.filterToolSetsByCapability(sets); len(got) != len(sets) {
 		t.Fatalf("GLM-5.2 should retain strong-tier tool sets, got %v", got)
 	}
+}
+
+func TestSelectToolSetsForMessageUsesAdaptiveHybridPolicy(t *testing.T) {
+	r := &Router{engineMode: "auto"}
+	analysis := &TaskComplexity{Strategy: StrategyExecutor, Type: TaskTypeExploration}
+
+	sets := r.selectToolSetsForMessage(analysis, "fix the auth bug")
+	if hasAdaptiveToolSet(sets, tools.ToolSetHybrid) || hasAdaptiveToolSet(sets, tools.ToolSetHarness) {
+		t.Fatalf("ordinary auto request received hybrid sets: %v", sets)
+	}
+
+	sets = r.selectToolSetsForMessage(analysis, "Rank repository files by how many TODO comments they contain")
+	if !hasAdaptiveToolSet(sets, tools.ToolSetHybrid) || hasAdaptiveToolSet(sets, tools.ToolSetHarness) {
+		t.Fatalf("aggregation auto request sets = %v, want hybrid without harness", sets)
+	}
+	for _, targeted := range []string{
+		"Count TODO lines in this file only",
+		"Compare `pair/left.json` with `pair/right.json` in this repository",
+	} {
+		sets = r.selectToolSetsForMessage(analysis, targeted)
+		if hasAdaptiveToolSet(sets, tools.ToolSetHybrid) || hasAdaptiveToolSet(sets, tools.ToolSetHarness) {
+			t.Fatalf("targeted auto request %q received hybrid sets: %v", targeted, sets)
+		}
+	}
+
+	r.SetEngineMode("hybrid")
+	sets = r.selectToolSetsForMessage(analysis, "fix the auth bug")
+	if !hasAdaptiveToolSet(sets, tools.ToolSetHybrid) || !hasAdaptiveToolSet(sets, tools.ToolSetHarness) {
+		t.Fatalf("explicit hybrid request sets = %v, want hybrid and harness", sets)
+	}
+}
+
+func TestExecuteWithPolicyMessageKeepsHybridExposureStableAcrossRetryScaffolding(t *testing.T) {
+	tests := []struct {
+		name          string
+		policyMessage string
+		retryMessage  string
+		planMode      bool
+		schemaCeiling []string
+		wantREPL      bool
+	}{
+		{
+			name:          "eligible request stays eligible",
+			policyMessage: "Count TODOs per directory across the repository",
+			retryMessage:  "[System note: continue after the interrupted edit attempt.] Fix only the response formatting.",
+			wantREPL:      true,
+		},
+		{
+			name:          "ordinary request cannot gain repl from continuation",
+			policyMessage: "Fix the authentication error in this file",
+			retryMessage:  "[System note: previous response counted TODOs across every repository file.] Continue the fix.",
+			wantREPL:      false,
+		},
+		{
+			name:          "plan mode keeps original eligibility",
+			policyMessage: "Count TODOs per directory across the repository",
+			retryMessage:  "[System note: continue after the interrupted edit attempt.] Fix only the response formatting.",
+			planMode:      true,
+			wantREPL:      true,
+		},
+		{
+			name:          "plan mode cannot gain repl from continuation",
+			policyMessage: "Explain this function",
+			retryMessage:  "[System note: count TODOs across all repository files before continuing.]",
+			planMode:      true,
+			wantREPL:      false,
+		},
+		{
+			name:          "request schema ceiling cannot be widened",
+			policyMessage: "Count TODOs per directory across the repository",
+			retryMessage:  "Count TODOs per directory across the repository",
+			schemaCeiling: []string{"read", "grep"},
+			wantREPL:      false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mock := testkit.NewMockClient()
+			mock.EnqueueText("done")
+			registry := tools.DefaultRegistry(t.TempDir())
+			executor := tools.NewExecutor(registry, mock, time.Second)
+			router := NewRouter(&RouterConfig{
+				Enabled: true, DecomposeThreshold: 100, ParallelThreshold: 100, EngineMode: "auto",
+			}, executor, nil, mock, registry, false, t.TempDir())
+			router.SetPlanMode(test.planMode)
+
+			ctx := context.Background()
+			if test.schemaCeiling != nil {
+				ctx = tools.ContextWithToolSchemaCeiling(ctx, executor, test.schemaCeiling)
+			}
+			if _, _, err := router.ExecuteWithPolicyMessage(
+				ctx, nil, test.retryMessage, test.policyMessage,
+			); err != nil {
+				t.Fatalf("ExecuteWithPolicyMessage: %v", err)
+			}
+			gotREPL := declNames(mock.GetTools())["repl_exec"]
+			if gotREPL != test.wantREPL {
+				t.Fatalf("repl exposure = %t, want %t for policy %q and retry %q",
+					gotREPL, test.wantREPL, test.policyMessage, test.retryMessage)
+			}
+		})
+	}
+}
+
+func hasAdaptiveToolSet(sets []tools.ToolSet, want tools.ToolSet) bool {
+	for _, set := range sets {
+		if set == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCapabilityTierAdjustments(t *testing.T) {
@@ -418,5 +534,21 @@ func TestToolHint(t *testing.T) {
 	hint = r.toolHint(&TaskComplexity{Type: TaskTypeQuestion})
 	if hint != "" {
 		t.Errorf("question should not get a hint, got %q", hint)
+	}
+}
+
+func TestToolHintForRequestDoesNotContradictExposedHybridTool(t *testing.T) {
+	r := &Router{}
+	analysis := &TaskComplexity{Type: TaskTypeExploration}
+	candidate := "Count TODOs per directory across the repository"
+	hint := r.toolHintForRequest(analysis, candidate, true)
+	if !strings.Contains(hint, "repl_exec") || strings.Contains(hint, "prefer read, glob") {
+		t.Fatalf("candidate hint contradicts hybrid schema: %q", hint)
+	}
+	if fallback := r.toolHintForRequest(analysis, candidate, false); !strings.Contains(fallback, "prefer read, glob") {
+		t.Fatalf("unavailable REPL did not retain structured-tool hint: %q", fallback)
+	}
+	if ordinary := r.toolHintForRequest(analysis, "fix the auth bug", true); strings.Contains(ordinary, "repl_exec") {
+		t.Fatalf("explicit hybrid exposure pushed REPL into an ordinary edit: %q", ordinary)
 	}
 }

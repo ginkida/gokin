@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"gokin/internal/git"
 	"gokin/internal/harness"
 	"gokin/internal/hooks"
+	"gokin/internal/hybrid"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
 	"gokin/internal/mcp"
@@ -54,6 +56,73 @@ type hybridRuntime interface {
 	Stats() repl.Stats
 	SetCallHandler(repl.CallHandler)
 	Close() error
+}
+
+const (
+	runtimeEngineModeUnset uint32 = iota
+	runtimeEngineModeAuto
+	runtimeEngineModeTools
+	runtimeEngineModeHybrid
+)
+
+func normalizeRuntimeEngineMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "tools":
+		return "tools"
+	case "hybrid":
+		return "hybrid"
+	default:
+		return "auto"
+	}
+}
+
+func encodeRuntimeEngineMode(mode string) uint32 {
+	switch normalizeRuntimeEngineMode(mode) {
+	case "tools":
+		return runtimeEngineModeTools
+	case "hybrid":
+		return runtimeEngineModeHybrid
+	default:
+		return runtimeEngineModeAuto
+	}
+}
+
+func decodeRuntimeEngineMode(mode uint32) string {
+	switch mode {
+	case runtimeEngineModeTools:
+		return "tools"
+	case runtimeEngineModeHybrid:
+		return "hybrid"
+	default:
+		return "auto"
+	}
+}
+
+// runtimeEngineModeLocked returns and, for minimal test Apps that bypass the
+// Builder, seeds the immutable process mode. The caller must hold a.mu whenever
+// another goroutine could replace a.config.
+func (a *App) runtimeEngineModeLocked() string {
+	if code := a.runtimeEngineMode.Load(); code != runtimeEngineModeUnset {
+		return decodeRuntimeEngineMode(code)
+	}
+	configured := "auto"
+	if a.config != nil {
+		configured = a.config.Engine.Mode
+	}
+	a.runtimeEngineMode.CompareAndSwap(runtimeEngineModeUnset, encodeRuntimeEngineMode(configured))
+	return decodeRuntimeEngineMode(a.runtimeEngineMode.Load())
+}
+
+func (a *App) runtimeEngineModeSnapshot() string {
+	if a == nil {
+		return "auto"
+	}
+	if code := a.runtimeEngineMode.Load(); code != runtimeEngineModeUnset {
+		return decodeRuntimeEngineMode(code)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.runtimeEngineModeLocked()
 }
 
 var errConfigConflict = errors.New("configuration changed while this update was being prepared; retry the action")
@@ -125,6 +194,13 @@ type App struct {
 	config  *config.Config
 	workDir string
 	client  client.Client
+	// runtimeEngineMode is fixed when this App is assembled. engine.mode
+	// determines the physical registry shape and owns the secure Python worker
+	// lifecycle, so changing only the config pointer cannot be a truthful live
+	// transition. ApplyConfig may persist a different value for the next launch,
+	// but every component in this process continues to use this boot value.
+	// Zero is reserved for tests/minimal Apps and is seeded once from config.
+	runtimeEngineMode atomic.Uint32
 	// clientMu is a LEAF lock guarding the `client` field ONLY, so a background
 	// goroutine (session-memory onUpdate -> pushTurnContext, the /loop spawner)
 	// can read the client without a.mu — which it must NOT take, because some
@@ -284,6 +360,13 @@ type App struct {
 	// replManager owns the foreground session's isolated Python kernel. It is
 	// never shared with cloned sub-agent registries.
 	replManager hybridRuntime
+	// deferredHybrid keeps auto mode process-free until a request is actually
+	// eligible for the computation plane.
+	deferredHybrid *deferredHybridInit
+	// runtimeREPLCapabilityDisabled records the early invocation decision that
+	// let Builder omit repl_exec before the final registry ceiling existed. It
+	// is distinct from runtime absence after an auto-mode lazy sandbox probe fails.
+	runtimeREPLCapabilityDisabled bool
 	// harnessStore owns bounded session prompt patches plus project-scoped
 	// episodic memory and inert skill proposals. It cannot mutate policy.
 	harnessStore *harness.Store
@@ -2125,19 +2208,41 @@ func (a *App) SyncMCPToolsForServer(serverName string) {
 	}
 }
 
-// toolsForCurrentMode returns the tool schema that matches the active mode:
-// the read-only subset when plan mode is on, the full set otherwise. Must be
-// the single source of truth for every SetTools call that targets the main
-// client — otherwise a schema push from one callsite could undo plan-mode
-// filtering applied from another.
+// toolsForCurrentMode returns the idle tool schema that matches the active
+// plan, feature, invocation-capability, and engine policies. Auto mode has no
+// request at this point, so hybrid tools remain hidden until toolsForMessage.
+// This must be the single source of truth for every non-request SetTools call
+// that targets the main client.
 //
 // Safe to call from any goroutine: it takes only short App snapshots, and the
 // registry operations it invokes take their own internal locks.
 func (a *App) toolsForCurrentMode() []*genai.Tool {
-	// IsPlanningModeEnabled takes a.mu briefly; fine here — callers are
-	// outside ApplyConfig's critical section (that's why this helper exists
-	// as a separate method rather than being inlined).
-	base := a.baseToolsForPlanMode(a.IsPlanningModeEnabled())
+	return a.toolsForMessage("")
+}
+
+// toolsForMessage returns a truthful hybrid-filtered schema for one request. Auto
+// mode keeps the REPL absent from ordinary turns and exposes it only when the
+// shared hybrid policy recognizes collection-scale computation. The direct
+// harness stays internal to rlm.harness unless hybrid mode is explicit.
+func (a *App) toolsForMessage(message string) []*genai.Tool {
+	return a.toolsForMessageDecision(message, hybrid.Decision{})
+}
+
+func (a *App) toolsForMessageDecision(message string, policyDecision hybrid.Decision) []*genai.Tool {
+	// Snapshot plan + engine together: ApplyConfig swaps the config pointer
+	// under a.mu while request preparation can run concurrently.
+	a.mu.Lock()
+	planModeEnabled := a.planningModeEnabled
+	mode := a.runtimeEngineModeLocked()
+	planEnabled := true
+	memoryEnabled := true
+	if a.config != nil {
+		planEnabled = a.config.Plan.Enabled
+		memoryEnabled = a.config.Memory.Enabled
+	}
+	a.mu.Unlock()
+	base := a.baseToolsForPlanMode(planModeEnabled, planEnabled, memoryEnabled)
+	base = a.filterHybridToolsDecision(base, mode, message, policyDecision)
 	ceiling, restricted := a.toolCapabilitySnapshot()
 	if !restricted {
 		return base
@@ -2151,16 +2256,137 @@ func (a *App) toolsForCurrentMode() []*genai.Tool {
 // IsPlanningModeEnabled takes the same mutex and would self-deadlock on
 // Go's non-reentrant sync.Mutex.
 func (a *App) planModeToolsLocked(planModeEnabled bool) []*genai.Tool {
-	base := a.baseToolsForPlanMode(planModeEnabled)
+	mode := a.runtimeEngineModeLocked()
+	planEnabled := true
+	memoryEnabled := true
+	if a.config != nil {
+		planEnabled = a.config.Plan.Enabled
+		memoryEnabled = a.config.Memory.Enabled
+	}
+	base := a.baseToolsForPlanMode(planModeEnabled, planEnabled, memoryEnabled)
+	base = a.filterHybridTools(base, mode, "")
 	if !a.toolCapabilityRestricted {
 		return base
 	}
 	return filterToolSchemaByCeiling(base, a.toolCapabilityCeiling)
 }
 
+func (a *App) filterHybridTools(base []*genai.Tool, mode, message string) []*genai.Tool {
+	return a.filterHybridToolsDecision(base, mode, message, hybrid.Decision{})
+}
+
+func (a *App) filterHybridToolsDecision(
+	base []*genai.Tool,
+	mode, message string,
+	policyDecision hybrid.Decision,
+) []*genai.Tool {
+	decision := policyDecision
+	if decision.Reason == "" {
+		decision = hybrid.Decide(mode, message)
+	}
+	exclude := make([]string, 0, 2)
+	deferredUnavailable := a.deferredHybrid != nil && !a.deferredHybrid.canAdvertise()
+	if !decision.Enabled || deferredUnavailable {
+		exclude = append(exclude, "repl_exec")
+	}
+	if !strings.EqualFold(strings.TrimSpace(mode), "hybrid") || deferredUnavailable {
+		exclude = append(exclude, "harness")
+	}
+	if len(exclude) == 0 {
+		return base
+	}
+	return tools.FilterGeminiToolsExcluding(base, exclude...)
+}
+
+type hybridPolicySnapshot struct {
+	Mode           string
+	Strategy       hybrid.Strategy
+	REPLEligible   bool
+	REPLExposed    bool
+	HarnessExposed bool
+	Reason         string
+}
+
+func (p hybridPolicySnapshot) journalDetails() map[string]any {
+	return map[string]any{
+		"mode":            p.Mode,
+		"strategy":        p.Strategy,
+		"repl_eligible":   p.REPLEligible,
+		"repl_enabled":    p.REPLExposed,
+		"harness_enabled": p.HarnessExposed,
+		"exposure_gap":    p.REPLEligible && !p.REPLExposed,
+		"reason":          p.Reason,
+	}
+}
+
+// hybridPolicyForSchema separates classification from actual capability. The
+// final schema is authoritative: auto may classify a request as eligible while
+// secure-runtime probing, plan mode, or an invocation capability ceiling keeps
+// repl_exec unavailable. Conflating those states made eval reports claim that
+// a tool had been offered when the model could not possibly call it.
+func (a *App) hybridPolicyForSchema(message string, schema []*genai.Tool) hybridPolicySnapshot {
+	mode := "auto"
+	if a != nil {
+		a.mu.Lock()
+		mode = a.runtimeEngineModeLocked()
+		a.mu.Unlock()
+	}
+	decision := hybrid.Decide(mode, message)
+	return hybridPolicySnapshotForDecision(mode, decision, schema)
+}
+
+func hybridPolicySnapshotForDecision(
+	mode string,
+	decision hybrid.Decision,
+	schema []*genai.Tool,
+) hybridPolicySnapshot {
+	return hybridPolicySnapshot{
+		Mode:           mode,
+		Strategy:       decision.Strategy,
+		REPLEligible:   decision.Enabled,
+		REPLExposed:    toolSchemaContains(schema, "repl_exec"),
+		HarnessExposed: toolSchemaContains(schema, "harness"),
+		Reason:         decision.Reason,
+	}
+}
+
+func toolSchemaContains(schema []*genai.Tool, name string) bool {
+	for _, envelope := range schema {
+		if envelope == nil {
+			continue
+		}
+		for _, declaration := range envelope.FunctionDeclarations {
+			if declaration != nil && declaration.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolSchemaDeclarationNames(schema []*genai.Tool) []string {
+	set := make(map[string]struct{})
+	for _, envelope := range schema {
+		if envelope == nil {
+			continue
+		}
+		for _, declaration := range envelope.FunctionDeclarations {
+			if declaration != nil && declaration.Name != "" {
+				set[declaration.Name] = struct{}{}
+			}
+		}
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // baseToolsForPlanMode applies feature and plan-mode gates but no invocation
 // capability ceiling. It does not touch App mutex-protected fields.
-func (a *App) baseToolsForPlanMode(planModeEnabled bool) []*genai.Tool {
+func (a *App) baseToolsForPlanMode(planModeEnabled, planEnabled, memoryEnabled bool) []*genai.Tool {
 	if planModeEnabled {
 		return a.registry.PlanModeGeminiTools()
 	}
@@ -2172,16 +2398,14 @@ func (a *App) baseToolsForPlanMode(planModeEnabled bool) []*genai.Tool {
 	// off → the memory/memorize tools (their store isn't wired, so they error).
 	// Default config enables both, so this is a no-op there.
 	exclude := map[string]bool{}
-	if a.config != nil {
-		if !a.config.Plan.Enabled {
-			for n := range tools.PlanModeControlToolNames {
-				exclude[n] = true
-			}
+	if !planEnabled {
+		for n := range tools.PlanModeControlToolNames {
+			exclude[n] = true
 		}
-		if !a.config.Memory.Enabled {
-			exclude["memory"] = true
-			exclude["memorize"] = true
-		}
+	}
+	if !memoryEnabled {
+		exclude["memory"] = true
+		exclude["memorize"] = true
 	}
 	if len(exclude) == 0 {
 		return a.registry.GeminiTools()
@@ -3322,6 +3546,32 @@ func (a *App) GetConfig() *config.Config {
 	return snapshot
 }
 
+// GetRuntimeEngineMode reports the immutable mode owned by this process. It can
+// differ from GetConfig().Engine.Mode after a config edit has staged the next
+// launch's registry/runtime topology.
+func (a *App) GetRuntimeEngineMode() string {
+	return a.runtimeEngineModeSnapshot()
+}
+
+// RuntimeREPLCapabilityEnabled reports invocation authority rather than host
+// availability. /doctor uses it to avoid starting a secure-runtime probe when
+// --tools/--disallowedTools deliberately excludes repl_exec, including
+// deny-only launches that skipped it before the final ceiling was materialized.
+// It deliberately does not infer host availability from this policy signal.
+func (a *App) RuntimeREPLCapabilityEnabled() bool {
+	if a == nil || a.runtimeEngineModeSnapshot() == "tools" || a.runtimeREPLCapabilityDisabled {
+		return false
+	}
+	a.mu.Lock()
+	bare := a.config != nil && a.config.Bare
+	a.mu.Unlock()
+	if bare || a.registry == nil {
+		return false
+	}
+	ceiling, restricted := a.toolCapabilitySnapshot()
+	return !restricted || containsToolName(ceiling, "repl_exec")
+}
+
 // CommitMCPConfigSnapshot adopts the independently staged MCP configuration
 // after MCPAddCore/MCPRemoveCore have already updated the live manager,
 // registry, and YAML. A full ApplyConfig would unnecessarily rebuild the model
@@ -4425,6 +4675,15 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.mu.Unlock()
 		return 0, fmt.Errorf("%w (based on revision %d, current revision %d)", errConfigConflict, baseRevision, a.configRevision)
 	}
+	// Seed/capture this before publishing cfg. The configured value may be
+	// persisted for the next launch, but the current process must retain the
+	// registry/runtime topology it was built with.
+	activeEngineMode := a.runtimeEngineModeLocked()
+	requestedEngineMode := normalizeRuntimeEngineMode(cfg.Engine.Mode)
+	engineConfigChanged := a.config == nil || a.config.Engine != cfg.Engine
+	engineModeRestartRequired := engineConfigChanged && requestedEngineMode != activeEngineMode
+	replConfigRestartRequired := engineConfigChanged && a.config != nil && a.config.Engine.REPL != cfg.Engine.REPL
+	engineRestartRequired := engineModeRestartRequired || replConfigRestartRequired
 	// --bare is an invocation boundary, not a persisted setting. Runtime
 	// config changes may update provider/model/UI fields, but cannot escape the
 	// physically minimal registry/prompt for this process.
@@ -4613,6 +4872,9 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.taskRouter.SetPlanMode(requestedPlanMode)
 		a.taskRouter.SetThinkingMode(a.config.Model.ThinkingMode)
 		a.taskRouter.SetModelCapability(capability)
+		// Replacing the model client must not partially live-switch the engine.
+		// Keep router policy aligned with the boot-pinned registry and runtime.
+		a.taskRouter.SetEngineMode(activeEngineMode)
 	}
 
 	// ApplyConfig can change plan mode via /set or /settings without going
@@ -4749,9 +5011,31 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	// revert next launch (covers /model, /provider, /thinking, /sandbox, the
 	// Ctrl+K selector — every ApplyConfig caller — in one place).
 	if saveErr != nil {
+		message := fmt.Sprintf("Setting applied for this session but NOT saved to %s — it will revert next launch", config.GetConfigPath())
+		if engineRestartRequired {
+			message = fmt.Sprintf("Other settings were applied for this session, but engine settings remain at their startup values; the configuration was NOT saved to %s", config.GetConfigPath())
+		}
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusWarning,
-			Message: fmt.Sprintf("Setting applied for this session but NOT saved to %s — it will revert next launch", config.GetConfigPath()),
+			Message: message,
+		})
+	} else if engineRestartRequired {
+		message := "engine REPL settings saved; this process keeps its startup limits — run /restart to apply them"
+		if engineModeRestartRequired {
+			message = fmt.Sprintf(
+				"engine.mode saved as %s; this process remains in %s mode — run /restart to apply it",
+				requestedEngineMode, activeEngineMode,
+			)
+			if replConfigRestartRequired {
+				message = fmt.Sprintf(
+					"engine settings saved with mode %s; this process remains in %s mode with its startup REPL limits — run /restart to apply them",
+					requestedEngineMode, activeEngineMode,
+				)
+			}
+		}
+		a.safeSendToProgram(ui.StatusUpdateMsg{
+			Type:    ui.StatusWarning,
+			Message: message,
 		})
 	}
 
@@ -5042,10 +5326,6 @@ func (a *App) buildModelEnhancement() string {
 		enhancement += "\n\n**Flash Model Note:** Keep responses detailed with specific file:line references despite speed optimizations."
 	}
 
-	if a.replManager != nil {
-		enhancement += "\n\n**Hybrid Execution:** A persistent read-only Python `repl_exec` is available for multi-step repository analysis, aggregation, and local computation. Keep large intermediate data in Python variables/artifacts. `rlm(...)` delegates bounded work; `rlm.harness` provides permissioned session adjustments, episodic memory, and inert skill proposals. Use ordinary structured tools for every mutation or external action."
-	}
-
 	// Ollama models: per-model prompting + tool calling fallback
 	if a.config.API.Backend == "ollama" {
 		// Add per-model prompt enhancement based on model profile
@@ -5080,6 +5360,9 @@ func (a *App) refreshSystemInstruction() {
 func (a *App) getActiveToolDeclarations() []*genai.FunctionDeclaration {
 	if a.config.API.Backend == "ollama" {
 		sets := []tools.ToolSet{tools.ToolSetOllamaCore}
+		if a.runtimeEngineModeSnapshot() == "hybrid" {
+			sets = append(sets, tools.ToolSetHybrid, tools.ToolSetHarness)
+		}
 		if git.IsGitRepo(a.workDir) {
 			sets = append(sets, tools.ToolSetGit)
 		}

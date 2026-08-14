@@ -62,9 +62,9 @@ func TestAuditBaselineCoverageDetectsMissingUnknownAndDuplicateRows(t *testing.T
 	manifest := writeBaselineAuditManifest(t, dir)
 	resultsPath := filepath.Join(dir, "baseline.jsonl")
 	writeBaselineAuditResults(t, resultsPath, []Result{
-		{ScenarioID: "a", Provider: "glm", Model: "m"},
-		{ScenarioID: "a", Provider: "glm", Model: "m"},
-		{ScenarioID: "old", Provider: "glm", Model: "m"},
+		{ScenarioID: "a", Provider: "glm", Model: "m", Status: "passed"},
+		{ScenarioID: "a", Provider: "glm", Model: "m", Status: "passed"},
+		{ScenarioID: "old", Provider: "glm", Model: "m", Status: "passed"},
 	})
 
 	audit, err := AuditBaselineCoverage(manifest, resultsPath)
@@ -90,7 +90,7 @@ func TestAuditBaselineCoverageAcceptsCompleteMultipleVariants(t *testing.T) {
 	var results []Result
 	for _, provider := range []string{"glm", "kimi"} {
 		for _, id := range []string{"a", "b"} {
-			results = append(results, Result{ScenarioID: id, Provider: provider})
+			results = append(results, Result{ScenarioID: id, Provider: provider, Status: "passed"})
 		}
 	}
 	writeBaselineAuditResults(t, resultsPath, results)

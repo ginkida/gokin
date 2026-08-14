@@ -81,15 +81,19 @@ func IsReadOnlyForPlanMode(name string) bool {
 // model then literally cannot emit a call for a write/execute tool,
 // because it doesn't know they exist.
 func (r *Registry) PlanModeDeclarations() []*genai.FunctionDeclaration {
-	r.mu.RLock()
-	decls := make([]*genai.FunctionDeclaration, 0, len(r.tools))
-	for name, tool := range r.tools {
-		if !IsReadOnlyForPlanMode(name) {
+	decls := make([]*genai.FunctionDeclaration, 0, len(planModeReadOnlyTools))
+	for _, snapshot := range r.cachedDeclarationSnapshots() {
+		if !IsReadOnlyForPlanMode(snapshot.name) {
 			continue
 		}
-		decls = append(decls, tool.Declaration())
+		declaration := snapshot.declaration
+		if declaration == nil {
+			declaration = snapshot.tool.Declaration()
+		}
+		if declaration != nil {
+			decls = append(decls, declaration)
+		}
 	}
-	r.mu.RUnlock()
 
 	sortDeclarationsByName(decls)
 	return decls

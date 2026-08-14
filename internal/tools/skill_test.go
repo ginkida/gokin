@@ -267,6 +267,29 @@ func TestSkillToolPicksUpEditsWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestSkillDeclarationCacheTracksCatalogRevision(t *testing.T) {
+	root := t.TempDir()
+	writeToolSkill(t, root, "verify", "---\nname: verify\ndescription: Verify code\n---\nRun checks")
+	tool := NewSkillToolWithCatalog(skills.NewCatalog([]skills.Root{{Path: root, Source: "project"}}))
+
+	first := tool.Declaration()
+	if got := tool.Declaration(); got != first {
+		t.Fatal("unchanged skill catalog rebuilt its declaration")
+	}
+
+	writeToolSkill(t, root, "verify", "---\nname: verify\ndescription: Verify the complete project carefully\n---\nRun all checks")
+	second := tool.Declaration()
+	if second == first {
+		t.Fatal("skill catalog revision change retained the stale declaration")
+	}
+	if !strings.Contains(second.Description, "Verify the complete project carefully") {
+		t.Fatalf("updated declaration description = %q", second.Description)
+	}
+	if got := tool.Declaration(); got != second {
+		t.Fatal("updated skill declaration was not cached")
+	}
+}
+
 func TestLazyRegistrySkillDeclarationTracksCatalogChanges(t *testing.T) {
 	workDir := t.TempDir()
 	registry := DefaultLazyRegistry(workDir)

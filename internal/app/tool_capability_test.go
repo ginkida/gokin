@@ -50,6 +50,15 @@ func TestResolveToolCapabilityCeiling(t *testing.T) {
 	}
 }
 
+func TestStartupCapabilityAllowsToolNormalizesNames(t *testing.T) {
+	if !startupCapabilityAllowsTool([]string{" repl_exec "}, nil, "repl_exec") {
+		t.Fatal("startup allowlist did not normalize surrounding whitespace")
+	}
+	if startupCapabilityAllowsTool(nil, []string{" repl_exec "}, "repl_exec") {
+		t.Fatal("startup deny list did not normalize surrounding whitespace")
+	}
+}
+
 func TestConfigureRunPermissionRulesUsesSharedManager(t *testing.T) {
 	manager := permission.NewManager(permission.DefaultRules(), true)
 	application := &App{permManager: manager}
@@ -220,6 +229,44 @@ func TestConfigureToolCapabilityExplicitEmptyBlocksEveryTool(t *testing.T) {
 	})
 	if err == nil || result.Status != "policy_blocked" || readTool.CallCount() != 0 {
 		t.Fatalf("empty ceiling result=%+v err=%v calls=%d", result, err, readTool.CallCount())
+	}
+}
+
+func TestRuntimeREPLCapabilityEnabledTracksInvocationCeiling(t *testing.T) {
+	application, _ := newHeadlessPolicyTestApp(
+		t, testkit.NewMockClient(), tools.NewReplExecTool(nil))
+	if err := application.registry.Register(&appHeadlessScriptedTool{name: "read"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !application.RuntimeREPLCapabilityEnabled() {
+		t.Fatal("unrestricted auto mode reported REPL capability disabled")
+	}
+	if err := application.ConfigureToolCapability([]string{"read"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if application.RuntimeREPLCapabilityEnabled() {
+		t.Fatal("restricted invocation reported excluded REPL capability enabled")
+	}
+	if err := application.ConfigureToolCapability([]string{"repl_exec"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !application.RuntimeREPLCapabilityEnabled() {
+		t.Fatal("explicitly allowed REPL capability reported disabled")
+	}
+
+	application.runtimeREPLCapabilityDisabled = true
+	if err := application.ConfigureToolCapability(nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if application.RuntimeREPLCapabilityEnabled() {
+		t.Fatal("startup-excluded REPL reported enabled under an unrestricted final ceiling")
+	}
+
+	application.runtimeREPLCapabilityDisabled = false
+	application.config.Bare = true
+	if application.RuntimeREPLCapabilityEnabled() {
+		t.Fatal("bare invocation reported REPL capability enabled")
 	}
 }
 

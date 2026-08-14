@@ -112,6 +112,30 @@ func DiagnoseReport(report Report, comparison *Comparison) Diagnosis {
 		})
 	}
 
+	var modeMismatches, exposureGaps, unexpectedExposure int
+	for _, engine := range report.Engines {
+		modeMismatches += engine.Efficiency.HybridModeMismatches
+		exposureGaps += engine.Efficiency.HybridExposureGaps
+		unexpectedExposure += engine.Efficiency.HybridUnexpectedExposure
+	}
+	if modeMismatches > 0 {
+		addRecommendation(Recommendation{
+			Area:     "hybrid-policy-provenance",
+			Priority: 5,
+			Reason:   fmt.Sprintf("%d hybrid policy event(s) reported a different engine mode than their result row", modeMismatches),
+			Action:   "Inspect GOKIN_ENGINE_MODE propagation and engine_policy journal emission; discard the mixed-mode evidence and rerun the exact engine matrix.",
+		})
+	}
+	if exposureGaps > 0 || unexpectedExposure > 0 {
+		addRecommendation(Recommendation{
+			Area:     "hybrid-exposure",
+			Priority: 6,
+			Reason: fmt.Sprintf("hybrid eligibility and model-visible exposure diverged (%d availability gap(s), %d unexpected exposure(s))",
+				exposureGaps, unexpectedExposure),
+			Action: "For availability gaps, inspect secure-runtime probing, plan mode, and invocation capability filters. For unexpected exposure, inspect request classification and final schema filtering; then rerun the same engine matrix.",
+		})
+	}
+
 	if len(diagnosis.FailedScenarios) > 0 {
 		addRecommendation(Recommendation{
 			Area:     "eval-target",
@@ -209,6 +233,18 @@ func recommendationForMetric(metric MetricSummary) Recommendation {
 		return metricRecommendation(metric, "prompt", 15,
 			"agent modified a file the scenario required leaving alone (trap violation)",
 			"Strengthen investigate-before-act guidance: confirm a symbol is unused before removing it; do not change files outside the task's intent.")
+	case "workspace_unchanged":
+		return metricRecommendation(metric, "prompt", 15,
+			"agent modified a workspace during a read-only scenario",
+			"Make the read-only contract explicit and keep mutation tools out of analysis-only requests.")
+	case "hybrid_policy_expected":
+		return metricRecommendation(metric, "routing", 20,
+			"engine exposure or request strategy did not match the scenario's tools/auto/hybrid contract",
+			"Inspect engine-policy mode, eligibility, strategy, final schema exposure, and workload-specific hint selection before tuning model prompts.")
+	case "hybrid_efficient_path":
+		return metricRecommendation(metric, "hybrid-efficiency", 18,
+			"eligible runs did not consistently use the required one-pass implementation",
+			"Inspect per-scenario REPL operations, scan ops, parent-observed index refreshes, and repl_exec calls; then tighten the request hint or context API shape that caused redundant scans or cells.")
 	default:
 		return metricRecommendation(metric, "eval-target", 80,
 			"custom metric is below threshold",

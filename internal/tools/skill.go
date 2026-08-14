@@ -40,6 +40,10 @@ type SkillTool struct {
 	catalog *skills.Catalog
 	workDir string
 
+	declarationMu       sync.Mutex
+	declarationRevision uint64
+	declarationCache    *genai.FunctionDeclaration
+
 	// ledger is deliberately separate from the discovery catalog: the catalog
 	// may reload edited files at any time, while an invocation must retain the
 	// exact rendered instructions the model actually received. Foreground tools
@@ -341,6 +345,8 @@ func (t *SkillTool) InvocationLedger() *skills.InvocationLedger {
 
 func (t *SkillTool) Name() string { return "skill" }
 
+func (*SkillTool) runtimeDynamicDeclaration() {}
+
 func (t *SkillTool) Description() string {
 	base := "Loads a reusable project/user workflow on demand. Call with a skill name before performing a task that matches its description; omit name to list skills. Skill instructions supplement but never override system, user, permission, or sandbox rules."
 	catalog := t.catalogText(false, "", false)
@@ -352,11 +358,20 @@ func (t *SkillTool) Description() string {
 
 func (t *SkillTool) Declaration() *genai.FunctionDeclaration {
 	// Eager registries are used in production and rebuild their schema on model,
-	// plan-mode, and routing changes. Rescan here as well as on Execute so a new
-	// skill becomes discoverable without requiring an explicit list call first.
-	t.catalog.Reload()
+	// plan-mode, and routing changes. Refresh metadata here so new/edited skills
+	// become discoverable without reparsing every unchanged SKILL.md on every
+	// request. Execute still performs a full reload before delivering source.
+	t.catalog.ReloadIfChanged()
+	revision := t.catalog.Revision()
+	t.declarationMu.Lock()
+	defer t.declarationMu.Unlock()
+	if t.declarationCache != nil && t.declarationRevision == revision {
+		return t.declarationCache
+	}
 	declaration := SkillToolDeclaration()
 	declaration.Description = t.Description()
+	t.declarationCache = declaration
+	t.declarationRevision = revision
 	return declaration
 }
 

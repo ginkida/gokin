@@ -15,6 +15,7 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/donegate"
+	"gokin/internal/hybrid"
 	"gokin/internal/logging"
 	"gokin/internal/plan"
 	"gokin/internal/router"
@@ -443,6 +444,40 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		a.promptBuilder.SetLastMessage(message)
 	}
 
+	// Resolve the request-aware schema before rebuilding the system prompt and
+	// recording cache state. The immutable decisions stay anchored to this
+	// actual user/recovery payload across automatic retries, whose continuation
+	// scaffolding must not alter tool exposure. This also covers direct/headless
+	// execution, which deliberately bypasses Router.Execute.
+	mode := a.runtimeEngineModeSnapshot()
+	policyDecision := hybrid.Decide(mode, message)
+	autoDecision := policyDecision
+	if strings.EqualFold(strings.TrimSpace(mode), "hybrid") {
+		// Explicit exposure must not turn into blanket steering: only prompts
+		// that independently satisfy auto policy receive the REPL usage hint.
+		autoDecision = hybrid.Decide("auto", message)
+	}
+	turnTools := a.toolsForMessageDecision(message, policyDecision)
+	// The App has now applied feature, plan, invocation, and lazy-hybrid gates.
+	// Make that exact schema a request capability ceiling: Router retries may
+	// narrow it by strategy, but cannot re-add a declaration the authoritative
+	// request policy hid. Preserve any inherited ceiling as an intersection.
+	turnToolNames := toolSchemaDeclarationNames(turnTools)
+	if inherited, restricted := tools.ToolCapabilityCeilingFromContext(ctx); restricted {
+		turnToolNames = intersectCapabilityNames(turnToolNames, inherited)
+		turnTools = tools.FilterGeminiToolsByCapability(turnTools, turnToolNames)
+	}
+	ctx = tools.ContextWithToolSchemaCeiling(ctx, a.executor, turnToolNames)
+	if a.client != nil {
+		a.client.SetTools(turnTools)
+	}
+	hybridPolicy := hybridPolicySnapshotForDecision(mode, policyDecision, turnTools)
+	// In explicit hybrid mode exposure is unconditional, while steering remains
+	// request-specific. Journal the strategy that actually selected the hint.
+	hybridPolicy.Strategy = autoDecision.Strategy
+	a.journalEvent("engine_policy", hybridPolicy.journalDetails())
+	directHybridHint := hybrid.AnalysisHintForDecision(autoDecision, hybridPolicy.REPLExposed)
+
 	// Keep dynamic system instruction in sync (contract/memory/hints can change between turns).
 	a.refreshSystemInstruction()
 
@@ -451,7 +486,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// turn late and could never diagnose MCP/tool-schema cache breaks.
 	if a.executor != nil {
 		if ct := a.executor.GetCacheTracker(); ct != nil {
-			toolsJSON, err := json.Marshal(a.getActiveToolDeclarations())
+			toolsJSON, err := json.Marshal(turnTools)
 			if err != nil {
 				logging.Debug("failed to serialize tools for prompt-cache tracking", "error", err)
 			}
@@ -539,12 +574,17 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		}
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
 		currentMessage := retryMessage
+		unaugmentedMessage := currentMessage
+		if (a.taskRouter == nil || headlessDirect) && directHybridHint != "" {
+			currentMessage = directHybridHint + "\n\n" + currentMessage
+		}
 		execFn := func() error {
 			// Headless runs execute directly: routed strategies stream
 			// through the nil TUI program and skip the journal (headless.go).
 			if a.taskRouter != nil && !headlessDirect {
 				// Route the task intelligently
-				newHistory, response, err = a.taskRouter.Execute(ctx, history, currentMessage)
+				newHistory, response, err = a.taskRouter.ExecuteWithPolicyDecisions(
+					ctx, history, currentMessage, mode, policyDecision, autoDecision)
 
 				// Log routing decision for debugging
 				if analysis := a.taskRouter.GetAnalysis(message); analysis != nil {
@@ -573,6 +613,10 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 				// Fallback to standard executor
 				newHistory, response, err = a.executeTracked(
 					ctx, history, currentMessage, &turnUsage)
+				if directHybridHint != "" {
+					newHistory = restoreDirectPromptScaffolding(
+						newHistory, len(history), unaugmentedMessage)
+				}
 			}
 			return err
 		}
@@ -1434,6 +1478,7 @@ type turnUsageAccumulator struct {
 	// fully tracked cost.
 	costIncomplete bool
 	samples        int
+	modelRounds    int
 }
 
 func (u *turnUsageAccumulator) add(
@@ -1471,6 +1516,7 @@ func (u *turnUsageAccumulator) commit(a *App) (float64, bool) {
 	}
 	cost, tracked := a.commitSessionUsage(
 		u.apiInput, u.input, u.output, u.cacheCreation, u.cacheRead, u.cost, u.costTracked)
+	a.recordHeadlessModelRounds(u.modelRounds)
 	if !tracked || (u.costTracked && u.costIncomplete) {
 		a.markHeadlessCostIncomplete()
 		tracked = false
@@ -1507,6 +1553,7 @@ func (a *App) executeTracked(
 		input, output := a.executor.GetLastTokenUsage()
 		cacheCreation, cacheRead := a.executor.GetLastCacheMetrics()
 		cost, tracked := a.executor.GetLastEstimatedCost()
+		modelRounds := a.executor.GetLastModelTurns()
 		// A budget pricing preflight fails before any provider request. Do not
 		// feed the local diagnostic marker through the ordinary no-metadata
 		// token fallback: that would invent billable usage and session spend for
@@ -1519,8 +1566,20 @@ func (a *App) executeTracked(
 			}
 		}
 		usage.add(input, output, cacheCreation, cacheRead, estimatedInput, response, cost, tracked)
+		usage.modelRounds += max(modelRounds, 0)
 	}()
 	return a.executor.Execute(ctx, history, prompt)
+}
+
+func (a *App) recordHeadlessModelRounds(rounds int) {
+	if a == nil || rounds <= 0 {
+		return
+	}
+	a.mu.Lock()
+	if a.headlessRunActive {
+		a.headlessInvocationUsage.ModelRounds += rounds
+	}
+	a.mu.Unlock()
 }
 
 // accumulateTurnTokenUsage updates the session ledger without mixing the two
@@ -3225,6 +3284,26 @@ func nextRetryMessageAfterProgress(originalMessage string, preAttempt, cleaned [
 		return originalMessage
 	}
 	return buildContinuationRetryMessage(originalMessage, newPortion)
+}
+
+// restoreDirectPromptScaffolding removes the request-scoped hybrid hint from
+// the persisted user turn. Executor.Execute appends the exact message it was
+// given at priorLen; keep the optimization provider-visible while session
+// resume, memory extraction, and user-facing history retain the user's text.
+func restoreDirectPromptScaffolding(newHistory []*genai.Content, priorLen int, originalMessage string) []*genai.Content {
+	if priorLen < 0 || priorLen >= len(newHistory) {
+		return newHistory
+	}
+	injected := newHistory[priorLen]
+	if injected == nil || injected.Role != genai.RoleUser || len(injected.Parts) != 1 {
+		return newHistory
+	}
+	part := injected.Parts[0]
+	if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.Text == "" {
+		return newHistory
+	}
+	newHistory[priorLen] = genai.NewContentFromText(originalMessage, genai.RoleUser)
+	return newHistory
 }
 
 // nextAutoResumeMessageAfterProgress gives the first durable timeout recovery

@@ -655,14 +655,16 @@ model:
   thinking_budget: 0              # 0 = adaptive/provider default
 
 engine:
-  # auto probes a real OS sandbox and enables the stateful hybrid engine only
-  # when isolation succeeds; otherwise Gokin transparently uses normal tools.
+  # auto stays process-free until the model actually calls repl_exec for a
+  # collection-scale request; simple turns pay no Python startup cost.
+  # If isolation fails, auto transparently uses normal tools for every request.
   # tools disables the REPL; hybrid fails startup if a secure runtime is absent.
   mode: "auto"                    # auto | tools | hybrid
   repl:
     cell_timeout: 30s             # Python compute inactivity; pauses for callbacks
     max_code_bytes: 65536
     max_response_bytes: 1048576
+    max_memory_bytes: 268435456   # 256 MiB peak RSS; breach resets the kernel
 
 ui:
   stream_output: true              # compatibility field; responses always stream
@@ -711,24 +713,182 @@ mcp:
 Change the model-round cap live with `/timeout 20m`; `/timeout default`
 restores the recommended value for foreground and sub-agent requests.
 
-In the default `engine.mode: auto`, a successful sandbox probe exposes a
-persistent, workspace-read-only Python `repl_exec`. Its `context` object keeps
-large repository analysis out of the model transcript, while `rlm()` delegates
-bounded work through the existing permission and audit pipeline. The optional
-`rlm.harness` surface can add session-only prompt adjustments, project episodic
-memory, and inert skill proposals. Harness mutations require approval by
-default; proposals remain under `.gokin/harness/proposals/` and are never
-auto-loaded from `.gokin/skills/`. Python cannot change permissions, sandbox
-policy, built-in tools, or immutable system instructions. Direct Python file
-writes, subprocesses, sockets, and native-library loading are denied; resource
-limits and the OS sandbox remain the hard boundary. `context.git_status()` and
-`context.git_diff()` use the one fixed read-only subprocess path.
+In the default `engine.mode: auto`, ordinary questions, edits, and targeted
+lookups neither start Python nor carry the REPL or harness declarations. A
+prompt that combines repository/dataset scope with aggregation, ranking,
+comparison, deduplication, or cross-file joins receives a lazy
+workspace-read-only `repl_exec` declaration. Python is still not started if the
+model answers directly or chooses a structured tool. The first actual
+`repl_exec` execution performs a one-time fail-closed sandbox probe and retains
+that verified worker for the session. Auto-policy signals are
+boundary-aware and cover common English and Russian analytics phrasing;
+single-file work, explicitly named file pairs, and cross-file mutations remain
+on structured tools even when the prompt also mentions the repository.
+Classification examines at most 64 KiB from the prompt edges. This retains the
+usual instruction-before/after-data layouts while keeping routing CPU and
+memory bounded even when a request includes a large pasted log or dataset.
+Mutation-like identifiers, analytic nouns, relative clauses, and negative edit
+instructions are distinguished from imperative changes. File-target detection
+uses the main analysis clause, ignores verification commands, and does not
+mistake directories or dotted code symbols for individual files.
+`engine.mode: hybrid`
+keeps both declarations visible for every request; `tools` removes them.
+The engine mode and `engine.repl` limits are boot-wired: changing them in
+configuration while Gokin is running is saved for the next launch and requires
+`/restart` to take effect. This prevents the tool schema, router policy, Python
+worker lifecycle, and its enforced limits from entering different partially
+switched states.
+Invocation capability is applied before optional runtime startup: if `--tools`
+or `--disallowedTools` excludes `repl_exec`, Gokin does not probe or launch
+Python even when the configured mode is `hybrid`. A separately allowed
+`harness` remains usable without a Python worker.
+
+The REPL's `context` object keeps large repository analysis out of the model
+transcript. Prefer one cell that scans, filters, aggregates, and prints final
+evidence: every additional cell requires another model round even when Python
+itself is fast. `rlm()` delegates bounded work through the existing permission
+and audit pipeline. In auto mode the administrative harness is not advertised
+as a separate model tool; it remains available inside eligible REPL work as
+`rlm.harness` and its project memory is loaded only on the first such call. A
+bad optional harness state disables those callbacks without discarding a
+verified analytical worker; explicit `hybrid` mode remains strict at startup.
+Harness mutations require approval by default; proposals remain
+under `.gokin/harness/proposals/` and are never auto-loaded from
+`.gokin/skills/`. Python cannot change permissions, sandbox policy, built-in
+tools, or immutable system instructions. Direct Python file writes,
+subprocesses, sockets, native-library loading, and Git execution are denied;
+resource limits and the OS sandbox remain the hard boundary. Use the ordinary
+structured `git_status` and `git_diff` tools for repository state or changes.
+Direct directory enumeration (`os.walk`, `listdir`/`scandir`, globbing, and
+`Path.iterdir`) is also denied: repository paths must come from the bounded,
+ignore-aware `context` inventory/search APIs. This prevents raw Python walks
+from silently including ignored trees or bypassing parent-observed scan
+telemetry; targeted reads of already known workspace files remain read-only.
+Worker/runtime reflection and dynamic-code entry points are rejected before a
+cell runs, preventing Python introspection from rewriting telemetry or protocol
+state. Cell imports use an analytical standard-library allowlist (JSON/regex,
+math/statistics, collections/iterators, CSV/date, hashing/encoding); direct
+`open`, OS/runtime modules, threads, and dynamic module loading are rejected.
+Known workspace files remain available through bounded `context.read_slice`.
+Ordinary computation remains available;
+the OS sandbox, rather than this syntax guard, remains the security boundary.
+The production worker is single-process: macOS Seatbelt denies fork and every
+executable outside the validated Python launcher/runtime pair, while Linux
+bubblewrap applies an architecture-checked seccomp filter that denies process
+creation. Its workspace, ephemeral runtime, and synthetic filesystems are
+read-only; only the Go parent publishes bounded inventory snapshots into the
+runtime.
+
+For count/ranking questions, `context.count_code(..., regex=True,
+group_by="file|top_dir|extension")` scans the bounded workspace without
+materializing every hit. `context.search_code` also accepts `regex=True` when a
+small evidence sample is needed; literal substring matching remains its default.
+Comparisons across several patterns should use `context.count_code_many(...)`:
+it produces separate counts and groups from one consistent inventory/read pass
+instead of rescanning the repository for every pattern.
+For inventory-only counts or byte totals, `context.file_stats(...)` groups by
+extension or top-level directory without materializing thousands of path
+dictionaries or retaining the inventory after its streaming pass. It can reuse
+an earlier same-scope snapshot. Group cardinality is capped and fails explicitly
+instead of returning a partial distribution; use `list_files` when the paths
+themselves are needed for a join.
+When an exact count also needs example matches, pass `sample_limit` to either
+count API. Samples are collected during that same complete scan and report
+`samples_truncated` independently from overall scan truncation.
+Both calls distinguish candidate files from files actually searched and report
+binary, oversized, or unreadable skips. Known binaries and NUL-bearing files
+are not decoded as source text, avoiding false matches and wasted I/O.
+Directory scans share one bounded repository-visible snapshot per scope within
+a Python cell, avoiding repeated Git processes and repeated path metadata work
+for a compound analysis. The first traversal remains streaming; a later exact
+count can safely resume an evidence search that stopped early. The
+snapshot is always refreshed between cells and is invalidated before any
+`rlm`/harness callback that could change the workspace. Root and nested
+`.gitignore` rules, negations, `.git/info/exclude`, global excludes, and tracked
+files use Git's native semantics without walking ignored build trees in Python.
+Explicitly naming an ignored directory still reads it; ignore rules filter
+implicit project inventories rather than access rights.
+Eval journals separately record whether a request was REPL-eligible, whether
+`repl_exec` was actually present in the final model-visible schema, and whether
+the model used it. Successful cells also contribute bounded operation counters
+without retaining Python code, arguments, or repository content, so evals can
+prove that one-pass primitives such as `count_code_many` or count-with-samples
+actually ran. Scenario contracts can also cap collection-scan operations and
+REPL calls, rejecting a nominally correct primitive if it follows redundant
+repository passes or avoidable cells. Repository-index refresh counts come from
+callbacks observed by the Go parent rather than the Python result payload. This
+is paired with a worker-owned lowest-layer `file_inventory` count, so replaying
+a cached inventory or reaching an internal helper through Python introspection
+cannot make multiple logical scans look like one; legacy journals fall back to
+their public operation counters. This
+allows evals to require positive parent-observed proof of a repository scan, not
+merely place an upper bound on claimed scan work. This
+prevents an unavailable sandbox or invocation tool
+restriction from being misreported as successful hybrid exposure, and prevents
+an arbitrary `repl_exec` call from masquerading as efficient adoption. Eval
+runner journals live in a private sibling runtime directory rather than the
+model-writable fixture workspace; bash, REPL, and verification environments do
+not receive that path, and reports ignore untrusted workspace journal data. Eval
+reports also retain per-row engine-mode provenance, availability gaps, and
+unexpected exposures, so mixed-mode or opposite policy errors cannot disappear
+behind aggregate totals.
+Paired efficiency reports include mean and median deltas plus a one-sided exact
+sign test over trial-clustered scenario/provider/model/fault evidence units.
+They also split total usage into input, uncached input, cache-read input, and
+output tokens. This distinguishes actual context compression from provider-cache
+effects or output expansion; component gates reject rows without a complete,
+internally consistent token ledger instead of treating missing fields as zero.
+Repeated trials are averaged inside one unit before its direction is counted,
+preventing `--repeat` from turning correlated reruns into fictitious evidence;
+a dedicated sign-test gate can fail on an insufficient lower-effect p-value,
+and the lower-ratio gate uses the same clustered directions rather than raw
+trial counts. Repeated run order is counterbalanced too: comparable
+provider/model/fault rows stay
+adjacent, while engine position within each cohort and cohort position within
+the trial rotate deterministically. With three modes and three trials, every
+engine occupies every local position once; six trials append a reversed Latin
+block and balance directed adjacent carry-over too. As with any sign test,
+inference assumes those units are independent and applies to the eval suite
+rather than proving universal workload performance.
+An optional median-relative gate enforces practical effect size without letting
+one high-volume scenario dominate the aggregate ratio or correlated repeated
+trials occupy several central ranks. It averages trials inside each evidence
+unit before taking the across-unit median, requires non-zero baselines for every
+pair, and otherwise fails closed.
+Persisted eval JSONL is parsed strictly and with an explicit per-record bound;
+ambiguous keys, unknown schema fields, trailing documents, and impossible
+status/score/trial or negative telemetry values fail before report gates run.
+Non-empty scenario/run provenance must be a real SHA-256 digest. Paired reports
+retain positive verified-provenance counts, and every engine gate requires both
+hashes plus candidate/control classification on every pair; hashless or
+unclassified legacy results remain diagnostic rather than being promoted to
+evidence for a possibly different fixture or executable.
+Long eval matrices preserve the previous published report while atomically
+checkpointing each completed row to `OUTPUT.partial`; an interrupted run can be
+continued with `--resume`. Resume is fail-closed on changed matrix, scenario or
+fixture contracts, command/timeout/fault settings, and an explicitly selected
+`GOKIN_BIN`, preventing incompatible rows from being mixed merely to save calls.
+For eligible requests with actual exposure, a short request-scoped hint favors
+one aggregate REPL cell over materializing many grep/read results; the hint is
+removed before session history is persisted and is absent on fallback paths.
+Use the dedicated [`evals/hybrid`](evals/hybrid/README.md) suite to compare
+`tools`, adaptive `auto`, and explicit `hybrid` on identical analytics tasks.
 
 Use `repl_exec` with `action: status` to inspect bounded kernel health
 (generation, restarts, executions, transport failures, and timeouts), or
 `action: reset` to discard Python globals/artifacts deliberately. Protocol
 failures and inactive cells discard the affected kernel automatically; the next
-cell starts a clean generation. Episodic-memory writes use an advisory lock plus
+cell starts a clean generation. Value, stdout, and stderr are byte-bounded
+independently so all inline channels and their recovery handles fit the outer
+tool-result budget; every overflowing channel remains available as its own
+named artifact. Artifact sizes and offsets are UTF-8 bytes, and paginated
+readers should continue from `next_offset` returned by `context.artifact_get`.
+Chunk and storage limits are reported by `context.runtime_limits()`.
+The same runtime report includes the peak-RSS budget. A memory breach returns a
+typed error, discards the complete Python generation, and starts the next cell
+cleanly; this watchdog also covers macOS, where address-space rlimits cannot be
+relied upon.
+Episodic-memory writes use an advisory lock plus
 atomic snapshots, so concurrent Gokin terminals merge updates instead of
 silently overwriting one another.
 

@@ -62,6 +62,89 @@ func TestCatalogProjectPrecedenceAndAtomicReload(t *testing.T) {
 	wg.Wait()
 }
 
+func TestCatalogReloadIfChangedRefreshesMetadataChanges(t *testing.T) {
+	root := t.TempDir()
+	path := writeSkill(t, root, "review", "---\nname: review\ndescription: first workflow\n---\nFirst body")
+	catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+	if !catalog.metadataIsStable {
+		t.Fatal("initial catalog metadata was not stable")
+	}
+	before := catalog.metadata
+	if warnings := catalog.ReloadIfChanged(); len(warnings) != 0 {
+		t.Fatalf("unchanged reload warnings = %v", warnings)
+	}
+	if catalog.metadata != before || !catalog.metadataIsStable {
+		t.Fatal("unchanged metadata fingerprint drifted")
+	}
+
+	if err := os.WriteFile(path, []byte("---\nname: review\ndescription: second workflow is longer\n---\nSecond body is longer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog.ReloadIfChanged()
+	updated, ok := catalog.Get("review")
+	if !ok || updated.Description != "second workflow is longer" || updated.Body != "Second body is longer" {
+		t.Fatalf("metadata edit was not reloaded: %#v, ok=%t", updated, ok)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	catalog.ReloadIfChanged()
+	if _, ok := catalog.Get("review"); ok {
+		t.Fatal("deleted skill remained in metadata-refreshed catalog")
+	}
+}
+
+func TestCatalogReloadIfChangedDiscoversInitiallyMissingRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-created-yet")
+	catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+	if _, ok := catalog.Get("review"); ok {
+		t.Fatal("skill appeared before its root existed")
+	}
+	before := catalog.Revision()
+	if warnings := catalog.ReloadIfChanged(); len(warnings) != 0 {
+		t.Fatalf("unchanged missing-root warnings = %v", warnings)
+	}
+	if got := catalog.Revision(); got != before {
+		t.Fatalf("unchanged missing root advanced revision from %d to %d", before, got)
+	}
+
+	writeSkill(t, root, "review", "---\nname: review\ndescription: created later\n---\nReview")
+	catalog.ReloadIfChanged()
+	loaded, ok := catalog.Get("review")
+	if !ok || loaded.Description != "created later" {
+		t.Fatalf("newly created root was not discovered: %#v, ok=%t", loaded, ok)
+	}
+}
+
+func TestCatalogFullReloadDoesNotTrustMetadataFingerprint(t *testing.T) {
+	root := t.TempDir()
+	path := writeSkill(t, root, "review", "---\nname: review\ndescription: first\n---\nAAAA")
+	catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := "---\nname: review\ndescription: other\n---\nBBBB"
+	if len(replacement) != int(info.Size()) {
+		t.Fatalf("test replacement size=%d want=%d", len(replacement), info.Size())
+	}
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Explicit invocation uses Reload, not ReloadIfChanged. It must parse the
+	// source even when size and mtime were deliberately preserved.
+	catalog.Reload()
+	updated, ok := catalog.Get("review")
+	if !ok || updated.Description != "other" || updated.Body != "BBBB" {
+		t.Fatalf("full reload trusted stale metadata: %#v, ok=%t", updated, ok)
+	}
+}
+
 func TestDefaultRootsPersonalSkillsOverrideProject(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()

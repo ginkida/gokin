@@ -38,6 +38,35 @@ func TestBashBackgroundPolicyDisablesSchemaValidationAndExecution(t *testing.T) 
 	}
 }
 
+func TestBashDeclarationCacheTracksPolicyRevision(t *testing.T) {
+	tool := NewBashTool(t.TempDir())
+	first := tool.Declaration()
+	if got := tool.Declaration(); got != first {
+		t.Fatal("unchanged bash policy rebuilt its declaration")
+	}
+
+	tool.SetTimeout(45 * time.Second)
+	second := tool.Declaration()
+	if second == first {
+		t.Fatal("timeout policy change retained the stale declaration")
+	}
+	if !strings.Contains(second.Description, "45s") {
+		t.Fatalf("updated declaration description = %q", second.Description)
+	}
+	if got := tool.Declaration(); got != second {
+		t.Fatal("updated bash declaration was not cached")
+	}
+
+	tool.SetBackgroundAllowed(false)
+	third := tool.Declaration()
+	if third == second {
+		t.Fatal("background policy change retained the stale declaration")
+	}
+	if _, ok := third.Parameters.Properties["run_in_background"]; ok {
+		t.Fatal("updated declaration retained disabled background execution")
+	}
+}
+
 func TestManagedApplyBackDisablesBackgroundAtPolicySource(t *testing.T) {
 	tool := NewBashTool(t.TempDir())
 	tool.EnableManagedWorkspaceApplyBackMode(t.TempDir())

@@ -119,6 +119,7 @@ type HeadlessUsage struct {
 	OutputTokens         int `json:"output_tokens"`
 	CacheReadInputTokens int `json:"cache_read_input_tokens"`
 	TotalTokens          int `json:"total_tokens"`
+	ModelRounds          int `json:"model_rounds"`
 }
 
 // HeadlessCost describes the cost attributable to this invocation.
@@ -497,6 +498,16 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
 	result.SessionID = a.session.GetID()
+	a.journalEvent("headless_metrics", map[string]any{
+		"input_tokens":            result.Usage.InputTokens,
+		"output_tokens":           result.Usage.OutputTokens,
+		"cache_read_input_tokens": result.Usage.CacheReadInputTokens,
+		"total_tokens":            result.Usage.TotalTokens,
+		"model_rounds":            result.Usage.ModelRounds,
+		"duration_ms":             result.DurationMS,
+		"estimated_usd":           result.Cost.EstimatedUSD,
+		"cost_tracked":            result.Cost.Tracked,
+	})
 
 	if outputErr := sp.Err(); outputErr != nil {
 		wrapped := fmt.Errorf("write headless output: %w", outputErr)

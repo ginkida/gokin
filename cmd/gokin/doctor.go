@@ -15,6 +15,8 @@ import (
 
 var doctorANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
+var doctorREPLDetector = repl.Detect
+
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
@@ -41,6 +43,16 @@ func newDoctorCmd() *cobra.Command {
 			if err := applyRunConfigOverrides(cfg, version, provider, model, baseURL, false); err != nil {
 				return fmt.Errorf("doctor: apply runtime overrides: %w", err)
 			}
+			resolvedDeniedRules, err := resolveCLIDeniedToolRules(append(
+				append([]string(nil), deniedTools...),
+				deniedToolsCompat...,
+			))
+			if err != nil {
+				return err
+			}
+			runtimeDenies := optionalRuntimeDeniesForCLIRules(resolvedDeniedRules)
+			replCapabilityDisabled := bare || !cliStartupAllowsOptionalRuntime(
+				toolCeiling, runtimeDenies, "repl_exec")
 			configPath := strings.TrimSpace(cfgFile)
 			if configPath != "" {
 				if absolute, absErr := filepath.Abs(configPath); absErr == nil {
@@ -49,21 +61,34 @@ func newDoctorCmd() *cobra.Command {
 			}
 			executablePath, _ := os.Executable()
 			var hybridAvailability *repl.Availability
-			if strings.ToLower(strings.TrimSpace(cfg.Engine.Mode)) != "tools" {
-				availability := repl.Detect(cmd.Context(), workDir)
+			if strings.ToLower(strings.TrimSpace(cfg.Engine.Mode)) != "tools" && !replCapabilityDisabled {
+				availability := doctorREPLDetector(cmd.Context(), workDir)
 				hybridAvailability = &availability
 			}
 			report := commands.RenderDoctor(commands.DoctorOptions{
-				Version:            version,
-				Config:             cfg,
-				WorkDir:            workDir,
-				ConfigPath:         configPath,
-				ExecutablePath:     executablePath,
-				CLI:                true,
-				HybridAvailability: hybridAvailability,
+				Version:             version,
+				Config:              cfg,
+				WorkDir:             workDir,
+				ConfigPath:          configPath,
+				ExecutablePath:      executablePath,
+				CLI:                 true,
+				RuntimeREPLDisabled: replCapabilityDisabled,
+				HybridAvailability:  hybridAvailability,
 			})
 			_, err = fmt.Fprint(cmd.OutOrStdout(), doctorANSIPattern.ReplaceAllString(report, ""))
 			return err
 		},
 	}
+}
+
+func cliStartupAllowsOptionalRuntime(allowed, denied []string, name string) bool {
+	contains := func(values []string) bool {
+		for _, value := range values {
+			if strings.TrimSpace(value) == name {
+				return true
+			}
+		}
+		return false
+	}
+	return (allowed == nil || contains(allowed)) && !contains(denied)
 }

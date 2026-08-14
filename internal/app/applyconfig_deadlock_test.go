@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"gokin/internal/config"
 	"gokin/internal/router"
 	"gokin/internal/tools"
+	"gokin/internal/ui"
 )
 
 func TestApplyConfigSynchronizesModelRoundTimeoutAtRuntime(t *testing.T) {
@@ -224,5 +226,280 @@ func TestApplyConfig_RefreshesRouterCapabilityForGLM52(t *testing.T) {
 	if capability.Tier != router.CapabilityStrong || capability.ModelName != "glm-5.2" {
 		t.Fatalf("router capability = tier %v model %q, want strong glm-5.2",
 			capability.Tier, capability.ModelName)
+	}
+}
+
+func TestApplyConfigEngineModeIsRestartRequired(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const aggregation = "Rank repository files by how many TODO comments they contain"
+
+	tests := []struct {
+		name          string
+		active        string
+		configured    string
+		message       string
+		wantREPL      bool
+		wantHarness   bool
+		physicalTools bool
+	}{
+		{
+			name:   "tools to hybrid does not invent runtime",
+			active: "tools", configured: "hybrid", message: aggregation,
+			physicalTools: false,
+		},
+		{
+			name:   "auto to tools retains adaptive runtime",
+			active: "auto", configured: "tools", message: aggregation,
+			wantREPL: true, physicalTools: true,
+		},
+		{
+			name:   "hybrid to tools retains runtime and harness",
+			active: "hybrid", configured: "tools", message: "fix the auth bug",
+			wantREPL: true, wantHarness: true, physicalTools: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Plan.Enabled = false
+			cfg.API.ActiveProvider = "glm"
+			cfg.API.Backend = "glm"
+			cfg.API.GLMKey = "test-key-that-is-long-enough-1234567890"
+			cfg.Model.Provider = "glm"
+			cfg.Model.Name = "glm-5.2"
+			cfg.Engine.Mode = tt.active
+
+			registry := tools.DefaultRegistry(t.TempDir())
+			if !tt.physicalTools {
+				registry.Unregister("repl_exec")
+				registry.Unregister("harness")
+			}
+			application := &App{
+				config:   cfg,
+				ctx:      context.Background(),
+				registry: registry,
+				executor: tools.NewExecutor(registry, nil, 30*time.Second),
+			}
+			application.runtimeEngineMode.Store(encodeRuntimeEngineMode(tt.active))
+			application.taskRouter = router.NewRouter(&router.RouterConfig{
+				Enabled:            true,
+				DecomposeThreshold: 100,
+				ParallelThreshold:  100,
+				EngineMode:         tt.active,
+			}, application.executor, nil, nil, registry, false, t.TempDir())
+
+			candidate := application.GetConfig()
+			candidate.Engine.Mode = tt.configured
+			if err := application.ApplyConfig(candidate); err != nil {
+				t.Fatalf("ApplyConfig: %v", err)
+			}
+
+			if got := application.GetConfig().Engine.Mode; got != tt.configured {
+				t.Fatalf("persisted engine mode = %q, want %q", got, tt.configured)
+			}
+			if got := application.runtimeEngineModeSnapshot(); got != tt.active {
+				t.Fatalf("runtime engine mode = %q, want boot mode %q", got, tt.active)
+			}
+			schema := application.toolsForMessage(tt.message)
+			if got := schemaHasDeclaration(schema, "repl_exec"); got != tt.wantREPL {
+				t.Fatalf("repl_exec exposed = %v, want %v", got, tt.wantREPL)
+			}
+			if got := schemaHasDeclaration(schema, "harness"); got != tt.wantHarness {
+				t.Fatalf("harness exposed = %v, want %v", got, tt.wantHarness)
+			}
+			policy := application.hybridPolicyForSchema(tt.message, schema)
+			if policy.Mode != tt.active {
+				t.Fatalf("journal policy mode = %q, want runtime mode %q", policy.Mode, tt.active)
+			}
+			decision := application.taskRouter.RouteWithContext(context.Background(), tt.message)
+			if got := containsToolSet(decision.SuggestedToolSets, tools.ToolSetHybrid); got != tt.wantREPL {
+				t.Fatalf("router hybrid set = %v, want %v", got, tt.wantREPL)
+			}
+			if got := containsToolSet(decision.SuggestedToolSets, tools.ToolSetHarness); got != tt.wantHarness {
+				t.Fatalf("router harness set = %v, want %v", got, tt.wantHarness)
+			}
+		})
+	}
+}
+
+func containsToolSet(sets []tools.ToolSet, want tools.ToolSet) bool {
+	for _, set := range sets {
+		if set == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestApplyConfigEngineModeChangeWarnsRestartRequired(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.Backend = "glm"
+	cfg.API.GLMKey = "test-key-that-is-long-enough-1234567890"
+	cfg.Model.Provider = "glm"
+	cfg.Model.Name = "glm-5.2"
+	cfg.Engine.Mode = "tools"
+
+	program, model := newCapturingProgram(t)
+	application := &App{config: cfg, ctx: context.Background(), program: program}
+	application.runtimeEngineMode.Store(runtimeEngineModeTools)
+	candidate := application.GetConfig()
+	candidate.Engine.Mode = "hybrid"
+	if err := application.ApplyConfig(candidate); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		model.mu.Lock()
+		found := false
+		for _, message := range model.msgs {
+			status, ok := message.(ui.StatusUpdateMsg)
+			if ok && status.Type == ui.StatusWarning &&
+				strings.Contains(status.Message, "engine.mode saved as hybrid") &&
+				strings.Contains(status.Message, "remains in tools mode") &&
+				strings.Contains(status.Message, "/restart") {
+				found = true
+				break
+			}
+		}
+		model.mu.Unlock()
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restart-required engine warning was not delivered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestApplyConfigUnchangedPendingEngineModeDoesNotWarnAgain(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.Backend = "glm"
+	cfg.API.GLMKey = "test-key-that-is-long-enough-1234567890"
+	cfg.Model.Provider = "glm"
+	cfg.Model.Name = "glm-5.2"
+	// Simulate a previous ApplyConfig call that saved hybrid for the next
+	// launch while this process is still physically in tools mode.
+	cfg.Engine.Mode = "hybrid"
+
+	program, model := newCapturingProgram(t)
+	application := &App{config: cfg, ctx: context.Background(), program: program}
+	application.runtimeEngineMode.Store(runtimeEngineModeTools)
+	candidate := application.GetConfig()
+	candidate.Model.Name = "glm-4.7"
+	if err := application.ApplyConfig(candidate); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+
+	// ConfigUpdateMsg is sent before any optional warning, so observing it proves
+	// the ApplyConfig delivery stream has drained through the relevant point.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		model.mu.Lock()
+		hasConfigUpdate := false
+		hasRestartWarning := false
+		for _, message := range model.msgs {
+			switch typed := message.(type) {
+			case ui.ConfigUpdateMsg:
+				hasConfigUpdate = true
+			case ui.StatusUpdateMsg:
+				hasRestartWarning = hasRestartWarning || strings.Contains(typed.Message, "/restart")
+			}
+		}
+		model.mu.Unlock()
+		if hasConfigUpdate {
+			if hasRestartWarning {
+				t.Fatal("unrelated model change repeated a stale engine restart warning")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("config update was not delivered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestApplyConfigREPLLimitsAreRestartRequired(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.Backend = "glm"
+	cfg.API.GLMKey = "test-key-that-is-long-enough-1234567890"
+	cfg.Model.Provider = "glm"
+	cfg.Model.Name = "glm-5.2"
+
+	program, model := newCapturingProgram(t)
+	application := &App{config: cfg, ctx: context.Background(), program: program}
+	application.runtimeEngineMode.Store(runtimeEngineModeAuto)
+	candidate := application.GetConfig()
+	candidate.Engine.REPL.CellTimeout += time.Second
+	if err := application.ApplyConfig(candidate); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		model.mu.Lock()
+		found := false
+		for _, message := range model.msgs {
+			status, ok := message.(ui.StatusUpdateMsg)
+			if ok && status.Type == ui.StatusWarning &&
+				strings.Contains(status.Message, "REPL settings saved") &&
+				strings.Contains(status.Message, "startup limits") &&
+				strings.Contains(status.Message, "/restart") {
+				found = true
+				break
+			}
+		}
+		model.mu.Unlock()
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restart-required REPL warning was not delivered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestApplyConfigDoesNotCloseHybridRuntimeBeforeRestart(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.Plan.Enabled = false
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.Backend = "glm"
+	cfg.API.GLMKey = "test-key-that-is-long-enough-1234567890"
+	cfg.Model.Provider = "glm"
+	cfg.Model.Name = "glm-5.2"
+	cfg.Engine.Mode = "hybrid"
+
+	manager := &fakeHybridRuntime{}
+	registry := tools.DefaultRegistry(t.TempDir())
+	application := &App{
+		config:      cfg,
+		ctx:         context.Background(),
+		registry:    registry,
+		executor:    tools.NewExecutor(registry, nil, 30*time.Second),
+		replManager: manager,
+	}
+	application.runtimeEngineMode.Store(runtimeEngineModeHybrid)
+	candidate := application.GetConfig()
+	candidate.Engine.Mode = "tools"
+
+	if err := application.ApplyConfig(candidate); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	if manager.closed {
+		t.Fatal("hybrid worker was closed by a config-only transition")
+	}
+	if !schemaHasDeclaration(application.toolsForMessage("ordinary request"), "repl_exec") {
+		t.Fatal("hybrid schema was hidden while its worker remained owned by the process")
 	}
 }

@@ -69,8 +69,11 @@ type Config struct {
 }
 
 // EngineConfig selects the orchestration data plane. "auto" is deliberately
-// the default: it advertises the stateful REPL only after a real secure-runtime
-// probe succeeds, otherwise preserving the existing structured-tool engine.
+// the default: an eligible request triggers a real secure-runtime probe before
+// the stateful REPL is advertised; all other requests stay process-free. The
+// whole section is boot-wired because it determines registry shape, worker
+// ownership, and enforced resource limits; changing it in a running process
+// takes effect on the next launch.
 type EngineConfig struct {
 	Mode string     `yaml:"mode"` // auto, tools, or hybrid
 	REPL REPLConfig `yaml:"repl"`
@@ -83,6 +86,7 @@ type REPLConfig struct {
 	CellTimeout      time.Duration `yaml:"cell_timeout"`
 	MaxCodeBytes     int           `yaml:"max_code_bytes"`
 	MaxResponseBytes int           `yaml:"max_response_bytes"`
+	MaxMemoryBytes   int64         `yaml:"max_memory_bytes"`
 }
 
 // SetSnapshotRevision marks which authoritative app revision this candidate
@@ -685,6 +689,7 @@ func DefaultConfig() *Config {
 				CellTimeout:      30 * time.Second,
 				MaxCodeBytes:     64 * 1024,
 				MaxResponseBytes: 1024 * 1024,
+				MaxMemoryBytes:   256 * 1024 * 1024,
 			},
 		},
 		Tools: ToolsConfig{

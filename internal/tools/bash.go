@@ -182,6 +182,8 @@ type BashTool struct {
 	// its resulting cwd after a concurrent policy/workspace change.
 	policyMu       sync.RWMutex
 	policyRevision uint64
+	declarationRev uint64
+	declaration    *genai.FunctionDeclaration
 }
 
 // NewBashTool creates a new BashTool instance.
@@ -346,11 +348,17 @@ func (t *BashTool) Name() string {
 	return "bash"
 }
 
+func (*BashTool) runtimeDynamicDeclaration() {}
+
 func (t *BashTool) Description() string {
 	t.policyMu.RLock()
 	backgroundAllowed := t.backgroundAllowed
 	timeout := t.timeout
 	t.policyMu.RUnlock()
+	return bashToolDescription(timeout, backgroundAllowed)
+}
+
+func bashToolDescription(timeout time.Duration, backgroundAllowed bool) string {
 	description := fmt.Sprintf(`Executes a bash command and returns the output. Use for system operations, git commands, running tests, etc.
 
 PARAMETERS:
@@ -401,9 +409,12 @@ AFTER RUNNING - YOU MUST:
 }
 
 func (t *BashTool) Declaration() *genai.FunctionDeclaration {
-	t.policyMu.RLock()
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	if t.declaration != nil && t.declarationRev == t.policyRevision {
+		return t.declaration
+	}
 	backgroundAllowed := t.backgroundAllowed
-	t.policyMu.RUnlock()
 	properties := map[string]*genai.Schema{
 		"command": {
 			Type:        genai.TypeString,
@@ -428,15 +439,18 @@ func (t *BashTool) Declaration() *genai.FunctionDeclaration {
 			Description: "If true, run the command in background and return task ID immediately",
 		}
 	}
-	return &genai.FunctionDeclaration{
+	declaration := &genai.FunctionDeclaration{
 		Name:        t.Name(),
-		Description: t.Description(),
+		Description: bashToolDescription(t.timeout, backgroundAllowed),
 		Parameters: &genai.Schema{
 			Type:       genai.TypeObject,
 			Properties: properties,
 			Required:   []string{"command"},
 		},
 	}
+	t.declaration = declaration
+	t.declarationRev = t.policyRevision
+	return declaration
 }
 
 func (t *BashTool) Validate(args map[string]any) error {

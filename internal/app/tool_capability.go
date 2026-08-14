@@ -191,6 +191,21 @@ func resolveToolCapabilityCeiling(available, allowed, denied []string) ([]string
 	return ceiling, nil
 }
 
+func startupCapabilityAllowsTool(allowed, denied []string, name string) bool {
+	contains := func(values []string) bool {
+		for _, value := range values {
+			if strings.TrimSpace(value) == name {
+				return true
+			}
+		}
+		return false
+	}
+	if allowed != nil && !contains(allowed) {
+		return false
+	}
+	return !contains(denied)
+}
+
 // filterToolSchemaByCeiling delegates to the shared implementation so the
 // startup schema, the router's per-request schema, and any future SetTools call
 // site cannot drift apart in what "outside the ceiling" means.

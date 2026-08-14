@@ -1,0 +1,5 @@
+{
+  "timeout": 20,
+  "retries": 5,
+  "queue": "jobs"
+}

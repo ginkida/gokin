@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "name": "hybrid-analytics",
+  "description": "Read-only repository-analysis scenarios for measuring tools, adaptive auto, and explicit hybrid execution.",
+  "metrics": [
+    "task_completed",
+    "verification_passed",
+    "touched_files_scoped",
+    "no_false_file_claims",
+    "tool_calls_reasonable",
+    "final_answer_mentions_verification",
+    "journal_present",
+    "files_read_recorded",
+    "verification_recorded",
+    "answer_contains_required",
+    "workspace_unchanged",
+    "hybrid_policy_expected",
+    "hybrid_efficient_path"
+  ],
+  "scenarios": [
+    {
+      "id": "repo_comment_count_rank",
+      "category": "repository_analytics",
+      "difficulty": "medium",
+      "prompt": "Across all source files in this repository, count lines containing TODO or FIXME and rank top-level directories by their combined count. Do not modify files. Include the exact summary `alpha=4; beta=2; .=1`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "repository_analytics",
+      "expected_behaviors": [
+        "scans repository source rather than guessing from a sample",
+        "aggregates both TODO and FIXME in one bounded analysis",
+        "leaves every fixture file unchanged",
+        "runs the requested verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports alpha=4, beta=2, and root=1 exactly",
+        "does not count ignored or invented files",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "reports a plausible count from a truncated evidence list",
+        "misses either TODO or FIXME",
+        "changes repository files"
+      ],
+      "max_tool_calls": 6,
+      "delivered_state": "green",
+      "answer_must_contain": ["alpha=4", "beta=2", ".=1"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": true,
+      "hybrid_required_any_operations": ["count_code", "count_code_many"],
+      "hybrid_max_scan_operations": 1,
+      "hybrid_min_file_index_refreshes": 1,
+      "hybrid_max_repl_calls": 1
+    },
+    {
+      "id": "repo_marker_counts_batched",
+      "category": "repository_analytics",
+      "difficulty": "medium",
+      "prompt": "Across all source files in this repository, count TODO lines and FIXME lines separately in one repository analysis. Do not modify files. Report the exact phrase `Markers: TODO=4; FIXME=3`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "repository_analytics",
+      "expected_behaviors": [
+        "counts both marker types over one consistent repository inventory",
+        "uses the batched multi-pattern counting primitive instead of rescanning files",
+        "leaves every fixture file unchanged",
+        "runs the requested verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports TODO=4 and FIXME=3 exactly",
+        "executes count_code_many in auto and hybrid modes",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "runs independent full-repository scans for the two markers",
+        "reports counts from truncated search results",
+        "changes repository files"
+      ],
+      "max_tool_calls": 5,
+      "delivered_state": "green",
+      "answer_must_contain": ["Markers: TODO=4; FIXME=3"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": true,
+      "hybrid_required_operations": ["count_code_many"],
+      "hybrid_max_scan_operations": 1,
+      "hybrid_min_file_index_refreshes": 1,
+      "hybrid_max_repl_calls": 1
+    },
+    {
+      "id": "repo_fixme_count_with_sample",
+      "category": "repository_analytics",
+      "difficulty": "medium",
+      "prompt": "Across all source files in this repository, count every line containing FIXME while retaining one compact exact evidence sample from the same complete scan. Do not modify files. Report the exact phrase `FIXME total=3; sample=alpha/a.go:4`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "repository_analytics",
+      "expected_behaviors": [
+        "computes the exact repository-wide total without materializing every match",
+        "retains bounded evidence during the same count scan",
+        "leaves every fixture file unchanged",
+        "runs the requested verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports the exact FIXME total and deterministic first sample location",
+        "executes count_code with sample_limit in auto and hybrid modes",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "performs a second repository search only to recover evidence",
+        "infers the total from a bounded evidence list",
+        "changes repository files"
+      ],
+      "max_tool_calls": 5,
+      "delivered_state": "green",
+      "answer_must_contain": ["FIXME total=3; sample=alpha/a.go:4"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": true,
+      "hybrid_required_operations": ["count_code_sampled"],
+      "hybrid_max_scan_operations": 1,
+      "hybrid_min_file_index_refreshes": 1,
+      "hybrid_max_repl_calls": 1
+    },
+    {
+      "id": "repo_exported_functions_without_tests",
+      "category": "repository_analytics",
+      "difficulty": "hard",
+      "prompt": "Across the root package's production Go files, identify exported functions that are never referenced by any `_test.go` file in the repository. Do not modify files. Report the exact phrase `Untested: Archive, Purge`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "repository_analytics",
+      "expected_behaviors": [
+        "joins production declarations against references in test files",
+        "does not mistake the declaration itself for test coverage",
+        "leaves every fixture file unchanged",
+        "runs the requested verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports Archive and Purge as untested",
+        "does not report Format as untested",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "only searches one production or test file",
+        "reports Format as untested",
+        "changes repository files"
+      ],
+      "max_tool_calls": 7,
+      "delivered_state": "green",
+      "answer_must_contain": ["Untested: Archive, Purge"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": true,
+      "hybrid_required_operations": ["list_files"],
+      "hybrid_max_scan_operations": 1,
+      "hybrid_min_file_index_refreshes": 1,
+      "hybrid_max_repl_calls": 1
+    },
+    {
+      "id": "repo_source_extension_distribution",
+      "category": "repository_analytics",
+      "difficulty": "medium",
+      "prompt": "Across all non-ignored production source files in this repository, count files by extension while excluding test files. Do not modify files. Report the exact phrase `Sources: .go=1; .py=2; .ts=3`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "mixed_inventory",
+      "expected_behaviors": [
+        "enumerates the complete repository inventory once",
+        "respects ignore rules and excludes test files before grouping",
+        "groups production source paths by extension",
+        "leaves every fixture file unchanged and runs verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports one Go, two Python, and three TypeScript production files",
+        "does not count inventory_test.go or ignored/generated.ts",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "walks ignored generated content",
+        "counts test files or guesses from a truncated listing",
+        "changes repository files"
+      ],
+      "max_tool_calls": 6,
+      "delivered_state": "green",
+      "answer_must_contain": ["Sources: .go=1; .py=2; .ts=3"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": true,
+      "hybrid_required_operations": ["file_stats"],
+      "hybrid_max_scan_operations": 1,
+      "hybrid_min_file_index_refreshes": 1,
+      "hybrid_max_repl_calls": 1
+    },
+    {
+      "id": "repo_json_config_join",
+      "category": "repository_analytics",
+      "difficulty": "hard",
+      "prompt": "Across all non-ignored JSON configuration files in this repository, join their parsed key sets to identify keys present in every configuration and compute the minimum and maximum timeout values. Do not modify files. Report the exact phrase `Universal keys: timeout; timeout range=5..30`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "config_catalog",
+      "expected_behaviors": [
+        "enumerates every non-ignored JSON configuration exactly once",
+        "parses complete documents and intersects their key sets",
+        "computes the timeout range from the same configuration collection",
+        "leaves every fixture file unchanged and runs verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports timeout as the only universal key",
+        "reports the exact timeout range 5 through 30",
+        "does not read the ignored malformed scratch configuration",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "infers universal keys from only a subset of configurations",
+        "walks ignored scratch content or treats raw text as parsed JSON",
+        "changes repository files"
+      ],
+      "max_tool_calls": 7,
+      "delivered_state": "green",
+      "answer_must_contain": ["Universal keys: timeout; timeout range=5..30"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": true,
+      "hybrid_required_operations": ["list_files"],
+      "hybrid_max_scan_operations": 1,
+      "hybrid_min_file_index_refreshes": 1,
+      "hybrid_max_repl_calls": 1
+    },
+    {
+      "id": "pairwise_file_comparison_control",
+      "category": "targeted_analysis",
+      "difficulty": "small",
+      "prompt": "Compare `pair/left.json` with `pair/right.json` in this repository. Do not modify files. Report exactly `Difference: timeout 10->20`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "repository_analytics",
+      "expected_behaviors": [
+        "uses targeted reads instead of collection-scale computation in auto mode",
+        "reports the single changed value",
+        "leaves every fixture file unchanged",
+        "runs the requested verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports the timeout difference exactly",
+        "auto policy does not expose the REPL",
+        "does not modify the fixture"
+      ],
+      "failure_signals": [
+        "auto mode exposes collection-scale computation for a two-file comparison",
+        "reports unrelated differences",
+        "changes repository files"
+      ],
+      "max_tool_calls": 4,
+      "delivered_state": "green",
+      "answer_must_contain": ["Difference: timeout 10->20"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": false
+    },
+    {
+      "id": "single_file_count_control",
+      "category": "targeted_analysis",
+      "difficulty": "small",
+      "prompt": "In this repository, count lines containing TODO or FIXME in the single file `alpha/a.go` only. Do not modify files. Report exactly `Single: alpha/a.go=2`, then run `go test ./...` to confirm the repository remains green.",
+      "fixture": "repository_analytics",
+      "expected_behaviors": [
+        "uses one targeted read or search instead of collection-scale computation in auto mode",
+        "counts only the explicitly named source file",
+        "leaves every fixture file unchanged",
+        "runs the requested verification"
+      ],
+      "verification_commands": ["go test ./..."],
+      "success_criteria": [
+        "reports exactly two matching lines in alpha/a.go",
+        "auto policy does not expose the REPL",
+        "does not scan unrelated files or modify the fixture"
+      ],
+      "failure_signals": [
+        "auto mode exposes collection-scale computation for one named file",
+        "includes matches from alpha/more.go or other files",
+        "changes repository files"
+      ],
+      "max_tool_calls": 4,
+      "delivered_state": "green",
+      "answer_must_contain": ["Single: alpha/a.go=2"],
+      "workspace_must_remain_unchanged": true,
+      "hybrid_candidate": false
+    }
+  ]
+}

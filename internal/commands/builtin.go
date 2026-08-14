@@ -948,19 +948,32 @@ func (c *DoctorCommand) GetMetadata() CommandMetadata {
 func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
 	var hybridAvailability *repl.Availability
 	cfg := app.GetConfig()
-	mode := ""
+	mode := "auto"
 	if cfg != nil {
-		mode = strings.ToLower(strings.TrimSpace(cfg.Engine.Mode))
+		if configured := strings.ToLower(strings.TrimSpace(cfg.Engine.Mode)); configured != "" {
+			mode = configured
+		}
 	}
-	if mode == "auto" || mode == "hybrid" {
+	if reporter, ok := app.(RuntimeEngineModeReporter); ok {
+		if running := strings.ToLower(strings.TrimSpace(reporter.GetRuntimeEngineMode())); running != "" {
+			mode = running
+		}
+	}
+	replCapabilityDisabled := false
+	if reporter, ok := app.(RuntimeREPLCapabilityReporter); ok {
+		replCapabilityDisabled = !reporter.RuntimeREPLCapabilityEnabled()
+	}
+	if (mode == "auto" || mode == "hybrid") && !replCapabilityDisabled {
 		availability := repl.Detect(ctx, app.GetWorkDir())
 		hybridAvailability = &availability
 	}
 	return RenderDoctor(DoctorOptions{
-		Version:            app.GetVersion(),
-		Config:             cfg,
-		WorkDir:            app.GetWorkDir(),
-		HybridAvailability: hybridAvailability,
+		Version:             app.GetVersion(),
+		Config:              cfg,
+		WorkDir:             app.GetWorkDir(),
+		RuntimeEngineMode:   mode,
+		RuntimeREPLDisabled: replCapabilityDisabled,
+		HybridAvailability:  hybridAvailability,
 	}), nil
 }
 
@@ -969,13 +982,17 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 // configuration failures can be diagnosed before a provider client or TUI
 // exists; /doctor uses the same renderer after startup.
 type DoctorOptions struct {
-	Version            string
-	Config             *config.Config
-	WorkDir            string
-	ConfigPath         string
-	ExecutablePath     string
-	CLI                bool
-	HybridAvailability *repl.Availability
+	Version        string
+	Config         *config.Config
+	WorkDir        string
+	ConfigPath     string
+	ExecutablePath string
+	CLI            bool
+	// RuntimeEngineMode is populated by the in-process /doctor command. The
+	// standalone CLI doctor has no running App and therefore uses Config only.
+	RuntimeEngineMode   string
+	RuntimeREPLDisabled bool
+	HybridAvailability  *repl.Availability
 }
 
 func RenderDoctor(options DoctorOptions) string {
@@ -1105,13 +1122,24 @@ func RenderDoctor(options DoctorOptions) string {
 			"Set plan.default_step_timeout to 0s for the dynamic agent budget")
 	}
 
-	engineMode := "auto"
+	configuredEngineMode := "auto"
 	if cfg != nil && strings.TrimSpace(cfg.Engine.Mode) != "" {
-		engineMode = strings.ToLower(strings.TrimSpace(cfg.Engine.Mode))
+		configuredEngineMode = strings.ToLower(strings.TrimSpace(cfg.Engine.Mode))
 	}
-	fmt.Fprintf(&sb, "  Engine mode: %s\n", engineMode)
+	engineMode := strings.ToLower(strings.TrimSpace(options.RuntimeEngineMode))
+	if engineMode == "" {
+		engineMode = configuredEngineMode
+	}
+	if engineMode == configuredEngineMode {
+		fmt.Fprintf(&sb, "  Engine mode: %s\n", engineMode)
+	} else {
+		fmt.Fprintf(&sb, "  Engine mode: %s (running) · %s configured for next launch; restart required\n",
+			engineMode, configuredEngineMode)
+	}
 	if engineMode == "tools" {
 		fmt.Fprintf(&sb, "  %s○%s Stateful hybrid disabled; using structured tools\n", colorYellow, colorReset)
+	} else if options.RuntimeREPLDisabled {
+		fmt.Fprintf(&sb, "  %s○%s Stateful REPL disabled by invocation policy; secure runtime not started\n", colorYellow, colorReset)
 	} else if availability := options.HybridAvailability; availability != nil {
 		if availability.Available {
 			fmt.Fprintf(&sb, "  %s✓%s Stateful hybrid available (%s)\n", colorGreen, colorReset, availability.Backend)

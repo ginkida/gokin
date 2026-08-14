@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -158,10 +159,22 @@ running an agent command template there, then executing scenario verification co
 
 The agent command receives environment variables like GOKIN_EVAL_PROMPT,
 GOKIN_EVAL_SCENARIO_ID, GOKIN_EVAL_PROVIDER, GOKIN_EVAL_MODEL,
-GOKIN_EVAL_WORKSPACE, GOKIN_EVAL_FAULT_PROFILE, and GOKIN_EVAL_BASE_URL.
+GOKIN_EVAL_ENGINE_MODE, GOKIN_ENGINE_MODE, GOKIN_EVAL_WORKSPACE,
+GOKIN_EVAL_TRIAL, GOKIN_EVAL_TRIAL_COUNT, GOKIN_EVAL_FAULT_PROFILE,
+and GOKIN_EVAL_BASE_URL. GOKIN_EVAL_RUNTIME_DIR is reserved for the trusted
+headless runtime journal and must not be forwarded to model-executed commands.
 Template placeholders such as {{prompt}}, {{workspace}}, {{provider}}, {{model}},
-{{fault_profile}}, {{base_url}}, and {{scenario_id}} are also supported.`,
+		{{engine_mode}}, {{trial}}, {{trial_count}}, {{fault_profile}}, {{base_url}}, and
+		{{scenario_id}} are also supported.
+
+Completed rows are durably checkpointed to OUTPUT.partial while the previous
+OUTPUT remains untouched. A complete run atomically publishes OUTPUT. After an
+interruption, repeat the exact command with --resume; changed matrix, scenario,
+fixture, command, timeout, or explicitly selected GOKIN_BIN is rejected.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Repeat < 1 || opts.Repeat > 100 {
+				return fmt.Errorf("--repeat must be between 1 and 100")
+			}
 			opts.Timeout = timeout
 			results, err := evals.Run(cmd.Context(), opts)
 			if err != nil {
@@ -211,10 +224,13 @@ Template placeholders such as {{prompt}}, {{workspace}}, {{provider}}, {{model}}
 	cmd.Flags().StringArrayVar(&opts.ScenarioIDs, "scenario", nil, "scenario id to run; repeatable")
 	cmd.Flags().StringArrayVar(&opts.Providers, "provider", nil, "provider to include in the matrix; repeatable")
 	cmd.Flags().StringArrayVar(&opts.Models, "model", nil, "model to include in the matrix; repeatable")
+	cmd.Flags().StringArrayVar(&opts.EngineModes, "engine-mode", nil, "engine mode to include (auto, tools, hybrid); repeatable; default auto")
+	cmd.Flags().IntVar(&opts.Repeat, "repeat", 1, "repeat the complete matrix with isolated, paired trials (1-100)")
 	cmd.Flags().StringArrayVar(&opts.FaultProfiles, "fault-profile", nil, "deterministic provider fault to inject once; repeatable")
 	cmd.Flags().StringVar(&opts.FaultUpstream, "fault-upstream", "", "real provider base URL behind the loopback fault proxy")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "timeout per agent or verification command")
 	cmd.Flags().BoolVar(&opts.KeepWorkspaces, "keep-workspaces", false, "keep temporary workspaces after the run")
+	cmd.Flags().BoolVar(&opts.Resume, "resume", false, "resume the exact interrupted run from OUTPUT.partial")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "copy/list scenarios without running the agent command or verification")
 
 	_ = cmd.RegisterFlagCompletionFunc("scenario", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -239,6 +255,15 @@ Template placeholders such as {{prompt}}, {{workspace}}, {{provider}}, {{model}}
 		}
 		return profiles, cobra.ShellCompDirectiveNoFileComp
 	})
+	_ = cmd.RegisterFlagCompletionFunc("engine-mode", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		var modes []string
+		for _, mode := range []string{"auto", "tools", "hybrid"} {
+			if strings.HasPrefix(mode, toComplete) {
+				modes = append(modes, mode)
+			}
+		}
+		return modes, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	cmd.SetContext(context.Background())
 	return cmd
@@ -252,8 +277,18 @@ func evalResultLabel(result evals.Result) string {
 	if result.Model != "" {
 		parts = append(parts, result.Model)
 	}
+	if result.EngineMode != "" {
+		parts = append(parts, "engine="+result.EngineMode)
+	}
 	if result.FaultProfile != "" {
 		parts = append(parts, "fault="+result.FaultProfile)
+	}
+	if result.Trial > 0 {
+		trial := fmt.Sprintf("trial=%d", result.Trial)
+		if result.TrialCount > 0 {
+			trial += fmt.Sprintf("/%d", result.TrialCount)
+		}
+		parts = append(parts, trial)
 	}
 	if len(parts) == 0 {
 		return result.ScenarioID
@@ -269,6 +304,16 @@ func newEvalReportCmd() *cobra.Command {
 	var maxRegression string
 	var requirePass bool
 	var metricThresholds []string
+	var engineGateModes []string
+	var requireCompleteEnginePairs bool
+	var maxEngineScoreRegression string
+	var maxEngineQualityRegressions int
+	var maxEngineRelativeDeltas []string
+	var maxEngineMedianRelativeDeltas []string
+	var minEngineLowerRatios []string
+	var maxEngineLowerPValues []string
+	var minEngineReplUseRatios []string
+	var maxEngineReplUseRatios []string
 
 	cmd := &cobra.Command{
 		Use:   "report",
@@ -276,7 +321,9 @@ func newEvalReportCmd() *cobra.Command {
 		Long: `Summarize eval JSONL results written by gokin eval run.
 
 Use --baseline to compare the current run against a previous results file
-after changing prompts, tools, routing, or model/provider settings.`,
+after changing prompts, tools, routing, or model/provider settings. Engine gate
+flags evaluate paired tools/auto/hybrid rows from the same results file and do
+not require an external baseline.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			results, err := evals.ReadResults(inputPath)
@@ -302,6 +349,18 @@ after changing prompts, tools, routing, or model/provider settings.`,
 			if err != nil {
 				return err
 			}
+			engineGateEnabled, err := applyEngineGateOptions(&gateOpts, evalEngineGateFlags{
+				Modes: engineGateModes, RequireCompletePairs: requireCompleteEnginePairs,
+				MaxScoreRegression: maxEngineScoreRegression, MaxQualityRegressions: maxEngineQualityRegressions,
+				MaxRelativeDeltas: maxEngineRelativeDeltas, MaxMedianRelativeDeltas: maxEngineMedianRelativeDeltas,
+				MinLowerRatios:   minEngineLowerRatios,
+				MaxLowerPValues:  maxEngineLowerPValues,
+				MinReplUseRatios: minEngineReplUseRatios, MaxReplUseRatios: maxEngineReplUseRatios,
+			})
+			if err != nil {
+				return err
+			}
+			gateEnabled = gateEnabled || engineGateEnabled
 			var gate *evals.GateResult
 			if gateEnabled {
 				result := evals.EvaluateGate(report, comparison, gateOpts)
@@ -337,6 +396,16 @@ after changing prompts, tools, routing, or model/provider settings.`,
 	cmd.Flags().StringVar(&maxRegression, "max-regression", "", "fail if score regresses by more than this ratio or percent-point value versus --baseline")
 	cmd.Flags().BoolVar(&requirePass, "require-pass", false, "fail unless every scenario was actually executed and passed")
 	cmd.Flags().StringArrayVar(&metricThresholds, "fail-metric", nil, "fail if metric ratio is below threshold, as name=ratio; repeatable")
+	cmd.Flags().StringArrayVar(&engineGateModes, "engine-gate-mode", nil, "engine comparison to gate (auto or hybrid); repeatable; default auto when an engine gate is enabled")
+	cmd.Flags().BoolVar(&requireCompleteEnginePairs, "require-complete-engine-pairs", false, "fail unless selected comparisons have valid, fully measured pairs, complete mode-provenant and exposure-consistent hybrid policy evidence, and zero exclusions")
+	cmd.Flags().StringVar(&maxEngineScoreRegression, "max-engine-score-regression", "", "maximum paired score regression for all/candidate/control cohorts (example: 0 or 2%)")
+	cmd.Flags().IntVar(&maxEngineQualityRegressions, "max-engine-quality-regressions", -1, "maximum selected-engine scenario regressions; disabled when negative")
+	cmd.Flags().StringArrayVar(&maxEngineRelativeDeltas, "max-engine-relative-delta", nil, "maximum paired efficiency delta as cohort.metric=value; repeatable")
+	cmd.Flags().StringArrayVar(&maxEngineMedianRelativeDeltas, "max-engine-median-relative-delta", nil, "maximum trial-clustered median relative efficiency delta as cohort.metric=value; repeatable")
+	cmd.Flags().StringArrayVar(&minEngineLowerRatios, "min-engine-lower-ratio", nil, "minimum share of trial-clustered evidence units lower than tools as cohort.metric=ratio; repeatable")
+	cmd.Flags().StringArrayVar(&maxEngineLowerPValues, "max-engine-lower-p-value", nil, "maximum one-sided exact sign-test p-value as cohort.metric=value; repeatable; trials are clustered")
+	cmd.Flags().StringArrayVar(&minEngineReplUseRatios, "min-engine-repl-use-ratio", nil, "minimum share of current-engine pairs that call repl_exec as cohort=ratio; repeatable")
+	cmd.Flags().StringArrayVar(&maxEngineReplUseRatios, "max-engine-repl-use-ratio", nil, "maximum share of current-engine pairs that call repl_exec as cohort=ratio; repeatable")
 	return cmd
 }
 
@@ -372,6 +441,97 @@ func evalGateOptions(failUnder, maxRegression string, requirePass bool, metricTh
 	return opts, enabled, nil
 }
 
+type evalEngineGateFlags struct {
+	Modes                   []string
+	RequireCompletePairs    bool
+	MaxScoreRegression      string
+	MaxQualityRegressions   int
+	MaxRelativeDeltas       []string
+	MaxMedianRelativeDeltas []string
+	MinLowerRatios          []string
+	MaxLowerPValues         []string
+	MinReplUseRatios        []string
+	MaxReplUseRatios        []string
+}
+
+func applyEngineGateOptions(opts *evals.GateOptions, flags evalEngineGateFlags) (bool, error) {
+	if opts == nil {
+		return false, fmt.Errorf("engine gate options target is nil")
+	}
+	modes := make([]string, 0, len(flags.Modes))
+	seen := make(map[string]bool, len(flags.Modes))
+	for _, rawMode := range flags.Modes {
+		mode := strings.ToLower(strings.TrimSpace(rawMode))
+		if mode == "" {
+			continue
+		}
+		if mode != "auto" && mode != "hybrid" {
+			return false, fmt.Errorf("--engine-gate-mode %q: expected auto or hybrid", rawMode)
+		}
+		if !seen[mode] {
+			seen[mode] = true
+			modes = append(modes, mode)
+		}
+	}
+	if flags.MaxQualityRegressions < -1 {
+		return false, fmt.Errorf("--max-engine-quality-regressions must be non-negative or omitted")
+	}
+	maxRelativeDeltas, err := evals.ParseEngineMaxRelativeDeltas(flags.MaxRelativeDeltas)
+	if err != nil {
+		return false, fmt.Errorf("--max-engine-relative-delta: %w", err)
+	}
+	maxMedianRelativeDeltas, err := evals.ParseEngineMaxMedianRelativeDeltas(flags.MaxMedianRelativeDeltas)
+	if err != nil {
+		return false, fmt.Errorf("--max-engine-median-relative-delta: %w", err)
+	}
+	minLowerRatios, err := evals.ParseEngineMinLowerRatios(flags.MinLowerRatios)
+	if err != nil {
+		return false, fmt.Errorf("--min-engine-lower-ratio: %w", err)
+	}
+	maxLowerPValues, err := evals.ParseEngineMaxLowerPValues(flags.MaxLowerPValues)
+	if err != nil {
+		return false, fmt.Errorf("--max-engine-lower-p-value: %w", err)
+	}
+	minReplUseRatios, err := evals.ParseEngineReplUseRatios(flags.MinReplUseRatios)
+	if err != nil {
+		return false, fmt.Errorf("--min-engine-repl-use-ratio: %w", err)
+	}
+	maxReplUseRatios, err := evals.ParseEngineReplUseRatios(flags.MaxReplUseRatios)
+	if err != nil {
+		return false, fmt.Errorf("--max-engine-repl-use-ratio: %w", err)
+	}
+	enabled := flags.RequireCompletePairs || strings.TrimSpace(flags.MaxScoreRegression) != "" ||
+		flags.MaxQualityRegressions >= 0 || len(maxRelativeDeltas) > 0 || len(maxMedianRelativeDeltas) > 0 || len(minLowerRatios) > 0 ||
+		len(maxLowerPValues) > 0 ||
+		len(minReplUseRatios) > 0 || len(maxReplUseRatios) > 0
+	if !enabled {
+		return false, nil
+	}
+	if len(modes) == 0 {
+		modes = []string{"auto"}
+	}
+	opts.EngineModes = modes
+	opts.RequireCompleteEnginePairs = flags.RequireCompletePairs
+	if strings.TrimSpace(flags.MaxScoreRegression) != "" {
+		ratio, err := evals.ParseRatio(flags.MaxScoreRegression)
+		if err != nil {
+			return false, fmt.Errorf("--max-engine-score-regression: %w", err)
+		}
+		opts.MaxEngineScoreRegression = &ratio
+	}
+	if flags.MaxQualityRegressions >= 0 {
+		limit := flags.MaxQualityRegressions
+		opts.MaxEngineQualityRegressions = &limit
+	}
+	opts.EngineMaxRelativeDeltas = maxRelativeDeltas
+	opts.EngineMaxMedianRelativeDeltas = maxMedianRelativeDeltas
+	opts.EngineMinLowerRatios = minLowerRatios
+	opts.EngineMaxLowerPValues = maxLowerPValues
+	opts.EngineMinReplUseRatios = minReplUseRatios
+	opts.EngineMaxReplUseRatios = maxReplUseRatios
+	return true, nil
+}
+
 func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.Comparison, gate *evals.GateResult) {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Results: %s\n", report.ResultsPath)
@@ -389,6 +549,83 @@ func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.
 		fmt.Fprintln(out, "\nTools chosen (scenarios that used each at least once):")
 		for _, tool := range report.ToolUsage {
 			fmt.Fprintf(out, "  %-36s %d (%.0f%%)\n", tool.Name, tool.Scenarios, tool.Ratio*100)
+		}
+	}
+
+	if len(report.Engines) > 0 {
+		fmt.Fprintln(out, "\nEngine efficiency:")
+		for _, engine := range report.Engines {
+			eff := engine.Efficiency
+			if eff.MeasuredScenarios == 0 {
+				fmt.Fprintf(out, "  %-10s score %d/%d (%.1f%%) · trusted journal %d/%d · no headless metrics · policy %d · mode %d · mode mismatch %d · aligned %d · gaps %d · unexpected %d · eligible %d · exposed %d · used %d · repl calls %d · scan ops %d · index refreshes %d · efficient %d/%d (misses %d)%s%s\n",
+					engine.Mode, engine.Score.Passed, engine.Score.Total, engine.Score.Ratio*100,
+					eff.TrustedRuntimeScenarios, engine.Passed+engine.Failed,
+					eff.HybridPolicyObserved, eff.HybridModeMatched, eff.HybridModeMismatches,
+					eff.HybridExposureMatched, eff.HybridExposureGaps,
+					eff.HybridUnexpectedExposure, eff.HybridEligible, eff.ReplExposed,
+					eff.ReplUsedScenarios, eff.ReplCalls, eff.ReplScanOperations, eff.ReplFileIndexRefreshes, eff.EfficientPathMatched,
+					eff.EfficientPathExpected, eff.EfficientPathMisses, formatCountMap("operations", eff.ReplOperations),
+					formatCountMap("strategies", eff.HybridStrategies))
+				continue
+			}
+			n := eff.MeasuredScenarios
+			fmt.Fprintf(out, "  %-10s score %d/%d (%.1f%%) · trusted journal %d/%d · avg tokens %d%s · rounds %.1f · duration %.1fs · policy %d · mode %d · mode mismatch %d · aligned %d · gaps %d · unexpected %d · eligible %d · exposed %d · used %d · repl calls %d · scan ops %d · index refreshes %d · efficient %d/%d (misses %d)%s%s\n",
+				engine.Mode, engine.Score.Passed, engine.Score.Total, engine.Score.Ratio*100,
+				eff.TrustedRuntimeScenarios, engine.Passed+engine.Failed,
+				eff.TotalTokens/n, formatEngineTokenBreakdown(eff), float64(eff.ModelRounds)/float64(n),
+				float64(eff.DurationMillis)/float64(n)/1000, eff.HybridPolicyObserved,
+				eff.HybridModeMatched, eff.HybridModeMismatches,
+				eff.HybridExposureMatched, eff.HybridExposureGaps, eff.HybridUnexpectedExposure,
+				eff.HybridEligible, eff.ReplExposed, eff.ReplUsedScenarios, eff.ReplCalls, eff.ReplScanOperations, eff.ReplFileIndexRefreshes,
+				eff.EfficientPathMatched, eff.EfficientPathExpected, eff.EfficientPathMisses,
+				formatCountMap("operations", eff.ReplOperations), formatCountMap("strategies", eff.HybridStrategies))
+		}
+	}
+	if len(report.EngineComparisons) > 0 {
+		fmt.Fprintln(out, "\nPaired engine deltas vs tools (negative efficiency deltas are better):")
+		for _, comparison := range report.EngineComparisons {
+			printEngineCohortDelta(out, comparison.Mode, "all", comparison.All)
+			if comparison.Candidates.Pairs > 0 {
+				printEngineCohortDelta(out, comparison.Mode, "candidates", comparison.Candidates)
+			}
+			if comparison.Controls.Pairs > 0 {
+				printEngineCohortDelta(out, comparison.Mode, "controls", comparison.Controls)
+			}
+			fmt.Fprintf(out, "    provenance: paired %d/%d · scenario spec %d/%d · run spec %d/%d · classification %d/%d\n",
+				comparison.Provenance.Pairs, comparison.All.Pairs,
+				comparison.Provenance.ScenarioSpecVerified, comparison.All.Pairs,
+				comparison.Provenance.RunSpecVerified, comparison.All.Pairs,
+				comparison.Provenance.ClassificationVerified, comparison.All.Pairs)
+			excluded := comparison.Excluded
+			if excluded.Total() > 0 {
+				fmt.Fprintf(out, "    excluded: baseline-only %d · current-only %d · duplicates %d · non-executed %d · spec mismatch %d · run-spec mismatch %d · classification mismatch %d\n",
+					excluded.BaselineOnly, excluded.CurrentOnly, excluded.DuplicateCohorts,
+					excluded.NonExecuted, excluded.SpecMismatches, excluded.RunSpecMismatches, excluded.ClassificationMismatches)
+			}
+		}
+	}
+	if len(report.Engines) > 1 {
+		rows := make([]evals.ScenarioSummary, 0, len(report.Scenarios))
+		for _, scenario := range report.Scenarios {
+			if scenario.TotalTokens > 0 || scenario.ModelRounds > 0 || scenario.ReplCalls > 0 {
+				rows = append(rows, scenario)
+			}
+		}
+		if len(rows) > 0 {
+			fmt.Fprintln(out, "\nScenario efficiency:")
+			for _, scenario := range rows {
+				label := scenario.ID
+				if scenario.Variant != "" {
+					label += " [" + scenario.Variant + "]"
+				}
+				duration := scenario.AgentDuration
+				if duration == 0 {
+					duration = scenario.Duration
+				}
+				fmt.Fprintf(out, "  %-56s tokens %d · rounds %d · duration %.1fs · repl %d · scan ops %d · index refreshes %d\n",
+					label, scenario.TotalTokens, scenario.ModelRounds,
+					float64(duration)/1000, scenario.ReplCalls, scenario.ReplScanOperations, scenario.ReplFileIndexRefreshes)
+			}
 		}
 	}
 
@@ -458,6 +695,115 @@ func printEvalReport(cmd *cobra.Command, report evals.Report, comparison *evals.
 			fmt.Fprintf(out, "  - %s\n", failure)
 		}
 	}
+}
+
+func formatEngineTokenBreakdown(eff evals.EfficiencySummary) string {
+	n := eff.TokenBreakdownScenarios
+	if n == 0 {
+		return fmt.Sprintf(" · token breakdown 0/%d", eff.MeasuredScenarios)
+	}
+	return fmt.Sprintf(" · avg input %d (uncached %d, cache read %d) · avg output %d · token breakdown %d/%d",
+		eff.InputTokens/n, eff.UncachedInputTokens/n, eff.CacheReadInputTokens/n,
+		eff.OutputTokens/n, n, eff.MeasuredScenarios)
+}
+
+func printEngineCohortDelta(out io.Writer, mode, cohort string, delta evals.EngineCohortComparison) {
+	if delta.Pairs == 0 {
+		fmt.Fprintf(out, "  %-10s %-10s no valid pairs\n", mode, cohort)
+		return
+	}
+	fmt.Fprintf(out, "  %-10s %-10s pairs %d · pass %+d · score %+.1fpp",
+		mode, cohort, delta.Pairs, delta.PassedDelta, delta.ScoreDelta*100)
+	fmt.Fprintf(out, "\n    hybrid: trusted runtime %d/%d · policy %d/%d · mode %d/%d · mode mismatch %d · aligned %d/%d · gaps %d · unexpected %d · eligible %d/%d · exposed %d/%d · used %d/%d (%.1f%%) · calls %d · scan ops %d · index refreshes %d · efficient %d/%d (misses %d)",
+		delta.Hybrid.TrustedRuntime, delta.Pairs, delta.Hybrid.PolicyObserved, delta.Pairs, delta.Hybrid.ModeMatched, delta.Pairs,
+		delta.Hybrid.ModeMismatches, delta.Hybrid.ExposureMatched, delta.Pairs,
+		delta.Hybrid.ExposureGaps, delta.Hybrid.UnexpectedExposure, delta.Hybrid.Eligible, delta.Pairs,
+		delta.Hybrid.Exposed, delta.Pairs, delta.Hybrid.Used, delta.Pairs,
+		delta.Hybrid.UseRatio*100, delta.Hybrid.Calls, delta.Hybrid.ScanOperations, delta.Hybrid.FileIndexRefreshes, delta.Hybrid.EfficientMatched,
+		delta.Hybrid.EfficientExpected, delta.Hybrid.EfficientMisses)
+	fmt.Fprint(out, formatCountMap("strategies", delta.Hybrid.Strategies))
+	if delta.Efficiency.TotalTokens.Pairs > 0 {
+		fmt.Fprint(out, "\n")
+		printPairedMetric(out, "tokens", delta.Efficiency.TotalTokens, 1, "")
+		if delta.Efficiency.InputTokens.Pairs > 0 {
+			printPairedMetric(out, "input", delta.Efficiency.InputTokens, 1, "")
+			printPairedMetric(out, "uncached", delta.Efficiency.UncachedInputTokens, 1, "")
+			printPairedMetric(out, "cache read", delta.Efficiency.CacheReadInputTokens, 1, "")
+			printPairedMetric(out, "output", delta.Efficiency.OutputTokens, 1, "")
+		} else {
+			fmt.Fprintf(out, "    token breakdown unavailable for paired rows\n")
+		}
+		printPairedMetric(out, "rounds", delta.Efficiency.ModelRounds, 1, "")
+		printPairedMetric(out, "duration", scalePairedMetric(delta.Efficiency.DurationMillis, 1000), 1, "s")
+		printPairedMetric(out, "repl", delta.Efficiency.ReplCalls, 1, "")
+		if delta.Efficiency.EstimatedUSD.Pairs > 0 {
+			printPairedMetric(out, "cost USD", delta.Efficiency.EstimatedUSD, 4, "")
+		}
+	} else {
+		fmt.Fprint(out, " · no paired headless metrics\n")
+	}
+	fmt.Fprintf(out, "    quality: regressions %d · improvements %d\n",
+		len(delta.QualityRegressions), len(delta.QualityImprovements))
+	printEvalScenarioIdentities(out, "    quality regressions", delta.QualityRegressions)
+}
+
+func formatCountMap(label string, counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s=%d", name, counts[name]))
+	}
+	return " · " + label + " " + strings.Join(parts, ",")
+}
+
+func formatREPLOperations(operations map[string]int) string {
+	return formatCountMap("operations", operations)
+}
+
+func printPairedMetric(out io.Writer, name string, metric evals.PairedMetricComparison, precision int, suffix string) {
+	fmt.Fprintf(out, "    %-10s %.*f → %.*f (avg Δ %+.*f%s, pair median Δ %+.*f%s",
+		name, precision, metric.BaselineAverage, precision, metric.CurrentAverage,
+		precision, metric.AverageDelta, suffix, precision, metric.MedianDelta, suffix)
+	if metric.EvidenceUnits > 0 {
+		fmt.Fprintf(out, ", unit median Δ %+.*f%s", precision, metric.ClusteredMedianDelta, suffix)
+	}
+	if metric.RelativeDelta != nil {
+		fmt.Fprintf(out, ", aggregate %+.1f%%", *metric.RelativeDelta*100)
+	}
+	if metric.MedianRelativeDelta != nil {
+		fmt.Fprintf(out, ", pair median %+.1f%%", *metric.MedianRelativeDelta*100)
+		if metric.RelativePairs != metric.Pairs {
+			fmt.Fprintf(out, " over %d/%d nonzero baselines", metric.RelativePairs, metric.Pairs)
+		}
+	}
+	if metric.ClusteredMedianRelativeDelta != nil {
+		fmt.Fprintf(out, ", unit median %+.1f%% over %d/%d units",
+			*metric.ClusteredMedianRelativeDelta*100,
+			metric.ClusteredRelativeEvidenceUnits, metric.EvidenceUnits)
+	}
+	fmt.Fprintf(out, ") · pairs lower/equal/higher %d/%d/%d · units %d: %d/%d/%d",
+		metric.Lower, metric.Equal, metric.Higher,
+		metric.EvidenceUnits, metric.UnitLower, metric.UnitEqual, metric.UnitHigher)
+	if metric.LowerSignTestPValue != nil {
+		fmt.Fprintf(out, " · lower sign p=%.4g", *metric.LowerSignTestPValue)
+	}
+	fmt.Fprintln(out)
+}
+
+func scalePairedMetric(metric evals.PairedMetricComparison, divisor float64) evals.PairedMetricComparison {
+	metric.BaselineAverage /= divisor
+	metric.CurrentAverage /= divisor
+	metric.AverageDelta /= divisor
+	metric.MedianDelta /= divisor
+	metric.ClusteredMedianDelta /= divisor
+	return metric
 }
 
 func printEvalScenarioIdentities(out io.Writer, heading string, identities []evals.ScenarioIdentity) {

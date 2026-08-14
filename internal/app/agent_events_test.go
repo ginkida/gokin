@@ -11,7 +11,37 @@ import (
 	"time"
 
 	"gokin/internal/hooks"
+	"gokin/internal/repl"
 )
+
+func TestREPLOperationsForJournal(t *testing.T) {
+	result := repl.Result{Operations: map[string]int{
+		"count_code_many":  1,
+		"file_stats":       4,
+		"search_code":      2,
+		"invalid-name":     3,
+		"zero_is_ignored":  0,
+		"negative_ignored": -1,
+	}, FileIndexRefreshes: 3}
+	got := replOperationsForJournal(result)
+	if len(got) != 3 || got["count_code_many"] != 1 || got["file_stats"] != 4 || got["search_code"] != 2 {
+		t.Fatalf("operations = %#v, want bounded valid counters", got)
+	}
+
+	result.Operations["count_code_many"] = 99
+	if got["count_code_many"] != 1 {
+		t.Fatalf("journal operations alias source map: %#v", got)
+	}
+	if got := replOperationsForJournal(repl.Stats{}); got != nil {
+		t.Fatalf("non-execution metadata = %#v, want nil", got)
+	}
+	if got := replFileIndexRefreshesForJournal(&result); got != 3 {
+		t.Fatalf("file index refreshes = %d, want 3", got)
+	}
+	if got := replFileIndexRefreshesForJournal(repl.Stats{}); got != 0 {
+		t.Fatalf("non-execution refresh metadata = %d, want zero", got)
+	}
+}
 
 // TestHandleSubAgentActivity_JournalsToolEvents pins the unification gain:
 // sub-agent tool calls land in the execution journal with agent_id — the

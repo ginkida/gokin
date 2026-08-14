@@ -12,14 +12,19 @@ import (
 
 // Registry manages the collection of available tools.
 type Registry struct {
-	tools map[string]Tool
-	mu    sync.RWMutex
+	tools                       map[string]Tool
+	staticDeclarations          map[string]*genai.FunctionDeclaration
+	declarationSnapshotCache    []registryDeclarationSnapshot
+	declarationRevision         uint64
+	declarationSnapshotRevision uint64
+	mu                          sync.RWMutex
 }
 
 // NewRegistry creates a new tool registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]Tool),
+		tools:              make(map[string]Tool),
+		staticDeclarations: make(map[string]*genai.FunctionDeclaration),
 	}
 }
 
@@ -34,65 +39,132 @@ func (r *Registry) Get(name string) (Tool, bool) {
 
 // List returns all registered tools (read-optimized).
 func (r *Registry) List() []Tool {
-	r.mu.RLock()
-	tools := make([]Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
-		tools = append(tools, tool)
+	snapshots := r.cachedDeclarationSnapshots()
+	registered := make([]Tool, len(snapshots))
+	for index, snapshot := range snapshots {
+		registered[index] = snapshot.tool
 	}
-	r.mu.RUnlock()
-
-	sortToolsByName(tools)
-	return tools
+	return registered
 }
 
 // Names returns the names of all registered tools (read-optimized).
 func (r *Registry) Names() []string {
-	r.mu.RLock()
-	names := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		names = append(names, name)
+	snapshots := r.cachedDeclarationSnapshots()
+	names := make([]string, len(snapshots))
+	for index, snapshot := range snapshots {
+		names[index] = snapshot.name
 	}
-	r.mu.RUnlock()
-
-	sort.Strings(names)
 	return names
 }
 
 // Declarations returns all tool declarations for Gemini (read-optimized).
 func (r *Registry) Declarations() []*genai.FunctionDeclaration {
-	registered := r.List()
-	declarations := make([]*genai.FunctionDeclaration, 0, len(registered))
-	for _, tool := range registered {
-		declarations = append(declarations, tool.Declaration())
+	snapshots := r.cachedDeclarationSnapshots()
+	declarations := make([]*genai.FunctionDeclaration, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		declaration := snapshot.declaration
+		if declaration == nil {
+			declaration = snapshot.tool.Declaration()
+		}
+		if declaration != nil {
+			declarations = append(declarations, declaration)
+		}
 	}
 	sortDeclarationsByName(declarations)
 	return declarations
 }
 
+type registryDeclarationSnapshot struct {
+	name        string
+	tool        Tool
+	declaration *genai.FunctionDeclaration
+}
+
+// cachedDeclarationSnapshots returns an immutable, name-ordered registry view.
+// Register, Unregister, and declaration freezing replace this slice instead of
+// mutating it, so callers may safely retain the returned view after the lock is
+// released and invoke third-party Declaration methods without deadlocking the
+// registry. The common per-request path avoids rebuilding ~60 snapshot records.
+func (r *Registry) cachedDeclarationSnapshots() []registryDeclarationSnapshot {
+	r.mu.RLock()
+	if r.declarationSnapshotRevision == r.declarationRevision {
+		cached := r.declarationSnapshotCache
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.declarationSnapshotRevision != r.declarationRevision {
+		snapshots := make([]registryDeclarationSnapshot, 0, len(r.tools))
+		for name, tool := range r.tools {
+			snapshots = append(snapshots, registryDeclarationSnapshot{
+				name: name, tool: tool, declaration: r.staticDeclarations[name],
+			})
+		}
+		sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].name < snapshots[j].name })
+		r.declarationSnapshotCache = snapshots
+		r.declarationSnapshotRevision = r.declarationRevision
+	}
+	return r.declarationSnapshotCache
+}
+
 func sortDeclarationsByName(declarations []*genai.FunctionDeclaration) {
+	// Snapshot-backed eager paths are already ordered by registry name, and a
+	// well-formed tool uses that same name in its declaration. Avoid paying the
+	// reflection allocations of sort.SliceStable on every model round. Lazy or
+	// third-party declarations whose published names differ still take the exact
+	// stable-sort fallback below.
+	ordered := true
+	for index := 1; index < len(declarations); index++ {
+		if declarationNameLess(declarations[index], declarations[index-1]) {
+			ordered = false
+			break
+		}
+	}
+	if ordered {
+		return
+	}
 	sort.SliceStable(declarations, func(i, j int) bool {
-		left, right := declarations[i], declarations[j]
-		if left == nil {
-			return false
-		}
-		if right == nil {
-			return true
-		}
-		return left.Name < right.Name
+		return declarationNameLess(declarations[i], declarations[j])
 	})
 }
 
+func declarationNameLess(left, right *genai.FunctionDeclaration) bool {
+	if left == nil {
+		return false
+	}
+	if right == nil {
+		return true
+	}
+	return left.Name < right.Name
+}
+
 func sortToolsByName(registered []Tool) {
+	ordered := true
+	for index := 1; index < len(registered); index++ {
+		if toolNameLess(registered[index], registered[index-1]) {
+			ordered = false
+			break
+		}
+	}
+	if ordered {
+		return
+	}
 	sort.SliceStable(registered, func(i, j int) bool {
-		left, right := registered[i], registered[j]
-		if left == nil {
-			return false
-		}
-		if right == nil {
-			return true
-		}
-		return left.Name() < right.Name()
+		return toolNameLess(registered[i], registered[j])
 	})
+}
+
+func toolNameLess(left, right Tool) bool {
+	if left == nil {
+		return false
+	}
+	if right == nil {
+		return true
+	}
+	return left.Name() < right.Name()
 }
 
 // Register adds a tool to the registry.
@@ -106,6 +178,7 @@ func (r *Registry) Register(tool Tool) error {
 	}
 
 	r.tools[name] = tool
+	r.declarationRevision++
 	return nil
 }
 
@@ -126,7 +199,45 @@ func (r *Registry) Unregister(name string) bool {
 		return false
 	}
 	delete(r.tools, name)
+	delete(r.staticDeclarations, name)
+	r.declarationRevision++
 	return true
+}
+
+// runtimeDynamicDeclaration marks built-ins whose model-facing schema can
+// change without a Register/Unregister operation. DefaultRegistry freezes every
+// other built-in declaration once before publication; public Register remains
+// dynamic for MCP and third-party tools regardless of this marker.
+type runtimeDynamicDeclaration interface {
+	runtimeDynamicDeclaration()
+}
+
+// freezeDefaultDeclarations is called only while DefaultRegistry is still
+// thread-confined. It removes hundreds of nested genai.Schema allocations from
+// every request while keeping explicitly dynamic schemas live.
+func (r *Registry) freezeDefaultDeclarations() {
+	snapshots := r.cachedDeclarationSnapshots()
+	frozen := make(map[string]*genai.FunctionDeclaration, len(snapshots))
+	for _, snapshot := range snapshots {
+		if _, dynamic := snapshot.tool.(runtimeDynamicDeclaration); dynamic {
+			continue
+		}
+		if declaration := snapshot.tool.Declaration(); declaration != nil {
+			frozen[snapshot.name] = declaration
+		}
+	}
+	r.mu.Lock()
+	for name, declaration := range frozen {
+		// No concurrent mutation is permitted before publication, but retain the
+		// membership check so future constructor refactors fail closed.
+		if _, exists := r.tools[name]; exists {
+			r.staticDeclarations[name] = declaration
+		}
+	}
+	// declarationSnapshots may already have populated a pre-freeze view.
+	// Publish a new revision so the next reader observes the frozen pointers.
+	r.declarationRevision++
+	r.mu.Unlock()
 }
 
 // GeminiTools returns the tools in Gemini format.
@@ -158,14 +269,22 @@ var PlanModeControlToolNames = map[string]bool{
 // memory/memorize tools when memory.enabled is false. Offering a disabled tool
 // makes the model call it and hit a confusing "unavailable" error.
 func (r *Registry) GeminiToolsExcluding(exclude map[string]bool) []*genai.Tool {
-	all := r.Declarations()
-	kept := make([]*genai.FunctionDeclaration, 0, len(all))
-	for _, d := range all {
-		if d == nil || exclude[d.Name] {
+	snapshots := r.cachedDeclarationSnapshots()
+	kept := make([]*genai.FunctionDeclaration, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		declaration := snapshot.declaration
+		if declaration == nil {
+			declaration = snapshot.tool.Declaration()
+		}
+		// Preserve the public contract for third-party tools whose declaration
+		// name differs from their registry key: exclusions apply to the name the
+		// model actually sees, not to the internal lookup key.
+		if declaration == nil || exclude[declaration.Name] {
 			continue
 		}
-		kept = append(kept, d)
+		kept = append(kept, declaration)
 	}
+	sortDeclarationsByName(kept)
 	return []*genai.Tool{{FunctionDeclarations: kept}}
 }
 
@@ -192,6 +311,11 @@ const (
 	ToolSetWeb ToolSet = "web"
 	// ToolSetAdvanced contains advanced code analysis tools.
 	ToolSetAdvanced ToolSet = "advanced"
+	// ToolSetHybrid exposes the request-scoped read-only computation plane.
+	ToolSetHybrid ToolSet = "hybrid"
+	// ToolSetHarness exposes direct continual-harness administration. Auto mode
+	// keeps this internal to rlm.harness; explicit hybrid mode may advertise it.
+	ToolSetHarness ToolSet = "harness"
 	// ToolSetMemory contains memory and context tools.
 	ToolSetMemory ToolSet = "memory"
 	// ToolSetFileOps contains file management tools beyond core read/write/edit.
@@ -199,6 +323,36 @@ const (
 	// ToolSetOllamaCore is a minimal set for Ollama models.
 	ToolSetOllamaCore ToolSet = "ollama_core"
 )
+
+type toolSetMask uint16
+
+const (
+	toolSetMaskCore toolSetMask = 1 << iota
+	toolSetMaskGit
+	toolSetMaskPlanning
+	toolSetMaskAgent
+	toolSetMaskWeb
+	toolSetMaskAdvanced
+	toolSetMaskHybrid
+	toolSetMaskHarness
+	toolSetMaskMemory
+	toolSetMaskFileOps
+	toolSetMaskOllamaCore
+)
+
+var toolSetMasks = map[ToolSet]toolSetMask{
+	ToolSetCore:       toolSetMaskCore,
+	ToolSetGit:        toolSetMaskGit,
+	ToolSetPlanning:   toolSetMaskPlanning,
+	ToolSetAgent:      toolSetMaskAgent,
+	ToolSetWeb:        toolSetMaskWeb,
+	ToolSetAdvanced:   toolSetMaskAdvanced,
+	ToolSetHybrid:     toolSetMaskHybrid,
+	ToolSetHarness:    toolSetMaskHarness,
+	ToolSetMemory:     toolSetMaskMemory,
+	ToolSetFileOps:    toolSetMaskFileOps,
+	ToolSetOllamaCore: toolSetMaskOllamaCore,
+}
 
 // toolSetDefinitions maps tool sets to their member tool names.
 var toolSetDefinitions = map[ToolSet][]string{
@@ -238,8 +392,14 @@ var toolSetDefinitions = map[ToolSet][]string{
 		"web_fetch", "web_search",
 	},
 	ToolSetAdvanced: {
-		"batch", "refactor", "check_impact", "repl_exec", "harness",
+		"batch", "refactor", "check_impact",
 		"verify_code", "run_tests",
+	},
+	ToolSetHybrid: {
+		"repl_exec",
+	},
+	ToolSetHarness: {
+		"harness",
 	},
 	ToolSetMemory: {
 		"memory", "memorize", "pin_context", "history_search",
@@ -250,17 +410,51 @@ var toolSetDefinitions = map[ToolSet][]string{
 	},
 	ToolSetOllamaCore: {
 		"read", "write", "edit", "bash", "glob", "grep",
-		"ask_user", "list_dir", "todo", "skill", "repl_exec", "harness",
+		"ask_user", "list_dir", "todo", "skill",
 	},
+}
+
+var toolSetMembershipByName = buildToolSetMembership()
+
+func buildToolSetMembership() map[string]toolSetMask {
+	membership := make(map[string]toolSetMask)
+	for set, names := range toolSetDefinitions {
+		mask := toolSetMasks[set]
+		for _, name := range names {
+			membership[name] |= mask
+		}
+	}
+	return membership
+}
+
+func selectedToolSetMask(sets []ToolSet) (toolSetMask, int) {
+	var selected toolSetMask
+	capacity := 0
+	for _, set := range sets {
+		selected |= toolSetMasks[set]
+		capacity += len(toolSetDefinitions[set])
+	}
+	return selected, capacity
 }
 
 // FilteredDeclarations returns declarations for only the specified tool sets.
 func (r *Registry) FilteredDeclarations(sets ...ToolSet) []*genai.FunctionDeclaration {
-	allowed := r.toolNamesFromSets(sets...)
-	decls := make([]*genai.FunctionDeclaration, 0, len(allowed))
-	for _, tool := range r.List() {
-		if allowed[tool.Name()] {
-			decls = append(decls, tool.Declaration())
+	selected, capacity := selectedToolSetMask(sets)
+	snapshots := r.cachedDeclarationSnapshots()
+	if capacity > len(snapshots) {
+		capacity = len(snapshots)
+	}
+	decls := make([]*genai.FunctionDeclaration, 0, capacity)
+	for _, snapshot := range snapshots {
+		if toolSetMembershipByName[snapshot.name]&selected == 0 {
+			continue
+		}
+		declaration := snapshot.declaration
+		if declaration == nil {
+			declaration = snapshot.tool.Declaration()
+		}
+		if declaration != nil {
+			decls = append(decls, declaration)
 		}
 	}
 	sortDeclarationsByName(decls)
@@ -274,19 +468,6 @@ func (r *Registry) FilteredGeminiTools(sets ...ToolSet) []*genai.Tool {
 			FunctionDeclarations: r.FilteredDeclarations(sets...),
 		},
 	}
-}
-
-// toolNamesFromSets returns a set of tool names from the given tool sets.
-func (r *Registry) toolNamesFromSets(sets ...ToolSet) map[string]bool {
-	names := make(map[string]bool)
-	for _, set := range sets {
-		if tools, ok := toolSetDefinitions[set]; ok {
-			for _, name := range tools {
-				names[name] = true
-			}
-		}
-	}
-	return names
 }
 
 // DefaultRegistry creates a registry with all default tools.
@@ -388,6 +569,11 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewMCPAdminTool())
 	r.MustRegister(NewLoopControlTool())
 
+	// Dynamic declaration types carry an explicit marker. All remaining
+	// built-ins have immutable names/descriptions/parameter schemas and can be
+	// retained by reference; request filters clone only the envelope slices.
+	r.freezeDefaultDeclarations()
+
 	return r
 }
 
@@ -416,10 +602,20 @@ type ToolLister interface {
 // LazyRegistry manages tools with lazy loading.
 // Tools are only instantiated when first accessed.
 type LazyRegistry struct {
-	entries              map[string]*ToolEntry
-	declarations         map[string]*genai.FunctionDeclaration
-	declarationProviders map[string]func() *genai.FunctionDeclaration
-	mu                   sync.RWMutex
+	entries                   map[string]*ToolEntry
+	declarations              map[string]*genai.FunctionDeclaration
+	declarationProviders      map[string]func() *genai.FunctionDeclaration
+	discoverySnapshotCache    []lazyRegistrySnapshot
+	discoveryRevision         uint64
+	discoverySnapshotRevision uint64
+	mu                        sync.RWMutex
+}
+
+type lazyRegistrySnapshot struct {
+	name        string
+	entry       *ToolEntry
+	declaration *genai.FunctionDeclaration
+	provider    func() *genai.FunctionDeclaration
 }
 
 // NewLazyRegistry creates a new lazy registry.
@@ -467,6 +663,7 @@ func (r *LazyRegistry) registerFactory(
 	if provider != nil {
 		r.declarationProviders[name] = provider
 	}
+	r.discoveryRevision++
 }
 
 // Get retrieves a tool by name, instantiating it if necessary.
@@ -507,25 +704,7 @@ func ConfigureTyped[T Tool](r *LazyRegistry, name string, cfg func(T)) {
 // Dynamic providers run outside the registry lock because refreshing a
 // declaration may read the filesystem or acquire tool-local locks.
 func (r *LazyRegistry) Declarations() []*genai.FunctionDeclaration {
-	r.mu.RLock()
-	type declarationSnapshot struct {
-		name        string
-		declaration *genai.FunctionDeclaration
-		provider    func() *genai.FunctionDeclaration
-	}
-	snapshots := make([]declarationSnapshot, 0, len(r.declarations))
-	for name, decl := range r.declarations {
-		snapshots = append(snapshots, declarationSnapshot{
-			name:        name,
-			declaration: decl,
-			provider:    r.declarationProviders[name],
-		})
-	}
-	r.mu.RUnlock()
-	sort.Slice(snapshots, func(i, j int) bool {
-		return snapshots[i].name < snapshots[j].name
-	})
-
+	snapshots := r.cachedDiscoverySnapshots()
 	decls := make([]*genai.FunctionDeclaration, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		decl := snapshot.declaration
@@ -544,39 +723,55 @@ func (r *LazyRegistry) Declarations() []*genai.FunctionDeclaration {
 
 // Names returns the names of all registered tools.
 func (r *LazyRegistry) Names() []string {
-	r.mu.RLock()
-	names := make([]string, 0, len(r.entries))
-	for name := range r.entries {
-		names = append(names, name)
+	snapshots := r.cachedDiscoverySnapshots()
+	names := make([]string, len(snapshots))
+	for index, snapshot := range snapshots {
+		names[index] = snapshot.name
 	}
-	r.mu.RUnlock()
-
-	sort.Strings(names)
 	return names
 }
 
 // List returns all tools, instantiating them if necessary.
 func (r *LazyRegistry) List() []Tool {
-	r.mu.RLock()
-	type entrySnapshot struct {
-		name  string
-		entry *ToolEntry
-	}
-	entries := make([]entrySnapshot, 0, len(r.entries))
-	for name, entry := range r.entries {
-		entries = append(entries, entrySnapshot{name: name, entry: entry})
-	}
-	r.mu.RUnlock()
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].name < entries[j].name
-	})
-
-	tools := make([]Tool, len(entries))
-	for i, snapshot := range entries {
+	snapshots := r.cachedDiscoverySnapshots()
+	tools := make([]Tool, len(snapshots))
+	for i, snapshot := range snapshots {
 		tools[i] = snapshot.entry.Get()
 	}
 	sortToolsByName(tools)
 	return tools
+}
+
+// cachedDiscoverySnapshots returns an immutable, name-ordered view of the
+// lazy registry. Registration replaces the cache instead of mutating it, so
+// factories and dynamic declaration providers can safely run after the lock
+// is released. Providers themselves are deliberately not memoized.
+func (r *LazyRegistry) cachedDiscoverySnapshots() []lazyRegistrySnapshot {
+	r.mu.RLock()
+	if r.discoverySnapshotRevision == r.discoveryRevision {
+		cached := r.discoverySnapshotCache
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.discoverySnapshotRevision != r.discoveryRevision {
+		snapshots := make([]lazyRegistrySnapshot, 0, len(r.entries))
+		for name, entry := range r.entries {
+			snapshots = append(snapshots, lazyRegistrySnapshot{
+				name:        name,
+				entry:       entry,
+				declaration: r.declarations[name],
+				provider:    r.declarationProviders[name],
+			})
+		}
+		sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].name < snapshots[j].name })
+		r.discoverySnapshotCache = snapshots
+		r.discoverySnapshotRevision = r.discoveryRevision
+	}
+	return r.discoverySnapshotCache
 }
 
 // GeminiTools returns tool declarations in Gemini format without instantiation.
@@ -591,10 +786,20 @@ func (r *LazyRegistry) GeminiTools() []*genai.Tool {
 // Register adds an already-instantiated tool to the registry.
 // This is for backward compatibility and dynamic tools.
 func (r *LazyRegistry) Register(tool Tool) error {
+	name := tool.Name()
+	r.mu.RLock()
+	_, exists := r.entries[name]
+	r.mu.RUnlock()
+	if exists {
+		return fmt.Errorf("tool already registered: %s", name)
+	}
+
+	// Third-party declarations are arbitrary code. Resolve them without the
+	// registry lock so a declaration can safely register another tool.
+	declaration := tool.Declaration()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	name := tool.Name()
 	if _, exists := r.entries[name]; exists {
 		return fmt.Errorf("tool already registered: %s", name)
 	}
@@ -604,7 +809,12 @@ func (r *LazyRegistry) Register(tool Tool) error {
 		factory:  func() Tool { return tool },
 		instance: tool,
 	}
-	r.declarations[name] = tool.Declaration()
+	delete(r.declarations, name)
+	delete(r.declarationProviders, name)
+	if declaration != nil {
+		r.declarations[name] = declaration
+	}
+	r.discoveryRevision++
 	return nil
 }
 

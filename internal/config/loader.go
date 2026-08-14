@@ -436,6 +436,9 @@ func (c *Config) Validate() error {
 	if c.Engine.REPL.MaxResponseBytes < 64*1024 || c.Engine.REPL.MaxResponseBytes > 16*1024*1024 {
 		return fmt.Errorf("engine.repl.max_response_bytes must be between 65536 and 16777216")
 	}
+	if c.Engine.REPL.MaxMemoryBytes < 64*1024*1024 || c.Engine.REPL.MaxMemoryBytes > 2*1024*1024*1024 {
+		return fmt.Errorf("engine.repl.max_memory_bytes must be between 67108864 and 2147483648")
+	}
 	mode := strings.ToLower(strings.TrimSpace(c.DoneGate.Mode))
 	if mode != "" && mode != "normal" && mode != "strict" {
 		return fmt.Errorf("invalid done_gate.mode %q: expected \"normal\" (verify build/tests pass) or \"strict\" (also verify via LLM review)", c.DoneGate.Mode)

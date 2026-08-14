@@ -130,6 +130,43 @@ func TestDoctorReportsRequiredHybridFailure(t *testing.T) {
 	}
 }
 
+func TestDoctorDistinguishesRunningAndConfiguredEngineModes(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Engine.Mode = "hybrid"
+	out := RenderDoctor(DoctorOptions{
+		Config:            cfg,
+		WorkDir:           t.TempDir(),
+		RuntimeEngineMode: "tools",
+	})
+	for _, want := range []string{
+		"Engine mode: tools (running)",
+		"hybrid configured for next launch",
+		"restart required",
+		"Stateful hybrid disabled",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDoctorReportsCapabilityDisabledREPLWithoutAvailabilityProbe(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Engine.Mode = "hybrid"
+	out := RenderDoctor(DoctorOptions{
+		Config:              cfg,
+		WorkDir:             t.TempDir(),
+		RuntimeEngineMode:   "hybrid",
+		RuntimeREPLDisabled: true,
+	})
+	if !strings.Contains(out, "Stateful REPL disabled by invocation policy") {
+		t.Fatalf("doctor omitted capability-disabled runtime:\n%s", out)
+	}
+	if strings.Contains(out, "Stateful hybrid available") || strings.Contains(out, "Required secure REPL unavailable") {
+		t.Fatalf("doctor claimed a probed runtime despite invocation denial:\n%s", out)
+	}
+}
+
 func TestDoctorCLIUsesConfigSyntaxInsteadOfSlashCommand(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.API.ActiveProvider = "ollama"

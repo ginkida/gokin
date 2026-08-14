@@ -23,6 +23,8 @@ import (
 //go:embed worker.py
 var workerSource []byte
 
+var errWorkerMemoryLimit = errors.New("REPL worker memory limit exceeded")
+
 type request struct {
 	ID     string `json:"id"`
 	Method string `json:"method"`
@@ -42,26 +44,27 @@ type response struct {
 type Manager struct {
 	opts Options
 
-	mu                sync.Mutex
-	closed            bool
-	cmd               *exec.Cmd
-	stdin             io.WriteCloser
-	stdout            *bufio.Reader
-	waitCh            chan error
-	stderrDone        chan struct{}
-	lifetimeCancel    context.CancelFunc
-	runtimeDir        string
-	workerPath        string
-	generation        uint64
-	stderr            *boundedTail
-	handlerMu         sync.RWMutex
-	callHandler       CallHandler
-	executions        uint64
-	transportFailures uint64
-	timeouts          uint64
-	lastError         string
-	lastFailureAt     time.Time
-	manualResets      uint64
+	mu                    sync.Mutex
+	closed                bool
+	cmd                   *exec.Cmd
+	stdin                 io.WriteCloser
+	stdout                *bufio.Reader
+	waitCh                chan error
+	stderrDone            chan struct{}
+	lifetimeCancel        context.CancelFunc
+	runtimeDir            string
+	workerPath            string
+	generation            uint64
+	stderr                *boundedTail
+	handlerMu             sync.RWMutex
+	callHandler           CallHandler
+	executions            uint64
+	transportFailures     uint64
+	timeouts              uint64
+	resourceLimitFailures uint64
+	lastError             string
+	lastFailureAt         time.Time
+	manualResets          uint64
 }
 
 // NewManager creates a production manager for an explicitly selected secure
@@ -98,11 +101,12 @@ func newManager(opts Options, allowTest bool) (*Manager, error) {
 		}
 		return nil, fmt.Errorf("invalid python path: %w", statErr)
 	}
-	python, err = resolvePythonExecutable(python)
+	python, pythonExecPaths, err := resolvePythonExecutable(python)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Python runtime: %w", err)
 	}
 	opts.PythonPath = python
+	opts.pythonExecPaths = pythonExecPaths
 	if strings.TrimSpace(opts.GitPath) == "" {
 		opts.GitPath = discoverGitExecutable()
 	}
@@ -123,37 +127,66 @@ func newManager(opts Options, allowTest bool) (*Manager, error) {
 }
 
 // resolvePythonExecutable turns platform launcher shims (notably macOS
-// /usr/bin/python3 -> xcrun) into the interpreter they would exec. Invoking the
-// real binary inside the sandbox avoids granting the shim a writable global
-// xcrun cache directory.
-func resolvePythonExecutable(candidate string) (string, error) {
+// /usr/bin/python3 -> xcrun) into the interpreter they would exec. On macOS,
+// framework Python can then posix_spawn its Python.app Mach-O; ask the running
+// interpreter for that path too so Seatbelt can permit only this exact handoff.
+// Invoking the real launcher inside the sandbox avoids granting xcrun a
+// writable global cache directory.
+func resolvePythonExecutable(candidate string) (string, []string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, candidate, "-I", "-c", "import os,sys; print(os.path.realpath(sys.executable))")
+	probe := `import json, os, sys
+paths = [os.path.realpath(sys.executable)]
+if sys.platform == "darwin":
+    import ctypes
+    size = ctypes.c_uint32()
+    libc = ctypes.CDLL(None)
+    libc._NSGetExecutablePath(None, ctypes.byref(size))
+    value = ctypes.create_string_buffer(size.value)
+    if libc._NSGetExecutablePath(value, ctypes.byref(size)) != 0:
+        raise RuntimeError("_NSGetExecutablePath failed")
+    paths.append(os.path.realpath(os.fsdecode(value.value)))
+print(json.dumps(paths))`
+	cmd := exec.CommandContext(ctx, candidate, "-I", "-c", probe)
 	cmd.Env = []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
 		"LANG=C", "LC_ALL=C", "PYTHONDONTWRITEBYTECODE=1",
 	}
 	output, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	resolved := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(resolved) {
-		return "", fmt.Errorf("interpreter reported non-absolute executable %q", resolved)
+	var reported []string
+	if err := json.Unmarshal(output, &reported); err != nil || len(reported) == 0 {
+		if err == nil {
+			err = fmt.Errorf("interpreter reported no executable")
+		}
+		return "", nil, err
 	}
-	resolved, err = filepath.EvalSymlinks(resolved)
-	if err != nil {
-		return "", err
+	allowed := make([]string, 0, len(reported))
+	seen := make(map[string]struct{}, len(reported))
+	for _, reportedPath := range reported {
+		if !filepath.IsAbs(reportedPath) {
+			return "", nil, fmt.Errorf("interpreter reported non-absolute executable %q", reportedPath)
+		}
+		resolved, resolveErr := filepath.EvalSymlinks(reportedPath)
+		if resolveErr != nil {
+			return "", nil, resolveErr
+		}
+		info, statErr := os.Stat(resolved)
+		if statErr != nil {
+			return "", nil, statErr
+		}
+		if info.IsDir() {
+			return "", nil, fmt.Errorf("interpreter executable is a directory")
+		}
+		if _, ok := seen[resolved]; ok {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		allowed = append(allowed, resolved)
 	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("interpreter executable is a directory")
-	}
-	return resolved, nil
+	return allowed[0], allowed, nil
 }
 
 func discoverGitExecutable() string {
@@ -217,12 +250,52 @@ func (m *Manager) Execute(ctx context.Context, code string) (Result, error) {
 		ID: requestID, Method: "exec", Code: code,
 	}, m.opts.CellTimeout)
 	if err != nil {
+		if errors.Is(err, errWorkerMemoryLimit) {
+			m.executions++
+			m.resourceLimitFailures++
+			generation := m.generation
+			m.stopLocked()
+			return Result{
+				Generation:  generation,
+				KernelReset: true,
+				Error: &ExecutionError{
+					Type: "MemoryLimitExceeded", Message: truncateUTF8Bytes(err.Error(), 1024),
+				},
+			}, nil
+		}
 		m.recordTransportFailureLocked(err)
 		m.stopLocked()
 		return Result{}, err
 	}
 	m.executions++
+	if resp.KernelReset {
+		m.resourceLimitFailures++
+		m.stopLocked()
+	}
 	return resp.Result, nil
+}
+
+// Probe starts the isolated worker and validates its protocol handshake without
+// recording a user execution. It is used by secure-backend detection so the
+// verified worker can become the session worker rather than being discarded.
+func (m *Manager) Probe(ctx context.Context) error {
+	if m == nil {
+		return fmt.Errorf("REPL manager is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return fmt.Errorf("REPL manager is closed")
+	}
+	if err := m.startLocked(ctx); err != nil {
+		m.recordTransportFailureLocked(err)
+		m.stopLocked()
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) recordTransportFailureLocked(err error) {
@@ -268,26 +341,31 @@ func (m *Manager) startLocked(ctx context.Context) error {
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		closeCommandExtraFiles(cmd)
 		lifetimeCancel()
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		closeCommandExtraFiles(cmd)
 		lifetimeCancel()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		_ = stdin.Close()
+		closeCommandExtraFiles(cmd)
 		lifetimeCancel()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
+		closeCommandExtraFiles(cmd)
 		lifetimeCancel()
 		return fmt.Errorf("launch REPL generation %d: %w", m.generation, err)
 	}
+	closeCommandExtraFiles(cmd)
 
 	m.stderr.Reset()
 	m.cmd = cmd
@@ -327,6 +405,18 @@ func (m *Manager) startLocked(ctx context.Context) error {
 		return fmt.Errorf("REPL startup probe failed: %w", err)
 	}
 	return nil
+}
+
+func closeCommandExtraFiles(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	for _, file := range cmd.ExtraFiles {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+	cmd.ExtraFiles = nil
 }
 
 func (m *Manager) prepareRuntimeLocked() error {
@@ -374,6 +464,8 @@ func (m *Manager) roundTripLocked(ctx context.Context, req request, inactivity t
 	}
 
 	callbacks := 0
+	indexCalls := 0
+	indexRefreshes := 0
 	for {
 		read, err := m.readFrameWithInactivity(ctx, inactivity)
 		if err != nil {
@@ -392,13 +484,28 @@ func (m *Manager) roundTripLocked(ctx context.Context, req request, inactivity t
 			if err := validateCallbackEnvelope(envelope.ID, envelope.Method); err != nil {
 				return zero, err
 			}
-			callbacks++
-			if callbacks > m.opts.MaxCallbacks {
-				return zero, fmt.Errorf("REPL cell exceeded %d orchestrator callbacks", m.opts.MaxCallbacks)
+			if envelope.Method == fileIndexCallbackMethod {
+				indexCalls++
+				if indexCalls > m.opts.MaxCallbacks {
+					return zero, fmt.Errorf("REPL cell exceeded %d file index requests", m.opts.MaxCallbacks)
+				}
+			} else {
+				callbacks++
+				if callbacks > m.opts.MaxCallbacks {
+					return zero, fmt.Errorf("REPL cell exceeded %d orchestrator callbacks", m.opts.MaxCallbacks)
+				}
 			}
-			result, callErr := m.invokeCallHandler(ctx, Call{
-				ID: envelope.ID, Method: envelope.Method, Params: envelope.Params,
-			})
+			call := Call{ID: envelope.ID, Method: envelope.Method, Params: envelope.Params}
+			var result any
+			var callErr error
+			if envelope.Method == fileIndexCallbackMethod {
+				result, callErr = m.invokeCallHandler(ctx, call)
+				if callErr == nil {
+					indexRefreshes++
+				}
+			} else {
+				result, callErr = m.invokeCallHandler(ctx, call)
+			}
 			callResponse := map[string]any{
 				"type": "call_result", "id": envelope.ID, "ok": callErr == nil,
 			}
@@ -424,6 +531,10 @@ func (m *Manager) roundTripLocked(ctx context.Context, req request, inactivity t
 		if zero.Generation != m.generation {
 			return response{}, fmt.Errorf("REPL protocol response generation %d does not match active generation %d", zero.Generation, m.generation)
 		}
+		// The parent observed these callbacks directly. Do not accept a worker-
+		// supplied value for eval accounting: overwrite the decoded field even
+		// when the count is zero.
+		zero.FileIndexRefreshes = indexRefreshes
 		return zero, nil
 	}
 }
@@ -477,18 +588,36 @@ func (m *Manager) readFrameWithInactivity(ctx context.Context, inactivity time.D
 		timeout = timer.C
 		defer timer.Stop()
 	}
-	select {
-	case <-ctx.Done():
-		terminateProcessTree(m.cmd)
-		return nil, fmt.Errorf("REPL cell interrupted: %w", ctx.Err())
-	case <-timeout:
-		terminateProcessTree(m.cmd)
-		return nil, fmt.Errorf("REPL cell inactive for %v: %w", inactivity, context.DeadlineExceeded)
-	case read := <-readCh:
-		if read.err != nil {
-			return nil, fmt.Errorf("read REPL response: %w", read.err)
+	var memoryTicker *time.Ticker
+	var memoryCheck <-chan time.Time
+	if residentMemorySupported() && m.opts.MaxMemoryBytes > 0 && m.cmd != nil && m.cmd.Process != nil {
+		memoryTicker = time.NewTicker(25 * time.Millisecond)
+		memoryCheck = memoryTicker.C
+		defer memoryTicker.Stop()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			terminateProcessTree(m.cmd)
+			return nil, fmt.Errorf("REPL cell interrupted: %w", ctx.Err())
+		case <-timeout:
+			terminateProcessTree(m.cmd)
+			return nil, fmt.Errorf("REPL cell inactive for %v: %w", inactivity, context.DeadlineExceeded)
+		case <-memoryCheck:
+			resident, memoryErr := residentMemoryBytes(m.cmd.Process.Pid)
+			if memoryErr == nil && resident > uint64(m.opts.MaxMemoryBytes) {
+				terminateProcessTree(m.cmd)
+				return nil, fmt.Errorf(
+					"%w: observed %d bytes, limit %d bytes",
+					errWorkerMemoryLimit, resident, m.opts.MaxMemoryBytes,
+				)
+			}
+		case read := <-readCh:
+			if read.err != nil {
+				return nil, fmt.Errorf("read REPL response: %w", read.err)
+			}
+			return read.data, nil
 		}
-		return read.data, nil
 	}
 }
 
@@ -508,18 +637,21 @@ func (m *Manager) writeFrameLocked(value any) error {
 }
 
 func (m *Manager) invokeCallHandler(ctx context.Context, call Call) (result any, err error) {
-	m.handlerMu.RLock()
-	handler := m.callHandler
-	m.handlerMu.RUnlock()
-	if handler == nil {
-		return nil, fmt.Errorf("orchestrator callback %q is unavailable", call.Method)
-	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result = nil
 			err = fmt.Errorf("orchestrator callback %q panicked: %v", call.Method, recovered)
 		}
 	}()
+	if call.Method == fileIndexCallbackMethod {
+		return m.buildFileIndex(ctx, call.Params)
+	}
+	m.handlerMu.RLock()
+	handler := m.callHandler
+	m.handlerMu.RUnlock()
+	if handler == nil {
+		return nil, fmt.Errorf("orchestrator callback %q is unavailable", call.Method)
+	}
 	return handler(ctx, call)
 }
 
@@ -642,7 +774,8 @@ func (m *Manager) Stats() Stats {
 		Generation: m.generation, Running: m.cmd != nil,
 		Restarts: restarts, ManualResets: m.manualResets,
 		Executions: m.executions, TransportFailures: m.transportFailures,
-		Timeouts: m.timeouts, LastError: m.lastError, LastFailureAt: m.lastFailureAt,
+		Timeouts: m.timeouts, ResourceLimitFailures: m.resourceLimitFailures,
+		LastError: m.lastError, LastFailureAt: m.lastFailureAt,
 	}
 }
 

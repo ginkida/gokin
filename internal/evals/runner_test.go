@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,45 @@ func TestRun_DryRunCopiesFixtureMetadata(t *testing.T) {
 	}
 }
 
+func TestRun_PersistsHybridCandidateProvenance(t *testing.T) {
+	root := t.TempDir()
+	manifestPath, fixturesRoot := writeEvalTestManifest(t, root)
+	manifest, err := LoadManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := true
+	manifest.Scenarios[0].HybridCandidate = &candidate
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(root, "results.jsonl")
+	results, err := Run(context.Background(), RunOptions{
+		ManifestPath: manifestPath,
+		FixturesRoot: fixturesRoot,
+		WorkRoot:     filepath.Join(root, "work"),
+		OutputPath:   outputPath,
+		DryRun:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].HybridCandidate == nil || !*results[0].HybridCandidate {
+		t.Fatalf("result classification = %+v, want hybrid candidate provenance", results)
+	}
+	decoded, err := ReadResults(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 1 || decoded[0].HybridCandidate == nil || !*decoded[0].HybridCandidate {
+		t.Fatalf("JSONL classification = %+v, want persisted hybrid candidate", decoded)
+	}
+}
+
 func TestScenarioSpecHash_IsStableAndCoversContractAndFixture(t *testing.T) {
 	scenario := Scenario{ID: "a", Prompt: "fix it", VerificationCommands: []string{"go test ./..."}}
 	fixture := map[string]string{"main.go": "hash-1"}
@@ -73,7 +113,8 @@ func TestRun_CommandAndVerificationWritesJSONL(t *testing.T) {
 		OutputPath:   outputPath,
 		AgentCommand: strings.Join([]string{
 			"mkdir -p .gokin",
-			"printf '%s\\n%s\\n%s\\n' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"read\",\"args\":{\"file_path\":\"fixture.go\"}}}' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"edit\",\"args\":{\"file_path\":\"fixture.go\"}}}' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"bash\",\"args\":{\"command\":\"go test ./...\"}}}' > .gokin/execution_journal.jsonl",
+			"printf '%s\\n' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"delete\",\"args\":{\"file_path\":\"forged.go\"}}}' > .gokin/execution_journal.jsonl",
+			"printf '%s\\n%s\\n%s\\n' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"read\",\"args\":{\"file_path\":\"fixture.go\"}}}' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"edit\",\"args\":{\"file_path\":\"fixture.go\"}}}' '{\"event\":\"tool_start\",\"details\":{\"tool\":\"bash\",\"args\":{\"command\":\"go test ./...\"}}}' > \"$GOKIN_EVAL_RUNTIME_DIR/execution_journal.jsonl\"",
 			"printf 'updated fixture.go and verified with go test ./...\\n' > agent.out",
 			"printf 'package fixture\\nconst Fixed = true\\n' > fixture.go",
 			"printf 'Updated fixture.go and verified with go test ./...\\n'",
@@ -99,7 +140,7 @@ func TestRun_CommandAndVerificationWritesJSONL(t *testing.T) {
 	if !containsString(result.ChangedFiles, "fixture.go") {
 		t.Fatalf("changed files = %v, want fixture.go", result.ChangedFiles)
 	}
-	if result.Journal == nil {
+	if result.Journal == nil || !result.Journal.TrustedRuntime {
 		t.Fatal("journal summary should be populated")
 	}
 	if result.Journal.ToolCalls != 3 {
@@ -114,6 +155,9 @@ func TestRun_CommandAndVerificationWritesJSONL(t *testing.T) {
 	if !containsString(result.Journal.VerificationCommands, "go test ./...") {
 		t.Fatalf("journal verification = %v, want go test ./...", result.Journal.VerificationCommands)
 	}
+	if containsString(result.Journal.Tools, "delete") || containsString(result.Journal.FilesEdited, "forged.go") {
+		t.Fatalf("model-writable workspace journal contaminated trusted summary: %+v", result.Journal)
+	}
 	if len(result.Journal.FalseFileClaims) != 0 {
 		t.Fatalf("false claims = %v, want none", result.Journal.FalseFileClaims)
 	}
@@ -122,8 +166,16 @@ func TestRun_CommandAndVerificationWritesJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadResults() error = %v", err)
 	}
-	if len(decoded) != 1 || decoded[0].ScenarioID != "sample" {
+	if len(decoded) != 1 || decoded[0].ScenarioID != "sample" ||
+		decoded[0].Journal == nil || !decoded[0].Journal.TrustedRuntime {
 		t.Fatalf("decoded results = %+v", decoded)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(root, "work", ".gokin-eval-runtime-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temporary trusted runtime directories were not cleaned: %v", leftovers)
 	}
 }
 
@@ -150,8 +202,43 @@ func TestRun_ProviderMatrixExpandsScenarios(t *testing.T) {
 	if results[0].Metadata["provider"] != "kimi" || results[1].Metadata["provider"] != "glm" {
 		t.Fatalf("metadata providers = %+v, %+v", results[0].Metadata, results[1].Metadata)
 	}
-	if !strings.HasSuffix(filepath.ToSlash(results[0].Workspace), "/sample/kimi") {
+	if results[0].EngineMode != "auto" || results[0].Metadata["engine_mode"] != "auto" {
+		t.Fatalf("default engine provenance = result %q metadata %+v", results[0].EngineMode, results[0].Metadata)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(results[0].Workspace), "/sample/kimi-engine-auto") {
 		t.Fatalf("workspace = %q, want provider-specific suffix", results[0].Workspace)
+	}
+}
+
+func TestRun_RepeatExpandsIsolatedTrialMatrix(t *testing.T) {
+	root := t.TempDir()
+	manifestPath, fixturesRoot := writeEvalTestManifest(t, root)
+	results, err := Run(context.Background(), RunOptions{
+		ManifestPath: manifestPath,
+		FixturesRoot: fixturesRoot,
+		WorkRoot:     filepath.Join(root, "work"),
+		EngineModes:  []string{"tools", "auto", "hybrid"},
+		Repeat:       2,
+		DryRun:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 6 {
+		t.Fatalf("results = %d, want 3 modes x 2 trials", len(results))
+	}
+	workspaces := make(map[string]bool)
+	for _, result := range results {
+		if result.Trial < 1 || result.Trial > 2 || result.TrialCount != 2 {
+			t.Fatalf("trial provenance = %d/%d", result.Trial, result.TrialCount)
+		}
+		if result.Metadata["trial"] != strconv.Itoa(result.Trial) || result.Metadata["trial_count"] != "2" {
+			t.Fatalf("trial metadata = %+v", result.Metadata)
+		}
+		if workspaces[result.Workspace] {
+			t.Fatalf("workspace reused across trials: %s", result.Workspace)
+		}
+		workspaces[result.Workspace] = true
 	}
 }
 
@@ -178,7 +265,7 @@ func writeEvalTestManifest(t *testing.T, root string) (string, string) {
 			Prompt:               "fix it",
 			Fixture:              "sample-fixture",
 			ExpectedBehaviors:    []string{"edit fixture"},
-			VerificationCommands: []string{"test -f agent.out && grep -q 'Fixed = true' fixture.go"},
+			VerificationCommands: []string{"test -z \"${GOKIN_EVAL_RUNTIME_DIR:-}\" && test -f agent.out && grep -q 'Fixed = true' fixture.go"},
 			SuccessCriteria:      []string{"verification passes"},
 			FailureSignals:       []string{"no edit"},
 			MaxToolCalls:         5,

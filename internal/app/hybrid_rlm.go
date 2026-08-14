@@ -40,6 +40,13 @@ func (a *App) handleRLMCall(ctx context.Context, call repl.Call) (any, error) {
 }
 
 func (a *App) handleHarnessCall(ctx context.Context, call repl.Call) (any, error) {
+	// Auto mode keeps continual state independent from the analytical worker:
+	// load it only on the first harness callback, never on ordinary REPL cells.
+	if a.deferredHybrid != nil {
+		if _, err := a.deferredHybrid.ensureHarness(ctx); err != nil {
+			return nil, err
+		}
+	}
 	params := make(map[string]any, len(call.Params)+1)
 	for key, value := range call.Params {
 		params[key] = value

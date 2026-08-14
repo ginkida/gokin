@@ -8,6 +8,9 @@ import (
 )
 
 type agentToolCapabilityCeilingKey struct{}
+type toolSchemaCeilingKey struct {
+	executor *Executor
+}
 
 // ContextWithToolCapabilityCeiling binds any executor invocation to an exact
 // set of tool names. A non-nil (including empty) slice means restricted; nil
@@ -27,6 +30,30 @@ func ToolCapabilityCeilingFromContext(ctx context.Context) ([]string, bool) {
 		return nil, false
 	}
 	names, ok := ctx.Value(agentToolCapabilityCeilingKey{}).([]string)
+	if !ok {
+		return nil, false
+	}
+	cloned := make([]string, len(names))
+	copy(cloned, names)
+	return cloned, true
+}
+
+// ContextWithToolSchemaCeiling binds model-visible declarations to an exact
+// request schema without changing executor authority for trusted internal
+// callbacks. Router may narrow this set but must never widen it.
+func ContextWithToolSchemaCeiling(ctx context.Context, executor *Executor, names []string) context.Context {
+	if names == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolSchemaCeilingKey{executor: executor}, normalizeToolNames(names))
+}
+
+// ToolSchemaCeilingFromContext returns the model-visible upper bound.
+func ToolSchemaCeilingFromContext(ctx context.Context, executor *Executor) ([]string, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	names, ok := ctx.Value(toolSchemaCeilingKey{executor: executor}).([]string)
 	if !ok {
 		return nil, false
 	}
@@ -66,6 +93,38 @@ func FilterGeminiToolsByCapability(base []*genai.Tool, ceiling []string) []*gena
 				continue
 			}
 			if toolCapabilityAllows(allowed, declaration.Name) {
+				declarations = append(declarations, declaration)
+			}
+		}
+		if len(declarations) == 0 {
+			continue
+		}
+		cloned := *envelope
+		cloned.FunctionDeclarations = declarations
+		filtered = append(filtered, &cloned)
+	}
+	return filtered
+}
+
+// FilterGeminiToolsExcluding returns a defensive schema copy without the named
+// declarations. It is used for request-level feature policy after broader
+// registry/plan-mode filtering has already selected the base schema.
+func FilterGeminiToolsExcluding(base []*genai.Tool, names ...string) []*genai.Tool {
+	excluded := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		excluded[name] = struct{}{}
+	}
+	filtered := make([]*genai.Tool, 0, len(base))
+	for _, envelope := range base {
+		if envelope == nil {
+			continue
+		}
+		declarations := make([]*genai.FunctionDeclaration, 0, len(envelope.FunctionDeclarations))
+		for _, declaration := range envelope.FunctionDeclarations {
+			if declaration == nil {
+				continue
+			}
+			if _, drop := excluded[declaration.Name]; !drop {
 				declarations = append(declarations, declaration)
 			}
 		}

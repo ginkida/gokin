@@ -263,6 +263,7 @@ type Executor struct {
 	lastOutputTokens        int
 	lastCacheCreationTokens int
 	lastCacheReadTokens     int
+	lastModelTurns          int
 	lastEstimatedCost       float64
 	lastCostTracked         bool
 	lastProvider            string
@@ -852,6 +853,7 @@ func (e *Executor) InvokeTool(ctx context.Context, name string, args map[string]
 	if args == nil {
 		args = make(map[string]any)
 	}
+	ctx = context.WithValue(ctx, internalToolInvocationKey{executor: e}, true)
 	call := &genai.FunctionCall{
 		ID:   fmt.Sprintf("internal-%d", nestedToolCallSeq.Add(1)),
 		Name: name,
@@ -1254,6 +1256,17 @@ func (e *Executor) GetLastCacheMetrics() (int, int) {
 	return creation, read
 }
 
+// GetLastModelTurns returns the number of separately billed provider rounds in
+// the latest Execute call. This makes tool-loop latency visible: a cheap local
+// computation can still be inefficient if the model takes several rounds to
+// construct and repair it.
+func (e *Executor) GetLastModelTurns() int {
+	e.tokenMu.Lock()
+	turns := e.lastModelTurns
+	e.tokenMu.Unlock()
+	return turns
+}
+
 // SetCostCalculator wires per-response pricing for mixed-provider tool loops.
 func (e *Executor) SetCostCalculator(calculator CostCalculator) {
 	e.tokenMu.Lock()
@@ -1316,6 +1329,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	e.lastOutputTokens = 0
 	e.lastCacheCreationTokens = 0
 	e.lastCacheReadTokens = 0
+	e.lastModelTurns = 0
 	e.lastEstimatedCost = 0
 	e.lastCostTracked = false
 	e.lastProvider = ""
@@ -1353,6 +1367,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// iteration may contain dozens of SendFunctionResponse rounds.
 	maxModelTurns := maxIterations
 	modelTurns := 0
+	defer func() {
+		e.tokenMu.Lock()
+		e.lastModelTurns = modelTurns
+		e.tokenMu.Unlock()
+	}()
 
 	var finalText string
 	maxBudgetUSD, budgetEnabled := MaxBudgetUSDFromContext(ctx)
@@ -2848,6 +2867,19 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		)
 	}
 
+	// Enforce the exact schema advertised by this executor for this request.
+	// Models can hallucinate familiar tools that were deliberately omitted by
+	// adaptive/feature policy; omission must remain a runtime denial. Trusted
+	// internal InvokeTool calls bypass only this model-schema boundary and still
+	// pass capability, plan, validation, permission, hook, and audit gates.
+	if ceiling, restricted := ToolSchemaCeilingFromContext(ctx, e); restricted &&
+		!toolCapabilityAllows(ceiling, call.Name) && !isInternalToolInvocation(ctx, e) {
+		return NewPolicyBlockedResult(
+			PolicyBlockPermission,
+			fmt.Sprintf("tool %q was not available in this request's tool schema", call.Name),
+		)
+	}
+
 	// Step 1: Basic tool lookup and validation
 	tool, ok := e.registry.Get(call.Name)
 	if !ok {
@@ -3685,6 +3717,18 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	return result
+}
+
+type internalToolInvocationKey struct {
+	executor *Executor
+}
+
+func isInternalToolInvocation(ctx context.Context, executor *Executor) bool {
+	if ctx == nil {
+		return false
+	}
+	trusted, _ := ctx.Value(internalToolInvocationKey{executor: executor}).(bool)
+	return trusted
 }
 
 func (e *Executor) lookupDuplicateSideEffect(call *genai.FunctionCall) (ToolResult, string, bool) {

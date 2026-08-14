@@ -8,6 +8,7 @@ import (
 
 func TestAgentTypeRegistrySnapshotsAreDeterministicAndDefensive(t *testing.T) {
 	registry := NewAgentTypeRegistry()
+	initialRevision := registry.AgentTypeRevision()
 	input := &DynamicAgentType{
 		Name:         "z-reviewer",
 		Description:  "Reviews changes",
@@ -18,6 +19,9 @@ func TestAgentTypeRegistrySnapshotsAreDeterministicAndDefensive(t *testing.T) {
 	}
 	if err := registry.RegisterDynamic("a-auditor", "Audits changes", []string{"grep"}, "audit"); err != nil {
 		t.Fatal(err)
+	}
+	if got := registry.AgentTypeRevision(); got != initialRevision+2 {
+		t.Fatalf("revision after registrations = %d, want %d", got, initialRevision+2)
 	}
 
 	input.Description = "mutated"
@@ -44,6 +48,35 @@ func TestAgentTypeRegistrySnapshotsAreDeterministicAndDefensive(t *testing.T) {
 		if snapshot[i-1].Name > snapshot[i].Name {
 			t.Fatalf("SnapshotAgentTypes is not deterministic: %v", snapshot)
 		}
+	}
+}
+
+func TestAgentTypeRegistryRevisionChangesOnlyOnSuccessfulMutations(t *testing.T) {
+	registry := NewAgentTypeRegistry()
+	initial := registry.AgentTypeRevision()
+
+	if err := registry.RegisterDynamic("explore", "conflict", nil, "prompt"); err == nil {
+		t.Fatal("built-in override unexpectedly succeeded")
+	}
+	if err := registry.UnregisterDynamic("missing"); err == nil {
+		t.Fatal("missing unregister unexpectedly succeeded")
+	}
+	if got := registry.AgentTypeRevision(); got != initial {
+		t.Fatalf("failed mutations advanced revision from %d to %d", initial, got)
+	}
+
+	if err := registry.RegisterDynamic("reviewer", "Reviews", []string{"read"}, "prompt"); err != nil {
+		t.Fatal(err)
+	}
+	afterRegister := registry.AgentTypeRevision()
+	if afterRegister != initial+1 {
+		t.Fatalf("successful registration revision = %d, want %d", afterRegister, initial+1)
+	}
+	if err := registry.UnregisterDynamic("reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.AgentTypeRevision(); got != afterRegister+1 {
+		t.Fatalf("successful unregister revision = %d, want %d", got, afterRegister+1)
 	}
 }
 

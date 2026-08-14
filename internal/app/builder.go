@@ -106,14 +106,18 @@ type Builder struct {
 	sessionManager *chat.SessionManager
 
 	// MCP (Model Context Protocol)
-	mcpManager        *mcp.Manager
-	mcpConnectSummary string // Deferred UI summary of initial MCP connect results
-	contextAgent      *appcontext.ContextAgent
-	codeIntelProvider codeintel.ReadOnlyProvider
-	replManager       hybridRuntime
-	harnessStore      *harness.Store
-	replDetector      func(context.Context, string) repl.Availability
-	replFactory       func(repl.Options) (hybridRuntime, error)
+	mcpManager             *mcp.Manager
+	mcpConnectSummary      string // Deferred UI summary of initial MCP connect results
+	contextAgent           *appcontext.ContextAgent
+	codeIntelProvider      codeintel.ReadOnlyProvider
+	replManager            hybridRuntime
+	harnessStore           *harness.Store
+	replDetector           func(context.Context, string) repl.Availability
+	replFactory            func(repl.Options) (hybridRuntime, error)
+	replOpener             func(context.Context, repl.Options) (hybridRuntime, repl.Availability)
+	replPreflight          func(string) repl.Availability
+	deferredHybrid         *deferredHybridInit
+	replCapabilityDisabled bool
 
 	// Loops (autonomous recurring tasks, v0.81+). Initialized late in
 	// the build pipeline so the home-dir lookup happens once.
@@ -158,6 +162,13 @@ type BuildOptions struct {
 	// Bare constructs the minimal Read/Edit/Bash runtime without automatic
 	// project instructions, skills, hooks, MCP, memory, or agent discovery.
 	Bare bool
+	// StartupToolCapabilityAllowed/Denied are an early, deny-only view used to
+	// avoid initializing optional runtimes the invocation cannot call. Full
+	// validation and executor authority remain ConfigureToolCapability's job
+	// after late tools (notably MCP) have registered. A non-nil Allowed slice is
+	// exact, including an explicitly empty one.
+	StartupToolCapabilityAllowed []string
+	StartupToolCapabilityDenied  []string
 }
 
 // NewBuilder creates a new Builder with the given config and work directory.
@@ -530,16 +541,51 @@ func (b *Builder) initTools() error {
 	return nil
 }
 
-// initHybridEngine resolves the auto mode before any tool declarations reach
-// the model. DefaultRegistry carries an unwired repl_exec placeholder so eager
-// and lazy registries share one schema; an unavailable runtime is physically
-// unregistered here, making fallback indistinguishable from the legacy tools
-// engine instead of advertising a capability that will fail later.
+// initHybridEngine resolves explicit modes before any tool declarations reach
+// the model. Auto installs a lazy executor: eligible requests may advertise its
+// declaration, but the secure probe and worker start only on the first execute.
+// A conclusive failure makes later schemas hide the retained registry entry.
 func (b *Builder) initHybridEngine() error {
 	if b.registry == nil || b.options.Bare {
 		return nil
 	}
-	mode := strings.ToLower(strings.TrimSpace(b.cfg.Engine.Mode))
+	mode := normalizeRuntimeEngineMode(b.cfg.Engine.Mode)
+	if b.options.StartupToolCapabilityAllowed != nil || b.options.StartupToolCapabilityDenied != nil {
+		replAllowed := startupCapabilityAllowsTool(
+			b.options.StartupToolCapabilityAllowed, b.options.StartupToolCapabilityDenied, "repl_exec")
+		harnessAllowed := startupCapabilityAllowsTool(
+			b.options.StartupToolCapabilityAllowed, b.options.StartupToolCapabilityDenied, "harness")
+		if !harnessAllowed {
+			b.registry.Unregister("harness")
+		}
+		if !replAllowed {
+			b.replCapabilityDisabled = true
+			b.registry.Unregister("repl_exec")
+			// harness is independent of Python. Preserve it only when explicitly
+			// allowed and initialize its store without paying for a worker probe.
+			if harnessAllowed && mode == "hybrid" {
+				store, storeErr := harness.NewStore(b.workDir)
+				if storeErr != nil {
+					b.registry.Unregister("harness")
+					return fmt.Errorf("initialize allowed continual harness: %w", storeErr)
+				}
+				registered, ok := b.registry.Get("harness")
+				if !ok {
+					return fmt.Errorf("allowed harness is not registered")
+				}
+				harnessTool, ok := registered.(*tools.HarnessTool)
+				if !ok {
+					return fmt.Errorf("harness has unexpected implementation %T", registered)
+				}
+				harnessTool.SetStore(store)
+				b.harnessStore = store
+			} else {
+				b.registry.Unregister("harness")
+			}
+			logging.Debug("hybrid REPL startup skipped by process tool capability")
+			return nil
+		}
+	}
 	if mode == "tools" {
 		b.registry.Unregister("repl_exec")
 		b.registry.Unregister("harness")
@@ -551,77 +597,99 @@ func (b *Builder) initHybridEngine() error {
 	if detector == nil {
 		detector = repl.Detect
 	}
-	availability := detector(b.ctx, b.workDir)
-	if !availability.Available {
-		b.registry.Unregister("repl_exec")
-		b.registry.Unregister("harness")
-		if mode == "hybrid" {
-			return fmt.Errorf("engine.mode=hybrid requires a secure REPL runtime: %w", availability.Error())
-		}
-		logging.Debug("hybrid auto mode fell back to structured tools", "reason", availability.Reason)
-		return nil
-	}
-
 	factory := b.replFactory
 	if factory == nil {
 		factory = func(opts repl.Options) (hybridRuntime, error) {
 			return repl.NewManager(opts)
 		}
 	}
-	manager, err := factory(repl.Options{
+	opener := b.replOpener
+	if opener == nil {
+		if b.replDetector == nil && b.replFactory == nil {
+			opener = func(ctx context.Context, opts repl.Options) (hybridRuntime, repl.Availability) {
+				return repl.OpenDetected(ctx, opts)
+			}
+		} else {
+			opener = func(ctx context.Context, opts repl.Options) (hybridRuntime, repl.Availability) {
+				availability := detector(ctx, opts.WorkDir)
+				if !availability.Available {
+					return nil, availability
+				}
+				opts.PythonPath = availability.PythonPath
+				opts.Backend = availability.Backend
+				manager, err := factory(opts)
+				if err != nil {
+					return nil, repl.Availability{Reason: fmt.Sprintf("initialize hybrid runtime: %v", err)}
+				}
+				return manager, availability
+			}
+		}
+	}
+	baseOptions := repl.Options{
 		WorkDir:          b.workDir,
-		PythonPath:       availability.PythonPath,
-		Backend:          availability.Backend,
 		CellTimeout:      b.cfg.Engine.REPL.CellTimeout,
 		MaxCodeBytes:     b.cfg.Engine.REPL.MaxCodeBytes,
 		MaxResponseBytes: b.cfg.Engine.REPL.MaxResponseBytes,
-	})
+		MaxMemoryBytes:   b.cfg.Engine.REPL.MaxMemoryBytes,
+	}
+	if mode == "auto" {
+		registered, ok := b.registry.Get("repl_exec")
+		if !ok {
+			return fmt.Errorf("auto hybrid repl_exec is not registered")
+		}
+		replTool, ok := registered.(*tools.ReplExecTool)
+		if !ok {
+			return fmt.Errorf("repl_exec has unexpected implementation %T", registered)
+		}
+		preflight := b.replPreflight
+		if preflight == nil && b.replDetector == nil && b.replFactory == nil && b.replOpener == nil {
+			preflight = repl.Preflight
+		}
+		if preflight != nil {
+			availability := preflight(b.workDir)
+			if !availability.Available {
+				// Retain the known capability in the registry so an explicit
+				// --tools repl_exec is not misdiagnosed as a typo. The failed lazy
+				// state keeps it out of every schema and guarantees no later probe.
+				b.deferredHybrid = &deferredHybridInit{
+					registry:  b.registry,
+					opener:    opener,
+					opts:      baseOptions,
+					attempted: true,
+					err:       availability.Error(),
+				}
+				replTool.SetManager(b.deferredHybrid)
+				logging.Debug("hybrid auto mode disabled by process-free preflight",
+					"reason", availability.Reason)
+				return nil
+			}
+		}
+		// Keep one stable lazy executor behind the declaration. Classification may
+		// offer repl_exec, but no sandbox/Python process starts unless the model
+		// actually invokes execute.
+		b.deferredHybrid = &deferredHybridInit{
+			registry: b.registry,
+			opener:   opener,
+			opts:     baseOptions,
+		}
+		replTool.SetManager(b.deferredHybrid)
+		logging.Debug("hybrid auto mode worker deferred until first repl_exec execution")
+		return nil
+	}
+
+	components, err := initializeHybridComponents(
+		b.ctx, b.registry, opener, baseOptions, true)
 	if err != nil {
 		b.registry.Unregister("repl_exec")
 		b.registry.Unregister("harness")
-		if mode == "hybrid" {
-			return fmt.Errorf("initialize required hybrid runtime: %w", err)
-		}
-		logging.Debug("hybrid auto mode initialization failed; using structured tools", "error", err)
-		return nil
+		return fmt.Errorf("engine.mode=hybrid requires a secure REPL runtime: %w", err)
 	}
-	registered, ok := b.registry.Get("repl_exec")
-	if !ok {
-		_ = manager.Close()
-		return fmt.Errorf("hybrid runtime initialized but repl_exec is not registered")
-	}
-	tool, ok := registered.(*tools.ReplExecTool)
-	if !ok {
-		_ = manager.Close()
-		return fmt.Errorf("repl_exec has unexpected implementation %T", registered)
-	}
-	tool.SetManager(manager)
-	store, err := harness.NewStore(b.workDir)
-	if err != nil {
-		_ = manager.Close()
-		b.registry.Unregister("repl_exec")
-		b.registry.Unregister("harness")
-		if mode == "hybrid" {
-			return fmt.Errorf("initialize required continual harness: %w", err)
-		}
-		logging.Debug("hybrid auto mode harness initialization failed; using structured tools", "error", err)
-		return nil
-	}
-	registeredHarness, ok := b.registry.Get("harness")
-	if !ok {
-		_ = manager.Close()
-		return fmt.Errorf("hybrid runtime initialized but harness is not registered")
-	}
-	harnessTool, ok := registeredHarness.(*tools.HarnessTool)
-	if !ok {
-		_ = manager.Close()
-		return fmt.Errorf("harness has unexpected implementation %T", registeredHarness)
-	}
-	harnessTool.SetStore(store)
-	b.replManager = manager
-	b.harnessStore = store
+	components.publish()
+	b.replManager = components.manager
+	b.harnessStore = components.store
 	logging.Info("hybrid engine enabled",
-		"mode", mode, "backend", availability.Backend, "python", availability.PythonPath)
+		"mode", mode, "backend", components.availability.Backend,
+		"python", components.availability.PythonPath)
 	return nil
 }
 
@@ -684,16 +752,20 @@ func (b *Builder) selectToolSets() []*genai.Tool {
 	// For Ollama models, use a reduced tool set
 	if b.cfg.API.Backend == "ollama" {
 		sets := []tools.ToolSet{tools.ToolSetOllamaCore}
+		if strings.EqualFold(strings.TrimSpace(b.cfg.Engine.Mode), "hybrid") {
+			sets = append(sets, tools.ToolSetHybrid, tools.ToolSetHarness)
+		}
 
 		// Add git tools if we're in a git repository
 		if b.isInGitRepo() {
 			sets = append(sets, tools.ToolSetGit)
 		}
 
+		schema := b.registry.FilteredGeminiTools(sets...)
 		logging.Debug("ollama tool filtering",
 			"sets", fmt.Sprintf("%v", sets),
-			"total_tools", len(b.registry.FilteredDeclarations(sets...)))
-		return b.registry.FilteredGeminiTools(sets...)
+			"total_tools", toolSchemaDeclarationCount(schema))
+		return schema
 	}
 
 	// For cloud models: base tool sets
@@ -712,11 +784,25 @@ func (b *Builder) selectToolSets() []*genai.Tool {
 	// Include remaining sets as fallback for non-routed code paths
 	sets = append(sets, tools.ToolSetPlanning, tools.ToolSetAgent,
 		tools.ToolSetAdvanced, tools.ToolSetMemory)
+	if strings.EqualFold(strings.TrimSpace(b.cfg.Engine.Mode), "hybrid") {
+		sets = append(sets, tools.ToolSetHybrid, tools.ToolSetHarness)
+	}
 
+	schema := b.registry.FilteredGeminiTools(sets...)
 	logging.Debug("tool filtering",
 		"sets", fmt.Sprintf("%v", sets),
-		"total_tools", len(b.registry.FilteredDeclarations(sets...)))
-	return b.registry.FilteredGeminiTools(sets...)
+		"total_tools", toolSchemaDeclarationCount(schema))
+	return schema
+}
+
+func toolSchemaDeclarationCount(schema []*genai.Tool) int {
+	total := 0
+	for _, envelope := range schema {
+		if envelope != nil {
+			total += len(envelope.FunctionDeclarations)
+		}
+	}
+	return total
 }
 
 // isInGitRepo checks if the working directory is inside a git repository.
@@ -1183,6 +1269,7 @@ func (b *Builder) initManagers() error {
 		DecomposeThreshold: 4,
 		ParallelThreshold:  7,
 		ModelCapability:    b.modelCapability,
+		EngineMode:         b.cfg.Engine.Mode,
 	}
 	b.taskRouter = router.NewRouter(routerCfg, b.executor, b.agentRunner, b.mainClient, b.registry, b.isInGitRepo(), b.workDir)
 	b.taskRouter.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive per-request thinking
@@ -2164,6 +2251,10 @@ func (b *Builder) initUI() error {
 // wireDependencies sets up callbacks and inter-component connections.
 func (b *Builder) wireDependencies() error {
 	app := b.assembleApp()
+	if app.deferredHybrid != nil {
+		app.deferredHybrid.SetCallHandler(app.handleRLMCall)
+		app.deferredHybrid.SetPromptChangedCallback(app.refreshSystemInstruction)
+	}
 	if app.replManager != nil {
 		app.replManager.SetCallHandler(app.handleRLMCall)
 	}
@@ -2723,48 +2814,50 @@ func (b *Builder) assembleApp() *App {
 	}
 
 	b.cachedApp = &App{
-		config:                b.cfg,
-		workDir:               b.workDir,
-		client:                b.mainClient,
-		registry:              b.registry,
-		executor:              b.executor,
-		session:               b.session,
-		tui:                   b.tuiModel,
-		ctx:                   b.ctx,
-		cancel:                b.cancel, // Use the saved cancel function
-		projectInfo:           b.projectInfo,
-		contextManager:        b.contextManager,
-		promptBuilder:         b.promptBuilder,
-		contextAgent:          b.contextAgent,
-		permManager:           b.permManager,
-		permPending:           make(map[string]chan permission.Decision),
-		questionPending:       make(map[string]chan string),
-		diffResponseChan:      make(chan ui.DiffDecision, 1),
-		multiDiffResponseChan: make(chan map[string]ui.DiffDecision, 1),
-		diffPending:           make(map[string]chan ui.DiffDecision),
-		multiDiffPending:      make(map[string]chan map[string]ui.DiffDecision),
-		planManager:           b.planManager,
-		planPending:           make(map[string]chan planApprovalResponse),
-		hooksManager:          b.hooksManager,
-		taskManager:           b.taskManager,
-		undoManager:           b.undoManager,
-		agentRunner:           b.agentRunner,
-		commandHandler:        b.commandHandler,
-		sessionManager:        b.sessionManager,
-		searchCache:           b.searchCache,
-		rateLimiter:           b.rateLimiter,
-		auditLogger:           b.auditLogger,
-		toolUsage:             toolusage.NewLedger(filepath.Join(b.configDir, "tool_usage.json")),
-		fileWatcher:           b.fileWatcher,
-		codeIntelProvider:     b.codeIntelProvider,
-		replManager:           b.replManager,
-		harnessStore:          b.harnessStore,
-		taskRouter:            b.taskRouter,
-		orchestrator:          b.taskOrchestrator,
-		reliability:           NewReliabilityManager(),
-		policy:                NewPolicyEngine(),
-		phaseMetrics:          NewPhaseMetrics(),
-		toolMetrics:           NewToolMetrics(),
+		config:                        b.cfg,
+		workDir:                       b.workDir,
+		client:                        b.mainClient,
+		registry:                      b.registry,
+		executor:                      b.executor,
+		session:                       b.session,
+		tui:                           b.tuiModel,
+		ctx:                           b.ctx,
+		cancel:                        b.cancel, // Use the saved cancel function
+		projectInfo:                   b.projectInfo,
+		contextManager:                b.contextManager,
+		promptBuilder:                 b.promptBuilder,
+		contextAgent:                  b.contextAgent,
+		permManager:                   b.permManager,
+		permPending:                   make(map[string]chan permission.Decision),
+		questionPending:               make(map[string]chan string),
+		diffResponseChan:              make(chan ui.DiffDecision, 1),
+		multiDiffResponseChan:         make(chan map[string]ui.DiffDecision, 1),
+		diffPending:                   make(map[string]chan ui.DiffDecision),
+		multiDiffPending:              make(map[string]chan map[string]ui.DiffDecision),
+		planManager:                   b.planManager,
+		planPending:                   make(map[string]chan planApprovalResponse),
+		hooksManager:                  b.hooksManager,
+		taskManager:                   b.taskManager,
+		undoManager:                   b.undoManager,
+		agentRunner:                   b.agentRunner,
+		commandHandler:                b.commandHandler,
+		sessionManager:                b.sessionManager,
+		searchCache:                   b.searchCache,
+		rateLimiter:                   b.rateLimiter,
+		auditLogger:                   b.auditLogger,
+		toolUsage:                     toolusage.NewLedger(filepath.Join(b.configDir, "tool_usage.json")),
+		fileWatcher:                   b.fileWatcher,
+		codeIntelProvider:             b.codeIntelProvider,
+		replManager:                   b.replManager,
+		harnessStore:                  b.harnessStore,
+		deferredHybrid:                b.deferredHybrid,
+		runtimeREPLCapabilityDisabled: b.replCapabilityDisabled,
+		taskRouter:                    b.taskRouter,
+		orchestrator:                  b.taskOrchestrator,
+		reliability:                   NewReliabilityManager(),
+		policy:                        NewPolicyEngine(),
+		phaseMetrics:                  NewPhaseMetrics(),
+		toolMetrics:                   NewToolMetrics(),
 		// Phase 5: Agent System Improvements
 		coordinator:       b.coordinator,
 		agentTypeRegistry: b.agentTypeRegistry,
@@ -2793,6 +2886,7 @@ func (b *Builder) assembleApp() *App {
 		// Step rollback snapshots
 		stepRollbackSnapshots: make(map[string]*stepRollbackSnapshot),
 	}
+	b.cachedApp.runtimeEngineMode.Store(encodeRuntimeEngineMode(b.cfg.Engine.Mode))
 	b.cachedApp.memoryAutoInject.Store(
 		b.memStore != nil && b.cfg.Memory.Enabled && b.cfg.Memory.AutoInject,
 	)
@@ -2808,7 +2902,8 @@ func (b *Builder) assembleApp() *App {
 	}
 
 	if !b.cfg.Bare {
-		if j, err := NewExecutionJournal(b.workDir); err == nil {
+		j, err := newExecutionJournalForWorkDir(b.workDir)
+		if err == nil {
 			b.cachedApp.journal = j
 		} else {
 			logging.Warn("failed to initialize execution journal", "error", err)

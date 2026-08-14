@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -113,11 +115,14 @@ func (fm skillFrontmatter) unsupportedExecutionField() string {
 // Catalog discovers skills and atomically swaps validated snapshots, so a
 // model call can reload files without racing concurrent declaration/list calls.
 type Catalog struct {
-	mu       sync.RWMutex
-	reloadMu sync.Mutex
-	roots    []Root
-	skills   map[string]Skill
-	warnings []string
+	mu               sync.RWMutex
+	reloadMu         sync.Mutex
+	roots            []Root
+	skills           map[string]Skill
+	warnings         []string
+	metadata         [sha256.Size]byte
+	metadataIsStable bool
+	revision         uint64
 }
 
 // NewCatalog creates and initially loads a catalog.
@@ -159,6 +164,32 @@ func DefaultRoots(workDir string) []Root {
 func (c *Catalog) Reload() []string {
 	c.reloadMu.Lock()
 	defer c.reloadMu.Unlock()
+	return c.reloadLocked()
+}
+
+// ReloadIfChanged avoids reparsing every bounded SKILL.md body when request
+// schema is rebuilt but the discovery tree is unchanged. The fast fingerprint
+// covers roots, bounded directory entries, and SKILL.md type/size/nanosecond
+// mtime. Reload remains the authoritative path before an actual invocation, so
+// even a filesystem that permits an in-place same-size, same-mtime rewrite
+// cannot cause stale instructions to be executed.
+func (c *Catalog) ReloadIfChanged() []string {
+	c.reloadMu.Lock()
+	defer c.reloadMu.Unlock()
+
+	metadata := c.metadataFingerprint()
+	c.mu.RLock()
+	unchanged := c.metadataIsStable && metadata == c.metadata
+	warnings := append([]string(nil), c.warnings...)
+	c.mu.RUnlock()
+	if unchanged {
+		return warnings
+	}
+	return c.reloadLocked()
+}
+
+func (c *Catalog) reloadLocked() []string {
+	metadataBefore := c.metadataFingerprint()
 
 	next := make(map[string]Skill)
 	claimed := make(map[string]bool)
@@ -248,11 +279,122 @@ func (c *Catalog) Reload() []string {
 		}
 	}
 
+	metadataAfter := c.metadataFingerprint()
 	c.mu.Lock()
 	c.skills = next
 	c.warnings = append([]string(nil), warnings...)
+	c.metadata = metadataAfter
+	c.metadataIsStable = metadataBefore == metadataAfter
+	c.revision++
 	c.mu.Unlock()
 	return warnings
+}
+
+// Revision identifies the last atomically published full catalog snapshot.
+// It changes even when a forced Reload produces equal content; callers may use
+// it only as a cache coherency token, never as durable project state.
+func (c *Catalog) Revision() uint64 {
+	c.mu.RLock()
+	revision := c.revision
+	c.mu.RUnlock()
+	return revision
+}
+
+// metadataFingerprint is deliberately cheaper than Reload: it never opens or
+// parses SKILL.md contents. Directory mtimes cover entry creation/removal;
+// per-file metadata covers normal edits and atomic replacements. Every scan is
+// bounded by the same entry limit as Reload and uses os.Root containment.
+func (c *Catalog) metadataFingerprint() [sha256.Size]byte {
+	// Build one bounded byte stream and hash it once. Writing every tiny field
+	// through hash.Hash/io.WriteString made otherwise cheap metadata scans
+	// allocate for each string and integer.
+	var inline [4096]byte
+	metadata := inline[:0]
+	for _, root := range c.roots {
+		root.Path = filepath.Clean(strings.TrimSpace(root.Path))
+		metadata = appendFingerprintString(metadata, root.Path)
+		metadata = appendFingerprintString(metadata, root.Source)
+		metadata = appendFingerprintString(metadata, root.Boundary)
+		if root.Path == "." {
+			metadata = appendFingerprintString(metadata, "invalid-root")
+			continue
+		}
+		rootInfo, rootStatErr := os.Lstat(root.Path)
+		metadata = appendFingerprintFileInfo(metadata, rootInfo, rootStatErr)
+		if rootStatErr != nil {
+			// The root path is already part of the fingerprint. Retrying the same
+			// absent/inaccessible path through os.Root only duplicates syscalls;
+			// creation or permission repair changes the next Lstat result.
+			continue
+		}
+
+		secureRoot, err := openSkillRoot(root)
+		if err != nil {
+			metadata = appendFingerprintError(metadata, err)
+			continue
+		}
+		dir, err := secureRoot.Open(".")
+		if err != nil {
+			metadata = appendFingerprintError(metadata, err)
+			secureRoot.Close()
+			continue
+		}
+		entries, readErr := dir.ReadDir(MaxSkillScanEntries + 1)
+		dir.Close()
+		if readErr != nil && readErr != io.EOF {
+			metadata = appendFingerprintError(metadata, readErr)
+		}
+		if len(entries) > MaxSkillScanEntries {
+			entries = entries[:MaxSkillScanEntries]
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, entry := range entries {
+			metadata = appendFingerprintString(metadata, entry.Name())
+			metadata = appendFingerprintUint64(metadata, uint64(entry.Type()))
+			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			info, statErr := secureRoot.Lstat(filepath.Join(entry.Name(), "SKILL.md"))
+			metadata = appendFingerprintFileInfo(metadata, info, statErr)
+		}
+		secureRoot.Close()
+	}
+	return sha256.Sum256(metadata)
+}
+
+func appendFingerprintFileInfo(metadata []byte, info os.FileInfo, err error) []byte {
+	if err != nil {
+		return appendFingerprintError(metadata, err)
+	}
+	metadata = appendFingerprintString(metadata, "ok")
+	metadata = appendFingerprintUint64(metadata, uint64(info.Mode()))
+	metadata = appendFingerprintUint64(metadata, uint64(info.Size()))
+	return appendFingerprintUint64(metadata, uint64(info.ModTime().UnixNano()))
+}
+
+func appendFingerprintError(metadata []byte, err error) []byte {
+	metadata = appendFingerprintString(metadata, "error")
+	switch {
+	case err == nil:
+		return metadata
+	case os.IsNotExist(err):
+		return appendFingerprintString(metadata, "not-exist")
+	case os.IsPermission(err):
+		return appendFingerprintString(metadata, "permission")
+	default:
+		return appendFingerprintString(metadata, err.Error())
+	}
+}
+
+func appendFingerprintString(metadata []byte, value string) []byte {
+	metadata = appendFingerprintUint64(metadata, uint64(len(value)))
+	return append(metadata, value...)
+}
+
+func appendFingerprintUint64(metadata []byte, value uint64) []byte {
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], value)
+	return append(metadata, encoded[:]...)
 }
 
 func openSkillRoot(root Root) (*os.Root, error) {

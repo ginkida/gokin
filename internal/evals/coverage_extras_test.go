@@ -22,6 +22,15 @@ func TestHasBehavioralAssertion(t *testing.T) {
 	if !s.HasBehavioralAssertion() {
 		t.Fatal("FileMustNotChange should count")
 	}
+	s = Scenario{WorkspaceMustRemainUnchanged: true}
+	if !s.HasBehavioralAssertion() {
+		t.Fatal("WorkspaceMustRemainUnchanged should count")
+	}
+	candidate := false
+	s = Scenario{HybridCandidate: &candidate}
+	if !s.HasBehavioralAssertion() {
+		t.Fatal("HybridCandidate should count even when explicitly false")
+	}
 }
 
 func TestHasPositiveBehavioralAssertion(t *testing.T) {
@@ -31,6 +40,15 @@ func TestHasPositiveBehavioralAssertion(t *testing.T) {
 	s := Scenario{FileMustNotChange: []string{"y.go"}}
 	if s.HasPositiveBehavioralAssertion() {
 		t.Fatal("FileMustNotChange alone is not positive")
+	}
+	s = Scenario{WorkspaceMustRemainUnchanged: true}
+	if s.HasPositiveBehavioralAssertion() {
+		t.Fatal("WorkspaceMustRemainUnchanged alone is not positive")
+	}
+	candidate := true
+	s = Scenario{HybridCandidate: &candidate}
+	if s.HasPositiveBehavioralAssertion() {
+		t.Fatal("HybridCandidate alone is not a positive task-completion assertion")
 	}
 	s = Scenario{FileMustChange: []string{"x.go"}}
 	if !s.HasPositiveBehavioralAssertion() {
@@ -314,6 +332,8 @@ func TestRecommendationForMetric_AllBranches(t *testing.T) {
 		"answer_contains_required",
 		"required_files_changed",
 		"protected_files_unchanged",
+		"workspace_unchanged",
+		"hybrid_policy_expected",
 		"custom_unknown_metric",
 	}
 	for _, name := range metricNames {

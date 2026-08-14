@@ -24,9 +24,10 @@ type DynamicAgentType struct {
 
 // AgentTypeRegistry manages both built-in and dynamic agent types.
 type AgentTypeRegistry struct {
-	builtin map[AgentType]bool
-	dynamic map[string]*DynamicAgentType
-	mu      sync.RWMutex
+	builtin  map[AgentType]bool
+	dynamic  map[string]*DynamicAgentType
+	revision uint64
+	mu       sync.RWMutex
 }
 
 // NewAgentTypeRegistry creates a new registry with built-in types.
@@ -39,7 +40,8 @@ func NewAgentTypeRegistry() *AgentTypeRegistry {
 			AgentTypePlan:    true,
 			AgentTypeGuide:   true,
 		},
-		dynamic: make(map[string]*DynamicAgentType),
+		dynamic:  make(map[string]*DynamicAgentType),
+		revision: 1,
 	}
 }
 
@@ -60,6 +62,7 @@ func (r *AgentTypeRegistry) RegisterDynamic(name, description string, tools []st
 		SystemPrompt: prompt,
 		Source:       "runtime",
 	}
+	r.revision++
 
 	return nil
 }
@@ -76,6 +79,7 @@ func (r *AgentTypeRegistry) RegisterDynamicType(dt *DynamicAgentType) error {
 		return fmt.Errorf("cannot override built-in agent type: %s", dt.Name)
 	}
 	r.dynamic[dt.Name] = cloneDynamicAgentType(dt)
+	r.revision++
 	return nil
 }
 
@@ -89,7 +93,16 @@ func (r *AgentTypeRegistry) UnregisterDynamic(name string) error {
 	}
 
 	delete(r.dynamic, name)
+	r.revision++
 	return nil
+}
+
+// AgentTypeRevision is a cache coherency token for TaskTool declarations.
+func (r *AgentTypeRegistry) AgentTypeRevision() uint64 {
+	r.mu.RLock()
+	revision := r.revision
+	r.mu.RUnlock()
+	return revision
 }
 
 // GetDynamic returns a dynamic agent type by name.

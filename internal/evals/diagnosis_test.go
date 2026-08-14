@@ -90,6 +90,64 @@ func TestDiagnoseReport_AllPassingRecommendsBaseline(t *testing.T) {
 	}
 }
 
+func TestDiagnoseReport_DetectsCrossCancellingHybridExposureErrors(t *testing.T) {
+	report := BuildReport("results.jsonl", []Result{
+		{ScenarioID: "gap", EngineMode: "auto", Status: "passed", Journal: &JournalSummary{TrustedRuntime: true,
+			HybridPolicy: &HybridPolicySummary{Mode: "auto", REPLEligible: true, REPLEnabled: false},
+		}},
+		{ScenarioID: "leak", EngineMode: "auto", Status: "passed", Journal: &JournalSummary{TrustedRuntime: true,
+			HybridPolicy: &HybridPolicySummary{Mode: "auto", REPLEligible: false, REPLEnabled: true},
+		}},
+	})
+	diagnosis := DiagnoseReport(report, nil)
+	for _, rec := range diagnosis.Recommendations {
+		if rec.Area == "hybrid-exposure" {
+			if !strings.Contains(rec.Reason, "1 availability gap") || !strings.Contains(rec.Reason, "1 unexpected exposure") {
+				t.Fatalf("recommendation = %+v", rec)
+			}
+			return
+		}
+	}
+	t.Fatalf("recommendations = %+v, want hybrid-exposure", diagnosis.Recommendations)
+}
+
+func TestDiagnoseReport_DetectsHybridPolicyModeMismatch(t *testing.T) {
+	report := BuildReport("results.jsonl", []Result{{
+		ScenarioID: "wrong-mode", EngineMode: "auto", Status: "passed",
+		Journal: &JournalSummary{TrustedRuntime: true, HybridPolicy: &HybridPolicySummary{Mode: "tools"}},
+	}})
+	diagnosis := DiagnoseReport(report, nil)
+	for _, rec := range diagnosis.Recommendations {
+		if rec.Area == "hybrid-policy-provenance" {
+			if !strings.Contains(rec.Reason, "1 hybrid policy event") || !strings.Contains(rec.Action, "GOKIN_ENGINE_MODE") {
+				t.Fatalf("recommendation = %+v", rec)
+			}
+			return
+		}
+	}
+	t.Fatalf("recommendations = %+v, want hybrid-policy-provenance", diagnosis.Recommendations)
+}
+
+func TestDiagnoseReport_ExplainsHybridEfficientPathFailure(t *testing.T) {
+	report := BuildReport("results.jsonl", []Result{{
+		ScenarioID: "redundant-scan", EngineMode: "auto", Status: "failed",
+		Metrics: map[string]bool{"hybrid_efficient_path": false},
+		Score:   ScoreSummary{Total: 1},
+	}})
+	diagnosis := DiagnoseReport(report, nil)
+	for _, rec := range diagnosis.Recommendations {
+		if rec.Area == "hybrid-efficiency" {
+			for _, want := range []string{"scan ops", "index refreshes", "repl_exec"} {
+				if !strings.Contains(rec.Action, want) {
+					t.Fatalf("recommendation action = %q, want %q", rec.Action, want)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("recommendations = %+v, want hybrid-efficiency", diagnosis.Recommendations)
+}
+
 func TestDiagnoseReport_DryRunIsNotDiagnosedAsPassingEvidence(t *testing.T) {
 	report := BuildReport("results.jsonl", []Result{{ScenarioID: "a", Status: "dry_run"}})
 	diagnosis := DiagnoseReport(report, nil)

@@ -118,6 +118,9 @@ func TestExecutorExecuteLoop_MaxTokensTextChunksAreCarried(t *testing.T) {
 	if output != 33 {
 		t.Fatalf("output tokens = %d, want accumulated 33", output)
 	}
+	if turns := exec.GetLastModelTurns(); turns != 3 {
+		t.Fatalf("model turns = %d, want 3", turns)
+	}
 }
 
 func TestExecutorExecuteLoop_AggregatesCacheUsageAcrossRounds(t *testing.T) {

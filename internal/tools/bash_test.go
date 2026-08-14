@@ -212,6 +212,15 @@ func TestSafeEnvVars_Len(t *testing.T) {
 	}
 }
 
+func TestBuildSafeEnvDoesNotExposeEvalRuntimeDirectory(t *testing.T) {
+	t.Setenv("GOKIN_EVAL_RUNTIME_DIR", "/trusted/eval/runtime")
+	for _, entry := range buildSafeEnv() {
+		if strings.HasPrefix(entry, "GOKIN_EVAL_RUNTIME_DIR=") {
+			t.Fatalf("model-visible bash environment exposed trusted journal path: %q", entry)
+		}
+	}
+}
+
 // ============================================================
 // DefaultBashTimeout Tests
 // ============================================================

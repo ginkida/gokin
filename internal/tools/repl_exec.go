@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -47,27 +49,32 @@ func (t *ReplExecTool) Name() string { return "repl_exec" }
 // one suits the question. The signatures below are pinned by a test that
 // executes each one, so this text cannot drift from the runtime.
 func (t *ReplExecTool) Description() string {
-	return `Persistent workspace-read-only Python session for multi-step codebase analysis. State survives across execute calls.
+	return `Persistent read-only Python for multi-file counts/ranks/joins; globals survive. Prefer ONE cell returning conclusions plus compact evidence. Use grep/read/bash for targeted matches; each execute costs a model round.
 
-Best for questions ANSWERED BY AGGREGATION over many files (counts, rankings, cross-file joins): return the conclusion instead of pulling every match into the transcript. For "show me the matches", grep is simpler.
-
-context.workspace -> str (property, not a call)
-context.search_code(query, path=".", limit=50, case_sensitive=False)
-    -> {"matches": [{"path","line","text"}], "scanned_files": int, "truncated": bool}
-context.list_files(path=".", pattern=None)
-    -> {"files": [{"path","size"}], "scanned_files": int, "truncated": bool}
-    pattern is fnmatch over the workspace-relative path ("*.go", "internal/*").
+context.workspace -> str property (not a call)
+context.search_code(query, path=".", limit=50, case_sensitive=False, regex=False)
+    -> {"matches":[{"path","line","text"}],"scanned_files","searched_files","skipped_files","truncated"}; literal by default.
+context.count_code(query, path=".", case_sensitive=False, regex=False, group_by=None, sample_limit=0)
+    -> {"matching_lines","matching_files","groups", shared scan metadata, optional "samples"/"samples_truncated"}
+    Exact count; group_by: None|"file"|"top_dir"|"extension"; sample_limit adds evidence.
+context.count_code_many(queries, path=".", case_sensitive=False, regex=False, group_by=None, sample_limit=0)
+    -> {"counts": [{"query","matching_lines","matching_files","groups", optional samples}], shared scan metadata}
+    Counts bounded queries in ONE inventory/read pass; prefer for comparisons.
+context.list_files(path=".", pattern=None) -> {"files":[{"path","size"}],"scanned_files","truncated"}
+context.file_stats(path=".", pattern=None, exclude_pattern=None, group_by=None)
+    -> {"matching_files","total_bytes","groups":{key:{"files","bytes"}},"scanned_files","truncated"}; group_by: "extension" or "top_dir". Prefer for totals.
+    Patterns are workspace-relative fnmatch. Scans honor Git ignores; file_stats streams, other scans share one scope snapshot/cell.
 context.read_slice(path, start_line=1, end_line=200)
     -> {"path", "start_line", "end_line", "lines": [{"line","text"}]}
-context.git_status() -> str ; context.git_diff(staged=False) -> str
-context.artifact_get(id, offset=0, limit=...) -> {"id","offset","size","content","has_more"}
-context.runtime_limits() -> dict
+context.artifact_get(id, offset=0, limit=...) -> {"id","offset","next_offset","size","content","has_more"}
+    UTF-8 byte offsets; continue with next_offset.
+context.runtime_limits() -> dict of memory/output/file/search/read bounds
 
 rlm(instruction, dynamic_context=None, *, agent_type="general", max_turns=20, model="") -> dict
 rlm.async_call(...) -> future with .result(timeout=600), .poll(), .cancel()
-rlm.harness: create_prompt/update_prompt/list_prompts/delete_prompt, put_memory/get_memory/list_memory/delete_memory, create_skill/list_skills/delete_skill
+rlm.harness (loaded on first use when available): create_prompt/update_prompt/list_prompts/delete_prompt, put_memory/get_memory/list_memory/delete_memory, create_skill/list_skills/delete_skill
 
-The final expression is returned like an interactive REPL. Direct writes, subprocesses, sockets and native libraries are blocked; use structured tools for external actions.`
+Final expression returns; large channels become artifacts. Imports allow analytical stdlib only (JSON/regex/math/stats/collections/CSV/date/hash/encoding). Directory enumeration, direct open, reflection, dynamic code, writes, processes, threads, sockets, native libraries, and Git are blocked; use bounded context APIs and git_status/git_diff for external actions.`
 }
 
 func (t *ReplExecTool) Declaration() *genai.FunctionDeclaration {
@@ -83,7 +90,7 @@ func (t *ReplExecTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"code": {
 					Type:        genai.TypeString,
-					Description: "Python code to execute. The final expression is returned like an interactive REPL. Keep large intermediate data in variables or artifacts instead of printing it.",
+					Description: "Python code to execute. Prefer one complete scan/filter/aggregate cell because every additional call costs another model round. The final expression is returned like an interactive REPL; keep large intermediates in variables or artifacts.",
 				},
 			},
 		},
@@ -132,7 +139,12 @@ func (t *ReplExecTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 	if err != nil {
 		stats := manager.Stats()
 		failure := NewErrorResult("stateful REPL execution failed: " + err.Error())
-		failure.Content = formatREPLStats(stats) + "\nThe failed kernel was discarded; retrying code starts a clean generation."
+		if errors.Is(err, repl.ErrUnavailable) {
+			failure.Content = formatREPLStats(stats) +
+				"\nSecure REPL initialization failed; continue this session with structured read/search tools."
+		} else {
+			failure.Content = formatREPLStats(stats) + "\nThe failed kernel was discarded; retrying code starts a clean generation."
+		}
 		failure.Data = stats
 		return failure, nil
 	}
@@ -142,9 +154,19 @@ func (t *ReplExecTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 		if result.Error.Traceback != "" {
 			failure += "\n" + result.Error.Traceback
 		}
-		return ToolResult{Success: false, Error: failure, Content: content}, nil
+		return ToolResult{Success: false, Error: failure, Content: content, Data: replResultMetadata(result)}, nil
 	}
-	return NewSuccessResultWithData(content, result), nil
+	return NewSuccessResultWithData(content, replResultMetadata(result)), nil
+}
+
+// replResultMetadata avoids serializing stdout/stderr/value twice: Content is
+// already the model-visible representation, while Data only needs generation,
+// overflow handles, and bounded runtime telemetry for structured consumers.
+func replResultMetadata(result repl.Result) repl.Result {
+	result.Stdout = ""
+	result.Stderr = ""
+	result.Value = ""
+	return result
 }
 
 func formatREPLStats(stats repl.Stats) string {
@@ -153,12 +175,12 @@ func formatREPLStats(stats repl.Stats) string {
 		status = "running"
 	}
 	result := fmt.Sprintf(
-		"kernel %s; generation=%d restarts=%d manual_resets=%d executions=%d transport_failures=%d timeouts=%d",
+		"kernel %s; generation=%d restarts=%d manual_resets=%d executions=%d transport_failures=%d timeouts=%d resource_limit_failures=%d",
 		status, stats.Generation, stats.Restarts, stats.ManualResets,
-		stats.Executions, stats.TransportFailures, stats.Timeouts,
+		stats.Executions, stats.TransportFailures, stats.Timeouts, stats.ResourceLimitFailures,
 	)
 	if stats.LastError != "" {
-		result += "\nlast transport failure: " + stats.LastError
+		result += "\nlast runtime failure: " + stats.LastError
 	}
 	return result
 }
@@ -166,6 +188,27 @@ func formatREPLStats(stats repl.Stats) string {
 func formatREPLResult(result repl.Result) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "kernel generation: %d", result.Generation)
+	// Put recovery handles ahead of inline payloads. ToolResult has a final
+	// global output cap, so metadata must remain visible even if a malformed or
+	// legacy worker returns more inline text than the current worker permits.
+	if len(result.Artifacts) > 0 {
+		names := make([]string, 0, len(result.Artifacts))
+		for name := range result.Artifacts {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			appendREPLArtifact(&out, "artifact["+name+"]", result.Artifacts[name])
+		}
+	} else if result.Artifact != nil {
+		appendREPLArtifact(&out, "artifact", result.Artifact)
+	}
+	if result.Truncated {
+		out.WriteString("\noutput was bounded; keep processing the named artifact(s) inside the REPL")
+	}
+	if result.KernelReset {
+		out.WriteString("\nresource limit reached; this kernel generation was discarded")
+	}
 	if result.Stdout != "" {
 		out.WriteString("\nstdout:\n")
 		out.WriteString(result.Stdout)
@@ -178,15 +221,16 @@ func formatREPLResult(result repl.Result) string {
 		out.WriteString("\nvalue:\n")
 		out.WriteString(result.Value)
 	}
-	if result.Artifact != nil {
-		fmt.Fprintf(&out, "\nartifact: %s (%d bytes", result.Artifact.ID, result.Artifact.Size)
-		if result.Artifact.Truncated {
-			out.WriteString(", capped")
-		}
-		out.WriteString(") — inspect with context.artifact_get")
-	}
-	if result.Truncated {
-		out.WriteString("\noutput was bounded; keep processing the artifact inside the REPL")
-	}
 	return out.String()
+}
+
+func appendREPLArtifact(out *strings.Builder, label string, artifact *repl.ArtifactRef) {
+	if out == nil || artifact == nil {
+		return
+	}
+	fmt.Fprintf(out, "\n%s: %s (%d bytes", label, artifact.ID, artifact.Size)
+	if artifact.Truncated {
+		out.WriteString(", capped")
+	}
+	out.WriteString(") — inspect with context.artifact_get")
 }

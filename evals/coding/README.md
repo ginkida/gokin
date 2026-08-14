@@ -38,6 +38,79 @@ Run a provider/model matrix:
 go run ./cmd/gokin eval run --provider kimi --model kimi-for-coding --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
+For the dedicated repository-analytics A/B suite, including positive and
+negative auto-policy controls, see [`../hybrid/README.md`](../hybrid/README.md).
+Any manifest can still be expanded across identical `tools`, adaptive `auto`,
+and explicit `hybrid` cohorts in one run:
+
+```sh
+go build -o /tmp/gokin ./cmd/gokin
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
+  --provider glm --model glm-5.2 \
+  --engine-mode tools --engine-mode auto --engine-mode hybrid \
+  --repeat 3 \
+  --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
+  --output .gokin/evals/engine-ab.jsonl
+go run ./cmd/gokin eval report --input .gokin/evals/engine-ab.jsonl
+```
+
+Each engine cohort is isolated in its own workspace and result identity. The
+report pairs identical scenario/provider/model/fault cohorts before comparing
+quality, total tokens, model rounds, agent duration, tracked cost, and actual
+`repl_exec` calls. Missing, duplicate, non-executed, or changed-spec rows are
+reported as exclusions rather than mixed into the A/B averages. With no flag,
+the runner explicitly injects `engine.mode=auto` so a user's global config
+cannot silently change a baseline.
+Repeated matrices isolate every trial in its own workspace, preserve
+`trial`/`trial_count` in JSONL, and deterministically rotate execution order to
+reduce fixed-order bias. Provider usage scales linearly with `--repeat`.
+Every completed row is atomically and durably checkpointed to
+`OUTPUT.partial` with private `0600` permissions. The previous `OUTPUT` remains
+untouched until the whole matrix finishes, when the checkpoint is atomically
+published and removed. If the process is interrupted, the checkpoint remains a
+strictly readable JSONL prefix; repeat the exact command with `--resume` to skip
+those completed rows. A checkpoint is never overwritten implicitly, and resume
+fails before another provider call if the matrix order, scenario/fixture,
+agent-command, timeout, fault upstream, or explicitly selected `GOKIN_BIN`
+binary changed. This avoids both destroying the last complete report and paying
+again for rows whose results are already durable.
+For CI, `--require-complete-engine-pairs`,
+`--max-engine-score-regression 0`, and
+`--max-engine-quality-regressions 0` turn the paired evidence into fail-closed
+gates. Every engine gate also requires matching, valid SHA-256
+`scenario_spec_hash` and `run_spec_hash` values on both sides of every pair, so
+results from different fixtures, binaries, matrices, or runner settings cannot
+be silently joined. Candidate/control classification must also be present on
+both paired rows, preventing unclassified cases from disappearing into `all`.
+Legacy rows without hashes stay visible for diagnosis but are not valid gate
+evidence. Gates target `auto` unless
+`--engine-gate-mode hybrid` is selected too.
+Optional repeatable gates such as
+`--max-engine-relative-delta candidates.total_tokens=0%`,
+`--max-engine-relative-delta candidates.input_tokens=0%`, and
+`--max-engine-median-relative-delta candidates.total_tokens=-5%` enforce
+aggregate and outlier-resistant practical magnitude. The median gate fails if
+any paired baseline is zero and averages repeated trials inside each
+scenario/provider/model/fault unit before taking the across-unit median. It
+therefore cannot count correlated reruns as several central observations.
+`--min-engine-lower-ratio candidates.total_tokens=50%` separately
+enforces consistency across scenario/provider/model/fault units after averaging
+repeated trials inside each unit. For hybrid suites,
+`--max-engine-lower-p-value candidates.total_tokens=5%` adds a one-sided exact
+sign-test gate. It clusters repeated trials by scenario/provider/model/fault,
+so `--repeat` reduces within-unit noise without inflating the evidence-unit
+count; ties are excluded and missing/non-tied evidence fails closed. Choose a
+single primary efficiency metric unless you apply a multiple-testing correction.
+Token-component thresholds also accept `uncached_input_tokens`,
+`cache_read_input_tokens`, and `output_tokens`. The report requires explicit,
+consistent component provenance before any of those gates can pass; a legacy
+row with only `total_tokens` is never interpreted as four measured zeroes.
+Additionally,
+`--min-engine-repl-use-ratio candidates=50%` proves candidate adoption and
+`--max-engine-repl-use-ratio controls=0%` limits control misuse; both use exact
+paired denominators and fail closed on missing or exposure-inconsistent policy
+evidence, including policy events attributed to the wrong engine mode.
+
 Summarize the last run:
 
 ```sh
@@ -72,7 +145,20 @@ go run ./cmd/gokin eval report \
   --fail-metric no_false_file_claims=100%
 ```
 
-The runner writes JSONL results and scores agent evidence from `.gokin/execution_journal.jsonl`, including tool calls, files read, files edited, verification commands, and false file claims.
+The runner writes JSONL results and scores agent evidence from a private
+sibling runtime directory, including tool calls and per-tool counts, files
+read, files edited, verification commands, false file claims, invocation
+tokens, model rounds, duration, and tracked cost. The outer agent-command gets
+the reserved `GOKIN_EVAL_RUNTIME_DIR` only so the headless Gokin process can
+write there; model-visible bash/REPL environments and subsequent verification
+commands do not receive it. Workspace `.gokin/execution_journal.jsonl` files
+are ignored by scoring, and reports aggregate efficiency only from results
+marked `trusted_runtime`.
+Result JSONL ingestion is also fail-closed: each record is bounded to 16 MiB,
+unknown fields, duplicate keys at any depth, trailing JSON values, invalid
+status/engine/trial provenance, impossible scores, and negative telemetry
+counters are rejected with the exact line number. Records above the old
+`bufio.Scanner` 64 KiB default remain supported within that explicit bound.
 
 ## Reliability and fault injection
 

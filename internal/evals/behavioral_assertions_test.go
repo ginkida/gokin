@@ -11,7 +11,7 @@ func passingResult(output string, changed []string) Result {
 		Verification: []CommandResult{{Success: true}},
 		ChangedFiles: changed,
 		Journal: &JournalSummary{
-			Path: "j", ToolCalls: 1,
+			Path: "j", TrustedRuntime: true, ToolCalls: 1,
 			FilesRead: []string{"x.go"}, FilesEdited: []string{"y.go"},
 			VerificationCommands: []string{"go test"},
 		},
@@ -37,6 +37,9 @@ func TestBehavioralAssertionsSatisfied(t *testing.T) {
 		{"answer_contains_required false", map[string]bool{"answer_contains_required": false}, false},
 		{"required_files_changed false (the no-op trap)", map[string]bool{"required_files_changed": false}, false},
 		{"protected_files_unchanged false (trap violation)", map[string]bool{"protected_files_unchanged": false}, false},
+		{"workspace_unchanged false (read-only violation)", map[string]bool{"workspace_unchanged": false}, false},
+		{"hybrid policy mismatch", map[string]bool{"hybrid_policy_expected": false}, false},
+		{"hybrid efficient path missing", map[string]bool{"hybrid_efficient_path": false}, false},
 		{"all three true", map[string]bool{"answer_contains_required": true, "required_files_changed": true, "protected_files_unchanged": true}, true},
 		{"one of three false", map[string]bool{"answer_contains_required": true, "required_files_changed": false, "protected_files_unchanged": true}, false},
 	}
@@ -84,13 +87,239 @@ func TestScoreScenario_AssertionsAbsentWhenNotDeclared(t *testing.T) {
 	scenario := Scenario{MaxToolCalls: 10}
 	m := scoreScenario(scenario, passingResult("done", []string{"main.go"}))
 
-	for _, k := range []string{"answer_contains_required", "required_files_changed", "protected_files_unchanged"} {
+	for _, k := range []string{"answer_contains_required", "required_files_changed", "protected_files_unchanged", "workspace_unchanged", "hybrid_policy_expected", "hybrid_efficient_path"} {
 		if _, ok := m[k]; ok {
 			t.Fatalf("metric %q must be ABSENT when the scenario does not declare it (keeps existing baselines); map=%v", k, m)
 		}
 	}
 	if len(m) != 10 {
 		t.Fatalf("base metric count = %d, want exactly 10 with no conditional metrics; map=%v", len(m), m)
+	}
+}
+
+func TestScoreScenario_HybridEfficientPathRequiresRuntimeEvidence(t *testing.T) {
+	candidate := true
+	scenario := Scenario{
+		MaxToolCalls: 10, HybridCandidate: &candidate,
+		Prompt:                      "Count TODO and FIXME across every repository file",
+		HybridRequiredOperations:    []string{"count_code_many"},
+		HybridMaxScanOperations:     1,
+		HybridMinFileIndexRefreshes: 1,
+		HybridMaxReplCalls:          1,
+	}
+	makeResult := func(mode string) Result {
+		result := passingResult("done", nil)
+		result.EngineMode = mode
+		result.Journal.HybridPolicy = &HybridPolicySummary{
+			Mode: mode, Strategy: "aggregation",
+			REPLEligible: mode != "tools", REPLEnabled: mode != "tools",
+		}
+		if mode == "tools" {
+			result.Journal.HybridPolicy.Strategy = ""
+		}
+		return result
+	}
+
+	toolsResult := makeResult("tools")
+	if _, present := scoreScenario(scenario, toolsResult)["hybrid_efficient_path"]; present {
+		t.Fatal("tools baseline must treat a REPL-only operation contract as not applicable")
+	}
+
+	auto := makeResult("auto")
+	auto.Journal.ToolCounts = map[string]int{"repl_exec": 1}
+	auto.Journal.ReplOperations = map[string]int{"count_code_many": 1}
+	auto.Journal.ReplFileIndexRefreshes = 1
+	if !scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("auto mode rejected matching runtime operation evidence")
+	}
+
+	auto.Journal.ReplOperations = map[string]int{"search_code": 1}
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("an arbitrary REPL call satisfied the efficient operation contract")
+	}
+	auto.Journal.ReplOperations = map[string]int{"count_code_many": 1}
+	auto.Journal.ToolCounts = nil
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("operation metadata without a journaled repl_exec call was accepted")
+	}
+	auto.Journal.ToolCounts = map[string]int{"repl_exec": 1}
+	auto.Journal.HybridPolicy.Mode = "hybrid"
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("operation evidence from the wrong engine-policy provenance was accepted")
+	}
+
+	auto = makeResult("auto")
+	auto.Journal.ToolCounts = map[string]int{"repl_exec": 1}
+	auto.Journal.ReplOperations = map[string]int{"count_code_many": 1, "search_code": 1}
+	auto.Journal.ReplFileIndexRefreshes = 2
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("required primitive plus a redundant collection scan was accepted")
+	}
+	auto.Journal.ReplOperations = map[string]int{
+		"count_code_many": 1, "count_code_many_sampled": 1,
+	}
+	auto.Journal.ReplFileIndexRefreshes = 1
+	if !scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("sample-mode marker was double-counted as a second collection scan")
+	}
+	auto.Journal.ReplOperations = map[string]int{"count_code_many": 1}
+	auto.Journal.ReplFileIndexRefreshes = 2
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("redundant parent-observed repository index refresh was accepted")
+	}
+	auto.Journal.ReplFileIndexRefreshes = 0
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("worker operation metadata without a parent-observed repository index refresh was accepted")
+	}
+	auto.Journal.ReplFileIndexRefreshes = 1
+	auto.Journal.ToolCounts["repl_exec"] = 2
+	if scoreScenario(scenario, auto)["hybrid_efficient_path"] {
+		t.Fatal("avoidable second REPL cell was accepted")
+	}
+}
+
+func TestScoreScenario_HybridEfficientPathAcceptsAnyEquivalentOperation(t *testing.T) {
+	candidate := true
+	scenario := Scenario{
+		MaxToolCalls:                10,
+		HybridCandidate:             &candidate,
+		Prompt:                      "Count TODO and FIXME across every repository file",
+		HybridRequiredAnyOperations: []string{"count_code", "count_code_many"},
+		HybridMaxScanOperations:     1,
+		HybridMinFileIndexRefreshes: 1,
+		HybridMaxReplCalls:          1,
+	}
+	makeResult := func(operations map[string]int) Result {
+		result := passingResult("done", nil)
+		result.EngineMode = "auto"
+		result.Journal.HybridPolicy = &HybridPolicySummary{
+			Mode: "auto", Strategy: "aggregation", REPLEligible: true, REPLEnabled: true,
+		}
+		result.Journal.ToolCounts = map[string]int{"repl_exec": 1}
+		result.Journal.ReplOperations = operations
+		result.Journal.ReplFileIndexRefreshes = 1
+		return result
+	}
+
+	for _, operation := range []string{"count_code", "count_code_many"} {
+		if !scoreScenario(scenario, makeResult(map[string]int{operation: 1}))["hybrid_efficient_path"] {
+			t.Errorf("equivalent operation %q did not satisfy one-pass contract", operation)
+		}
+	}
+	if scoreScenario(scenario, makeResult(map[string]int{"search_code": 1}))["hybrid_efficient_path"] {
+		t.Fatal("unlisted operation satisfied any-of contract")
+	}
+	if scoreScenario(scenario, makeResult(map[string]int{
+		"count_code": 1, "count_code_many": 1,
+	}))["hybrid_efficient_path"] {
+		t.Fatal("two equivalent scans bypassed the one-scan cap")
+	}
+}
+
+func TestReplScanOperationCountIncludesFileStats(t *testing.T) {
+	operations := map[string]int{
+		"file_stats": 1, "list_files": 2, "count_code_many_sampled": 10,
+	}
+	if got := replScanOperationCount(operations); got != 3 {
+		t.Fatalf("scan operation count=%d, want file_stats + list_files only", got)
+	}
+}
+
+func TestReplScanOperationCountPrefersWorkerOwnedInventoryEvidence(t *testing.T) {
+	operations := map[string]int{
+		"file_inventory": 2, "count_code_many": 1,
+	}
+	if got := replScanOperationCount(operations); got != 2 {
+		t.Fatalf("scan operation count=%d, want authoritative inventory count 2", got)
+	}
+}
+
+func TestScoreScenario_WorkspaceMustRemainUnchanged(t *testing.T) {
+	scenario := Scenario{MaxToolCalls: 10, WorkspaceMustRemainUnchanged: true}
+	if !scoreScenario(scenario, passingResult("done", nil))["workspace_unchanged"] {
+		t.Fatal("read-only scenario should pass with no changed files")
+	}
+	if scoreScenario(scenario, passingResult("done", []string{"invented.txt"}))["workspace_unchanged"] {
+		t.Fatal("new unlisted file must fail the whole-workspace read-only assertion")
+	}
+}
+
+func TestScoreScenario_HybridCandidateFollowsEngineMode(t *testing.T) {
+	candidate := true
+	scenario := Scenario{
+		MaxToolCalls: 10, HybridCandidate: &candidate,
+		Prompt: "Count TODOs across every repository file",
+	}
+	for _, tc := range []struct {
+		mode     string
+		eligible bool
+		exposed  bool
+		wantPass bool
+	}{
+		{mode: "auto", eligible: true, exposed: true, wantPass: true},
+		{mode: "auto", eligible: true, exposed: false, wantPass: false},
+		{mode: "auto", eligible: false, exposed: false, wantPass: false},
+		{mode: "tools", eligible: false, exposed: false, wantPass: true},
+		{mode: "hybrid", eligible: true, exposed: true, wantPass: true},
+	} {
+		result := passingResult("done", nil)
+		result.EngineMode = tc.mode
+		result.Journal.HybridPolicy = &HybridPolicySummary{
+			Mode: tc.mode, REPLEligible: tc.eligible, REPLEnabled: tc.exposed,
+		}
+		if tc.mode != "tools" {
+			result.Journal.HybridPolicy.Strategy = "aggregation"
+		}
+		got := scoreScenario(scenario, result)["hybrid_policy_expected"]
+		if got != tc.wantPass {
+			t.Errorf("mode=%s eligible=%t exposed=%t metric=%t, want %t",
+				tc.mode, tc.eligible, tc.exposed, got, tc.wantPass)
+		}
+	}
+
+	nonCandidate := false
+	negativeScenario := Scenario{MaxToolCalls: 10, HybridCandidate: &nonCandidate}
+	negative := passingResult("done", nil)
+	negative.EngineMode = "auto"
+	negative.Journal.HybridPolicy = &HybridPolicySummary{Mode: "auto"}
+	if !scoreScenario(negativeScenario, negative)["hybrid_policy_expected"] {
+		t.Fatal("auto negative-control scenario should pass when REPL stays hidden")
+	}
+
+	wrongProvenance := passingResult("done", nil)
+	wrongProvenance.EngineMode = "tools"
+	wrongProvenance.Journal.HybridPolicy = &HybridPolicySummary{Mode: "auto"}
+	if scoreScenario(scenario, wrongProvenance)["hybrid_policy_expected"] {
+		t.Fatal("engine-policy metric accepted journal evidence from the wrong mode")
+	}
+	untrusted := passingResult("done", nil)
+	untrusted.EngineMode = "auto"
+	untrusted.Journal.TrustedRuntime = false
+	untrusted.Journal.HybridPolicy = &HybridPolicySummary{Mode: "auto", REPLEligible: true, REPLEnabled: true}
+	if scoreScenario(scenario, untrusted)["hybrid_policy_expected"] {
+		t.Fatal("engine-policy metric accepted model-writable workspace journal evidence")
+	}
+}
+
+func TestScoreScenario_HybridPolicyRequiresMatchingStrategyProvenance(t *testing.T) {
+	candidate := true
+	scenario := Scenario{
+		MaxToolCalls: 10, HybridCandidate: &candidate,
+		Prompt: "Which exported APIs lack tests across the whole codebase?",
+	}
+	result := passingResult("done", nil)
+	result.EngineMode = "auto"
+	result.Journal.HybridPolicy = &HybridPolicySummary{
+		Mode: "auto", Strategy: "cross_file", REPLEligible: true, REPLEnabled: true,
+	}
+	if !scoreScenario(scenario, result)["hybrid_policy_expected"] {
+		t.Fatal("matching cross-file strategy provenance was rejected")
+	}
+	for _, strategy := range []string{"", "aggregation", "unknown"} {
+		result.Journal.HybridPolicy.Strategy = strategy
+		if scoreScenario(scenario, result)["hybrid_policy_expected"] {
+			t.Errorf("strategy %q satisfied cross-file policy provenance", strategy)
+		}
 	}
 }
 
@@ -217,6 +446,12 @@ func TestValidate_GreenScenarioRequiresAssertion(t *testing.T) {
 	if err := manifest(greenNeg).Validate(); err == nil {
 		t.Fatal("green scenario with only a negative assertion must fail validation (no-op still passes)")
 	}
+	greenWorkspace := validScenario()
+	greenWorkspace.DeliveredState = "green"
+	greenWorkspace.WorkspaceMustRemainUnchanged = true
+	if err := manifest(greenWorkspace).Validate(); err == nil {
+		t.Fatal("green scenario with only workspace_must_remain_unchanged must fail validation")
+	}
 
 	// Green with a negative AND a positive assertion → accepted.
 	greenNeg.FileMustChange = []string{"internal/x/y.go"}
@@ -229,5 +464,70 @@ func TestValidate_GreenScenarioRequiresAssertion(t *testing.T) {
 	red.DeliveredState = "red"
 	if err := manifest(red).Validate(); err != nil {
 		t.Fatalf("red scenario without an assertion should validate: %v", err)
+	}
+
+	candidate := true
+	hybrid := validScenario()
+	hybrid.HybridCandidate = &candidate
+	hybrid.HybridRequiredOperations = []string{"count_code_many"}
+	hybrid.HybridMaxScanOperations = 1
+	hybrid.HybridMinFileIndexRefreshes = 1
+	hybrid.HybridMaxReplCalls = 1
+	if err := manifest(hybrid).Validate(); err != nil {
+		t.Fatalf("candidate with a valid required operation should validate: %v", err)
+	}
+	hybrid.HybridRequiredOperations = []string{"count-code"}
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("invalid hybrid operation name was accepted")
+	}
+	hybrid.HybridRequiredOperations = []string{"count_code", "count_code"}
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("duplicate hybrid operation was accepted")
+	}
+	hybrid.HybridRequiredOperations = []string{"count_code"}
+	hybrid.HybridRequiredAnyOperations = []string{"count_code_many", "file_stats"}
+	if err := manifest(hybrid).Validate(); err != nil {
+		t.Fatalf("valid hybrid any-of operations were rejected: %v", err)
+	}
+	hybrid.HybridRequiredAnyOperations = []string{"count_code_many", "count_code_many"}
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("duplicate hybrid any-of operation was accepted")
+	}
+	hybrid.HybridRequiredAnyOperations = []string{"count_code"}
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("operation repeated across all-of and any-of contracts was accepted")
+	}
+	hybrid.HybridRequiredAnyOperations = nil
+	control := false
+	hybrid.HybridCandidate = &control
+	hybrid.HybridRequiredOperations = []string{"count_code"}
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("negative control with required REPL operation was accepted")
+	}
+
+	hybrid = validScenario()
+	hybrid.HybridCandidate = &candidate
+	hybrid.HybridMaxScanOperations = 1
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("hybrid scan limit without a required operation was accepted")
+	}
+	hybrid.HybridRequiredOperations = []string{"count_code"}
+	hybrid.HybridMaxScanOperations = -1
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("negative hybrid scan limit was accepted")
+	}
+	hybrid.HybridMaxScanOperations = 1
+	hybrid.HybridMaxReplCalls = -1
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("negative hybrid REPL-call limit was accepted")
+	}
+	hybrid.HybridMaxReplCalls = 1
+	hybrid.HybridMinFileIndexRefreshes = -1
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("negative hybrid file-index minimum was accepted")
+	}
+	hybrid.HybridMinFileIndexRefreshes = 2
+	if err := manifest(hybrid).Validate(); err == nil {
+		t.Fatal("hybrid file-index minimum above the scan maximum was accepted")
 	}
 }

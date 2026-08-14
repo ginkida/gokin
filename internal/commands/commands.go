@@ -46,6 +46,17 @@ type ModelSetter interface {
 	SetModel(modelName string)
 }
 
+// RuntimeEngineModeReporter is implemented by a running App so diagnostics can
+// distinguish its boot-wired engine topology from a configuration value saved
+// for the next launch.
+type RuntimeEngineModeReporter interface {
+	GetRuntimeEngineMode() string
+}
+
+type RuntimeREPLCapabilityReporter interface {
+	RuntimeREPLCapabilityEnabled() bool
+}
+
 // AppInterface defines what commands need from the application.
 // LifetimeToolUsage reports how often each tool has been invoked across every
 // session on this machine. It exists to make "has anyone ever reached for this?"
