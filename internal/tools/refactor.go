@@ -49,7 +49,11 @@ func (t *RefactorTool) SetWorkDir(workDir string) {
 // and the validator would be unrestricted.
 func (t *RefactorTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 // SetDiffHandler sets the diff handler for preview approval.

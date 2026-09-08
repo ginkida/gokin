@@ -38,7 +38,11 @@ func NewVerifyCodeTool(workDir string) *VerifyCodeTool {
 // Verification runs compilers and package-manager scripts, so accepting an
 // unchecked ../ path would be both a workspace escape and code execution.
 func (t *VerifyCodeTool) SetAllowedDirs(dirs []string) {
-	t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
+	if t.pathValidator == nil {
+		t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(append([]string{t.workDir}, dirs...))
 }
 
 func (t *VerifyCodeTool) Name() string {

@@ -6,32 +6,56 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // PathValidator validates file paths to prevent directory traversal attacks.
 type PathValidator struct {
-	allowedDirs   []string
+	// mu guards allowedDirs, which is not fixed at construction: a directory
+	// grant (/add-dir, or the executor's ask-on-access prompt) widens the scope
+	// while tools may be mid-execution — parallel-safe tools run concurrently on
+	// one shared instance. Callers used to swap the whole *PathValidator on the
+	// tool instead, an unsynchronized pointer write that the race detector
+	// reports against every concurrent read. Keeping the mutation inside the
+	// validator fixes it in one place, leaving the eighty-odd read sites alone.
+	mu          sync.RWMutex
+	allowedDirs []string
+
+	// allowSymlinks is set once and never changes, so it needs no guard.
 	allowSymlinks bool
+}
+
+// SetAllowedDirs replaces the allowed set. Grants only ever widen the scope, so
+// a reader that observes the previous set fails closed — it rejects a path that
+// has just become legal, rather than admitting one that has not.
+func (v *PathValidator) SetAllowedDirs(dirs []string) {
+	normalized := normalizeAllowedDirs(dirs)
+	v.mu.Lock()
+	v.allowedDirs = normalized
+	v.mu.Unlock()
 }
 
 // NewPathValidator creates a new path validator.
 func NewPathValidator(allowedDirs []string, allowSymlinks bool) *PathValidator {
-	// Normalize allowed directories
-	normalized := make([]string, len(allowedDirs))
-	for i, dir := range allowedDirs {
+	return &PathValidator{
+		allowedDirs:   normalizeAllowedDirs(allowedDirs),
+		allowSymlinks: allowSymlinks,
+	}
+}
+
+func normalizeAllowedDirs(dirs []string) []string {
+	normalized := make([]string, len(dirs))
+	for i, dir := range dirs {
 		cleanDir := filepath.Clean(dir)
 		if absDir, err := filepath.Abs(cleanDir); err == nil {
 			cleanDir = absDir
 		}
-		if resolvedDir, err := filepath.EvalSymlinks(cleanDir); err == nil {
-			cleanDir = resolvedDir
+		if resolved, err := filepath.EvalSymlinks(cleanDir); err == nil {
+			cleanDir = resolved
 		}
 		normalized[i] = cleanDir
 	}
-	return &PathValidator{
-		allowedDirs:   normalized,
-		allowSymlinks: allowSymlinks,
-	}
+	return normalized
 }
 
 // Validate validates that a path is safe and within allowed directories.
@@ -185,11 +209,14 @@ func (v *PathValidator) ValidateDir(path string) (string, error) {
 // isAllowed checks if the path is within allowed directories.
 func (v *PathValidator) isAllowed(absPath string) bool {
 	// If no restrictions, allow all (use with caution)
-	if len(v.allowedDirs) == 0 {
+	v.mu.RLock()
+	allowed := v.allowedDirs
+	v.mu.RUnlock()
+	if len(allowed) == 0 {
 		return true
 	}
 
-	for _, allowedDir := range v.allowedDirs {
+	for _, allowedDir := range allowed {
 		if v.isPathWithin(absPath, allowedDir) {
 			return true
 		}

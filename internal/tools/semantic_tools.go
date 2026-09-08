@@ -42,7 +42,11 @@ func NewGoToDefinitionTool(workDir string) *GoToDefinitionTool {
 // workDir (mirrors read.go), so a granted directory is navigable by this tool.
 func (t *GoToDefinitionTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 // SetSemanticProvider wires a managed, workspace-bound semantic provider.
@@ -395,7 +399,11 @@ func NewFindReferencesTool(workDir string) *FindReferencesTool {
 // workDir (mirrors read.go), so a granted directory is navigable by this tool.
 func (t *FindReferencesTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 // SetSemanticProvider wires a managed, workspace-bound semantic provider.

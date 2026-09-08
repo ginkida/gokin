@@ -72,7 +72,11 @@ func (t *WriteTool) SetRequireReadBeforeOverwrite(require bool) {
 // SetAllowedDirs sets additional allowed directories for path validation.
 func (t *WriteTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 func (t *WriteTool) Name() string {

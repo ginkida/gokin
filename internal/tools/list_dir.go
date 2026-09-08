@@ -35,7 +35,11 @@ func NewListDirTool(baseDir string) *ListDirTool {
 // SetAllowedDirs sets additional allowed directories for path validation.
 func (t *ListDirTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.baseDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 func (t *ListDirTool) Name() string {

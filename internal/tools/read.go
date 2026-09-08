@@ -242,7 +242,11 @@ func (t *ReadTool) SetProactiveContext(p ProactiveContextProvider) {
 // SetAllowedDirs sets additional allowed directories for path validation.
 func (t *ReadTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 // SetPredictor sets the context predictor for access pattern learning.

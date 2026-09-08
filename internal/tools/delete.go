@@ -36,7 +36,11 @@ func (t *DeleteTool) SetUndoManager(manager *undo.Manager) {
 // SetAllowedDirs sets additional allowed directories for path validation.
 func (t *DeleteTool) SetAllowedDirs(dirs []string) {
 	allDirs := append([]string{t.workDir}, dirs...)
-	t.pathValidator = security.NewPathValidator(allDirs, false)
+	if t.pathValidator == nil {
+		t.pathValidator = security.NewPathValidator(allDirs, false)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(allDirs)
 }
 
 func (t *DeleteTool) Name() string {

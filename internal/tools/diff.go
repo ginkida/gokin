@@ -28,7 +28,11 @@ func NewDiffTool(workDir string) *DiffTool {
 // SetAllowedDirs expands the explicit filesystem grant while retaining the
 // tool's own workDir as its default boundary.
 func (t *DiffTool) SetAllowedDirs(dirs []string) {
-	t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
+	if t.pathValidator == nil {
+		t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
+		return
+	}
+	t.pathValidator.SetAllowedDirs(append([]string{t.workDir}, dirs...))
 }
 
 func (t *DiffTool) Name() string {
