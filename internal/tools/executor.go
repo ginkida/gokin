@@ -382,7 +382,13 @@ type Executor struct {
 	contextEnricher *ContextEnricher
 
 	// Smart validation: self-review injection for multi-file mutations.
-	selfReviewThreshold  int
+	// selfReviewThreshold is atomic and its map reset takes mutatedFilesMu:
+	// ApplyConfig calls SetSelfReviewThreshold from the app goroutine while a
+	// turn is running, and the threshold is read inside doExecuteTool, which
+	// runs concurrently for parallel-safe tools. Every other access to
+	// mutatedFilesThisTurn already takes the mutex — the setter was the one
+	// that did not, which is a concurrent map write, not merely a race.
+	selfReviewThreshold  atomic.Int64
 	mutatedFilesThisTurn map[string]bool
 	mutatedFilesMu       sync.Mutex
 
@@ -793,9 +799,11 @@ func (e *Executor) SetErrorLearner(el ErrorLearner) {
 // SetSelfReviewThreshold sets the number of mutated files per turn
 // that triggers a self-review injection. 0 disables.
 func (e *Executor) SetSelfReviewThreshold(n int) {
-	e.selfReviewThreshold = n
+	e.selfReviewThreshold.Store(int64(n))
 	if n > 0 {
+		e.mutatedFilesMu.Lock()
 		e.mutatedFilesThisTurn = make(map[string]bool)
+		e.mutatedFilesMu.Unlock()
 	}
 }
 
@@ -1950,11 +1958,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			// Self-review injection: if many files were mutated this turn,
 			// add a notification nudging the model to verify consistency.
-			if e.selfReviewThreshold > 0 {
+			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 {
 				e.mutatedFilesMu.Lock()
 				count := len(e.mutatedFilesThisTurn)
 				var files []string
-				if count >= e.selfReviewThreshold {
+				if count >= threshold {
 					for f := range e.mutatedFilesThisTurn {
 						files = append(files, f)
 					}
@@ -1963,7 +1971,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 				e.mutatedFilesMu.Unlock()
 
-				if count >= e.selfReviewThreshold {
+				if count >= threshold {
 					hint := fmt.Sprintf("[smart-validation] You modified %d files this turn: %s. Briefly verify version consistency and correctness across these files.", count, strings.Join(files, ", "))
 					e.AddPendingNotification(hint)
 				}
@@ -3638,7 +3646,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 12.9d: Track mutated files for self-review injection.
-	if result.Success && isWriteOperation(call.Name) && e.selfReviewThreshold > 0 {
+	if result.Success && isWriteOperation(call.Name) && e.selfReviewThreshold.Load() > 0 {
 		e.mutatedFilesMu.Lock()
 		if e.mutatedFilesThisTurn == nil {
 			e.mutatedFilesThisTurn = make(map[string]bool)

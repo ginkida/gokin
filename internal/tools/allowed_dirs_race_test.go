@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"gokin/internal/testkit"
 )
@@ -109,6 +110,35 @@ func TestSetDiffEnabled_ConcurrentWithExecution(t *testing.T) {
 				t.Errorf("write during a permission change: %v %q", err, result.Error)
 				return
 			}
+		}
+	}()
+	wg.Wait()
+}
+
+// ApplyConfig calls SetSelfReviewThreshold from the app goroutine while a turn
+// is running, and the message processor resets the side-effect ledger per
+// request. Every access to mutatedFilesThisTurn takes mutatedFilesMu except the
+// setter, which rebuilt the map holding nothing — a concurrent map write rather
+// than merely a race, and Go kills the process for that rather than reporting
+// it. The threshold beside it is read inside doExecuteTool, which runs
+// concurrently for parallel-safe tools.
+func TestSetSelfReviewThreshold_ConcurrentWithLedgerReset(t *testing.T) {
+	exec := NewExecutor(NewRegistry(), nil, time.Second)
+	exec.preFlightChecks = false
+	exec.SetSelfReviewThreshold(2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 500 {
+			exec.SetSelfReviewThreshold(2 + i%3)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 500 {
+			exec.ResetSideEffectLedger()
 		}
 	}()
 	wg.Wait()
