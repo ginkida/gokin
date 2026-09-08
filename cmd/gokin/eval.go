@@ -299,6 +299,7 @@ func evalResultLabel(result evals.Result) string {
 func newEvalReportCmd() *cobra.Command {
 	var inputPath string
 	var baselinePath string
+	var reportManifestPath string
 	var jsonOut bool
 	var failUnder string
 	var maxRegression string
@@ -333,6 +334,7 @@ not require an external baseline.`,
 			report := evals.BuildReport(inputPath, results)
 
 			var comparison *evals.Comparison
+			var baselineStale *evals.BaselineCoverage
 			if strings.TrimSpace(baselinePath) != "" {
 				baselineResults, err := evals.ReadResults(baselinePath)
 				if err != nil {
@@ -340,6 +342,15 @@ not require an external baseline.`,
 				}
 				cmp := evals.CompareReports(evals.BuildReport(baselinePath, baselineResults), report)
 				comparison = &cmp
+				// A baseline that predates scenarios still compares cleanly — over the
+				// subset it happens to contain — and reports a confident percentage for
+				// a suite it never ran. Every committed baseline is 23/34 today, so this
+				// is the live case rather than a hypothetical. Not an error: comparing a
+				// subset can be deliberate. An unreadable manifest is a silent skip,
+				// since report must work outside the repository.
+				if audit, auditErr := evals.AuditBaselineCoverage(reportManifestPath, baselinePath); auditErr == nil && !audit.Complete {
+					baselineStale = &audit
+				}
 			}
 			if strings.TrimSpace(maxRegression) != "" && comparison == nil {
 				return fmt.Errorf("--max-regression requires --baseline")
@@ -369,10 +380,11 @@ not require an external baseline.`,
 
 			if jsonOut {
 				payload := struct {
-					Report     evals.Report      `json:"report"`
-					Comparison *evals.Comparison `json:"comparison,omitempty"`
-					Gate       *evals.GateResult `json:"gate,omitempty"`
-				}{Report: report, Comparison: comparison, Gate: gate}
+					BaselineCoverage *evals.BaselineCoverage `json:"baseline_coverage,omitempty"`
+					Report           evals.Report            `json:"report"`
+					Comparison       *evals.Comparison       `json:"comparison,omitempty"`
+					Gate             *evals.GateResult       `json:"gate,omitempty"`
+				}{BaselineCoverage: baselineStale, Report: report, Comparison: comparison, Gate: gate}
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				if err := enc.Encode(payload); err != nil {
@@ -380,6 +392,7 @@ not require an external baseline.`,
 				}
 			} else {
 				printEvalReport(cmd, report, comparison, gate)
+				printBaselineStaleness(cmd, baselinePath, baselineStale)
 			}
 
 			if gate != nil && !gate.Passed {
@@ -391,6 +404,7 @@ not require an external baseline.`,
 
 	cmd.Flags().StringVar(&inputPath, "input", ".gokin/evals/results.jsonl", "JSONL results path")
 	cmd.Flags().StringVar(&baselinePath, "baseline", "", "optional baseline JSONL results path for comparison")
+	cmd.Flags().StringVar(&reportManifestPath, "manifest", "evals/coding/manifest.json", "eval manifest path, used to report baseline coverage")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON")
 	cmd.Flags().StringVar(&failUnder, "fail-under", "", "fail if aggregate score is below this ratio or percent (example: 0.9 or 90%)")
 	cmd.Flags().StringVar(&maxRegression, "max-regression", "", "fail if score regresses by more than this ratio or percent-point value versus --baseline")
@@ -916,4 +930,28 @@ func printEvalDiagnosis(cmd *cobra.Command, diagnosis evals.Diagnosis) {
 		fmt.Fprintf(out, "  [%s] %s\n", rec.Area, rec.Reason)
 		fmt.Fprintf(out, "      %s\n", rec.Action)
 	}
+}
+
+// printBaselineStaleness names a baseline that no longer covers the suite it is
+// being compared against. The comparison itself is still valid over the rows
+// both files share, which is exactly why silence is wrong here: the score reads
+// as a verdict on the suite, and a reader has no way to see that eleven
+// scenarios were never in the baseline at all.
+func printBaselineStaleness(cmd *cobra.Command, baselinePath string, audit *evals.BaselineCoverage) {
+	if audit == nil {
+		return
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "\nBaseline coverage (%s):\n", baselinePath)
+	for _, variant := range audit.Variants {
+		if variant.Complete {
+			continue
+		}
+		fmt.Fprintf(out, "  %s: %d/%d scenarios — comparison covers only what both files contain\n",
+			variant.Variant, variant.Present, variant.Expected)
+		if len(variant.Missing) > 0 {
+			fmt.Fprintf(out, "    absent from baseline: %s\n", strings.Join(variant.Missing, ", "))
+		}
+	}
+	fmt.Fprintf(out, "  Regenerate with `gokin eval run`, or check with `gokin eval baseline-audit`.\n")
 }
