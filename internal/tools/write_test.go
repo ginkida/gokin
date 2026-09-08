@@ -108,12 +108,12 @@ func TestWriteTool_SetDiffEnabled(t *testing.T) {
 	tool := NewWriteTool("/tmp")
 
 	tool.SetDiffEnabled(true)
-	if !tool.diffEnabled {
+	if !tool.diffEnabled.Load() {
 		t.Error("diffEnabled = false, want true")
 	}
 
 	tool.SetDiffEnabled(false)
-	if tool.diffEnabled {
+	if tool.diffEnabled.Load() {
 		t.Error("diffEnabled = true, want false")
 	}
 }

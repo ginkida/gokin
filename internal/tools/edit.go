@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/genai"
 
@@ -26,9 +27,15 @@ func existingPerm(path string) os.FileMode {
 
 // EditTool performs search/replace operations in files.
 type EditTool struct {
-	undoManager   *undo.Manager
-	diffHandler   DiffHandler
-	diffEnabled   bool
+	undoManager *undo.Manager
+	diffHandler DiffHandler
+	// diffEnabled is an atomic because permission changes push it into tools
+	// that may be executing: updateUnrestrictedModeLocked recomputes it on every
+	// permission change (a YOLO toggle, /set permissions, ApplyConfig) and calls
+	// SetDiffEnabled from the app goroutine. The executor's own unrestricted
+	// flag, set from the same block, is already an atomic.Bool; bash guards its
+	// copy with policyMu. This one was bare, and -race reports it.
+	diffEnabled   atomic.Bool
 	workDir       string
 	pathValidator *security.PathValidator
 
@@ -65,13 +72,13 @@ func (t *EditTool) SetDiffHandler(handler DiffHandler) {
 
 // SetDiffEnabled enables or disables diff preview.
 func (t *EditTool) SetDiffEnabled(enabled bool) {
-	t.diffEnabled = enabled
+	t.diffEnabled.Store(enabled)
 }
 
 // DiffEnabled reports whether diff preview is currently enabled. Lets callers
 // (and tests) observe the live state synced by updateUnrestrictedModeLocked.
 func (t *EditTool) DiffEnabled() bool {
-	return t.diffEnabled
+	return t.diffEnabled.Load()
 }
 
 // SetWorkDir sets the working directory and initializes path validator.
@@ -406,7 +413,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				count = 1 // Mark as matched for status message below
 
 				// Show diff preview and wait for approval if enabled
-				if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+				if t.diffEnabled.Load() && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
 					approved, approveErr := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 					if approveErr != nil {
 						return NewErrorResult(fmt.Sprintf("diff preview error: %s", approveErr)), nil
@@ -475,7 +482,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	// Show diff preview and wait for approval if enabled
 	// Skip diff approval when running in delegated plan execution (context flag)
-	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+	if t.diffEnabled.Load() && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
 		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
@@ -600,7 +607,7 @@ func (t *EditTool) executeMultiEdit(ctx context.Context, filePath string, edits 
 	}
 
 	// Show combined diff preview
-	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+	if t.diffEnabled.Load() && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
 		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, string(oldContent), content, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
@@ -699,7 +706,7 @@ func (t *EditTool) executeLineEdit(ctx context.Context, filePath string, lineSta
 	newContent := strings.Join(parts, "\n")
 
 	// Show diff preview
-	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+	if t.diffEnabled.Load() && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
 		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
@@ -783,7 +790,7 @@ func (t *EditTool) executeInsertAfterLine(ctx context.Context, filePath string, 
 	newContent := strings.Join(parts, "\n")
 
 	// Show diff preview
-	if t.diffEnabled && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
+	if t.diffEnabled.Load() && t.diffHandler != nil && !ShouldSkipDiff(ctx) {
 		approved, err := maybePromptDiff(ctx, t.diffHandler, filePath, content, newContent, "edit", false)
 		if err != nil {
 			return NewErrorResult(fmt.Sprintf("diff preview error: %s", err)), nil
