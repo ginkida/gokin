@@ -405,7 +405,7 @@ func (b *Builder) initClient() error {
 
 	// Debug: log which client was created
 	if _, ok := b.mainClient.(*client.AnthropicClient); ok {
-		logging.Debug("client created", "type", "Anthropic (GLM/Kimi/MiniMax)", "model", b.cfg.Model.Name)
+		logging.Debug("client created", "type", "Anthropic (GLM/DeepSeek)", "model", b.cfg.Model.Name)
 	} else if _, ok := b.mainClient.(*client.OllamaClient); ok {
 		logging.Debug("client created", "type", "Ollama", "model", b.cfg.Model.Name)
 	} else {
@@ -483,9 +483,8 @@ func (b *Builder) initTools() error {
 	if threshold := b.cfg.Tools.SmartValidation.SelfReviewThreshold; threshold > 0 && !b.options.Bare {
 		b.executor.SetSelfReviewThreshold(threshold)
 	}
-	// Per-turn hosted-model tool budget. The config field retains its legacy
-	// Kimi name; 0 disables and clamp-up happens in the setter.
-	b.executor.SetKimiToolBudget(b.cfg.Tools.KimiToolBudget)
+	// Per-turn hosted-model tool budget; 0 disables and the setter clamps low values.
+	b.executor.SetToolBudget(b.cfg.Tools.ToolBudget)
 	b.initCodeIntelligence()
 
 	compactor := appcontext.NewResultCompactor(b.cfg.Context.ToolResultMaxChars)
@@ -879,7 +878,7 @@ func (b *Builder) initSession() error {
 		b.promptBuilder.SetWorkingMemory(b.workingMemory)
 	}
 
-	// Provider-specific prompt addendum (Kimi/DeepSeek operating rules, etc.)
+	// Provider-specific prompt addendum (DeepSeek operating rules, etc.)
 	// + prefix-caching capability (gates the question-only prompt trimming).
 	provider := runtimeProviderForConfig(b.cfg)
 	b.promptBuilder.SetProvider(provider)
@@ -2428,7 +2427,7 @@ func (b *Builder) wireDependencies() error {
 	// a previously-pinned .gokin/pinned_context.md was silently dropped
 	// on startup. And without the updater, Execute() returned "pinned
 	// context not supported by this agent" to the model — a silent
-	// capability failure Kimi would report as "I don't have pin".
+	// capability failure the model would report as "I don't have pin".
 	if pinTool, ok := b.registry.Get("pin_context"); ok {
 		if pt, ok := pinTool.(*tools.PinContextTool); ok {
 			pt.SetWorkDir(b.workDir)
@@ -2440,7 +2439,7 @@ func (b *Builder) wireDependencies() error {
 	}
 
 	// Wire history_search: same class of bug as pin_context. Tool ships
-	// in the ToolSetMemory declaration (now always-on for Kimi), but
+	// in the ToolSetMemory declaration (always available), but
 	// without this getter it returns "history search not supported by
 	// this agent" — a silent false negative the model reports as
 	// "I can't search history".

@@ -15,7 +15,7 @@ func TestProjectLearningFlush_WritesProjectMemoryMarkdown(t *testing.T) {
 	}
 
 	pl.SetPreference("test_command", "use go test ./internal/ui -count=1")
-	pl.SetPreference("fact:auth_provider", "Kimi Coding Plan is the default provider")
+	pl.SetPreference("fact:auth_provider", "DeepSeek Coding Plan is the default provider")
 	pl.SetPreference("convention:gofmt", "run gofmt after UI changes")
 	pl.LearnPattern("live-card", "status and activity should stay visible during long tasks", nil, nil)
 
@@ -87,7 +87,7 @@ func TestProjectLearningFormatForPrompt_GroupsTypedKnowledge(t *testing.T) {
 	}
 
 	pl.SetPreference("test_command", "use go test ./...")
-	pl.SetPreference("fact:retry_policy", "Kimi gets softer idle retries")
+	pl.SetPreference("fact:retry_policy", "DeepSeek gets softer idle retries")
 	pl.SetPreference("convention:formatting", "run gofmt before tests")
 
 	prompt := pl.FormatForPrompt()

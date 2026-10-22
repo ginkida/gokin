@@ -6,9 +6,9 @@ import (
 	"google.golang.org/genai"
 )
 
-// v0.100.95 Kimi-friendliness sweep: the same empty-fingerprint class as the
+// v0.100.95 provider reliability sweep: the same empty-fingerprint class as the
 // todo field report, generalized to every dedicated inspection tool a
-// reasoning-heavy model (Kimi K3) runs repeatedly with DISTINCT args as
+// reasoning-heavy model (reasoning-heavy model) runs repeatedly with DISTINCT args as
 // exploration progress. Before this, they fell into stagnationFingerprint's
 // default "" case, so N distinct targets collapsed to one pattern and tripped
 // the 5-repeat abort.

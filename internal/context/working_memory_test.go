@@ -12,8 +12,8 @@ func TestWorkingMemory_UpdateFromTurn_WritesStructuredMarkdown(t *testing.T) {
 	mgr := NewWorkingMemoryManager(dir)
 
 	updated := mgr.UpdateFromTurn(WorkingMemoryTurn{
-		UserMessage:  "harden kimi reliability",
-		Response:     "Improved the Kimi retry path in internal/client/retry.go and added regression coverage.\nVerification: go test ./internal/client -count=1 passed.\nIf you want, next I can tune loop guard heuristics too.",
+		UserMessage:  "harden deepseek reliability",
+		Response:     "Improved the DeepSeek retry path in internal/client/retry.go and added regression coverage.\nVerification: go test ./internal/client -count=1 passed.\nIf you want, next I can tune loop guard heuristics too.",
 		ToolsUsed:    []string{"read", "edit", "bash"},
 		TouchedPaths: []string{"internal/client/retry.go", "internal/client/retry_test.go"},
 		Commands:     []string{"go test ./internal/client -count=1"},
@@ -26,7 +26,7 @@ func TestWorkingMemory_UpdateFromTurn_WritesStructuredMarkdown(t *testing.T) {
 	for _, needle := range []string{
 		"# Working Memory",
 		"## Established",
-		"Latest result: Improved the Kimi retry path in internal/client/retry.go and added regression coverage.",
+		"Latest result: Improved the DeepSeek retry path in internal/client/retry.go and added regression coverage.",
 		"Files changed: internal/client/retry.go, internal/client/retry_test.go",
 		"Verification already run: go test ./internal/client -count=1",
 		"## Next",
@@ -99,7 +99,7 @@ func TestWorkingMemory_LoadFromDisk_RestoresContent(t *testing.T) {
 func TestWorkingMemory_UpdateFromTurn_ExtractsUnknownAndNext(t *testing.T) {
 	mgr := NewWorkingMemoryManager(t.TempDir())
 	mgr.UpdateFromTurn(WorkingMemoryTurn{
-		Response: "Adjusted the retry policy for Kimi.\nCould not verify the Windows-specific path handling yet.\nNext step: run targeted Windows verification before broad rollout.",
+		Response: "Adjusted the retry policy for DeepSeek.\nCould not verify the Windows-specific path handling yet.\nNext step: run targeted Windows verification before broad rollout.",
 	})
 
 	content := mgr.GetContent()

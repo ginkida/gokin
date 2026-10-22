@@ -200,8 +200,8 @@ func TestExecutorExecuteLoop_PricesEachProviderRound(t *testing.T) {
 	}}
 	cl := &roundIdentityClient{
 		scriptedExecutorClient: base,
-		providers:              []string{"glm", "kimi", "deepseek"},
-		models:                 []string{"glm-5", "kimi-for-coding", "deepseek-v4"},
+		providers:              []string{"glm", "deepseek", "deepseek"},
+		models:                 []string{"glm-5", "deepseek-v4-pro", "deepseek-v4"},
 	}
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
@@ -218,7 +218,7 @@ func TestExecutorExecuteLoop_PricesEachProviderRound(t *testing.T) {
 	if !tracked || cost != 6 {
 		t.Fatalf("mixed-provider cost = tracked %v cost %v, want 6", tracked, cost)
 	}
-	want := []string{"glm/glm-5", "kimi/kimi-for-coding", "deepseek/deepseek-v4"}
+	want := []string{"glm/glm-5", "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4"}
 	if strings.Join(seen, ",") != strings.Join(want, ",") {
 		t.Fatalf("priced identities = %v, want %v", seen, want)
 	}

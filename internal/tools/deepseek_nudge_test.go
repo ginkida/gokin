@@ -8,10 +8,10 @@ import (
 	"google.golang.org/genai"
 )
 
-// DeepSeek V4 exhibits the same drift patterns as Kimi (eagerness to
+// DeepSeek V4 exhibits the same drift patterns as DeepSeek (eagerness to
 // re-read, skipping verification, jumping into tools without a plan).
 // These tests pin that the nudge-eligibility extends to deepseek so
-// every runtime guardrail that targets "kimi" also fires for deepseek.
+// every runtime guardrail that targets "deepseek" also fires for deepseek.
 
 func TestIsNudgeEligibleFamily_DeepSeekCovered(t *testing.T) {
 	cases := map[string]bool{
@@ -19,12 +19,9 @@ func TestIsNudgeEligibleFamily_DeepSeekCovered(t *testing.T) {
 		"deepseek-v4-flash": true,
 		"deepseek-chat":     true,
 		"deepseek-reasoner": true,
-		"kimi-for-coding":   true,
-		"kimi-k2.5":         true,
 		// Not eligible — these models self-consolidate.
 		"glm-5.1":           false,
 		"glm-4.7":           false,
-		"MiniMax-M2.7":      false,
 		"llama3.2":          false,
 		"":                  false,
 		"random-model-name": false,
@@ -68,7 +65,7 @@ func TestShouldInjectIntentNudge_DeepSeek(t *testing.T) {
 	}
 }
 
-func TestShouldInjectKimiWorkingMemory_DeepSeekCovered(t *testing.T) {
+func TestShouldInjectDeepSeekWorkingMemory_DeepSeekCovered(t *testing.T) {
 	// Name retained for log-marker stability; eligibility extended
 	// to deepseek. A single exploration tool with sizeable response
 	// should trigger the working-memory injection for deepseek.
@@ -78,28 +75,28 @@ func TestShouldInjectKimiWorkingMemory_DeepSeekCovered(t *testing.T) {
 			"content": string(make([]byte, 800)),
 		}},
 	}
-	if !shouldInjectKimiWorkingMemory("deepseek-v4-pro", calls, results) {
+	if !shouldInjectWorkingMemory("deepseek-v4-pro", calls, results) {
 		t.Error("working memory injection should fire for deepseek on large exploration result")
 	}
 	// Non-eligible family — stays silent.
-	if shouldInjectKimiWorkingMemory("glm-5.1", calls, results) {
+	if shouldInjectWorkingMemory("glm-5.1", calls, results) {
 		t.Error("working memory injection should NOT fire for GLM")
 	}
 }
 
-func TestBuildKimiToolErrorRecoveryNotification_DeepSeekFires(t *testing.T) {
+func TestBuildDeepSeekToolErrorRecoveryNotification_DeepSeekFires(t *testing.T) {
 	errResults := []*genai.FunctionResponse{
 		{Response: map[string]any{
 			"success": false,
 			"error":   "read-before-edit: call the read tool first",
 		}},
 	}
-	msg := buildKimiToolErrorRecoveryNotification("deepseek-v4-pro", errResults)
+	msg := buildToolErrorRecoveryNotification("deepseek-v4-pro", errResults)
 	if msg == "" {
 		t.Error("recovery notification should fire for deepseek on read-before-edit error")
 	}
 	// GLM — should stay empty.
-	if got := buildKimiToolErrorRecoveryNotification("glm-5.1", errResults); got != "" {
+	if got := buildToolErrorRecoveryNotification("glm-5.1", errResults); got != "" {
 		t.Errorf("recovery notification should NOT fire for GLM, got %q", got)
 	}
 }

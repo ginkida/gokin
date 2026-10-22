@@ -131,7 +131,7 @@ func TestQuestionTrimGatedOnPrefixCaching(t *testing.T) {
 // is true here to keep the question-trim from busting that cache.
 func TestProviderSupportsPrefixCaching(t *testing.T) {
 	for provider, want := range map[string]bool{
-		"kimi": true, "deepseek": true, "minimax": true, "anthropic": true,
+		"deepseek": true, "anthropic": true,
 		"glm": true, "ollama": false, "": false,
 	} {
 		if got := ProviderSupportsPrefixCaching(provider); got != want {

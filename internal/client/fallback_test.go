@@ -75,7 +75,7 @@ func TestNewFallbackClient_EmptyClients(t *testing.T) {
 
 func TestNewFallbackClient_RejectsNilClient(t *testing.T) {
 	valid := &fakeFallbackClientStub{id: "valid"}
-	_, err := NewFallbackClient([]Client{valid, nil}, []string{"glm", "kimi"})
+	_, err := NewFallbackClient([]Client{valid, nil}, []string{"glm", "deepseek"})
 	if err == nil {
 		t.Fatal("expected error for nil fallback child")
 	}
@@ -95,7 +95,7 @@ func TestNewFallbackClient_CopiesOwnedClientSlice(t *testing.T) {
 	replacement := &fakeFallbackClientStub{id: "replacement"}
 	input := []Client{first, second}
 
-	fc, err := NewFallbackClient(input, []string{"glm", "kimi"})
+	fc, err := NewFallbackClient(input, []string{"glm", "deepseek"})
 	if err != nil {
 		t.Fatalf("NewFallbackClient: %v", err)
 	}
@@ -143,12 +143,12 @@ func TestNewFallbackClient_Success(t *testing.T) {
 func TestNewFallbackClient_NormalizesProviderNames(t *testing.T) {
 	c1 := &fakeFallbackClientStub{id: "a"}
 	c2 := &fakeFallbackClientStub{id: "b"}
-	fc, err := NewFallbackClient([]Client{c1, c2}, []string{" GLM ", "KIMI"})
+	fc, err := NewFallbackClient([]Client{c1, c2}, []string{" GLM ", "DEEPSEEK"})
 	if err != nil {
 		t.Fatalf("NewFallbackClient: %v", err)
 	}
-	if got := fc.providers; len(got) != 2 || got[0] != "glm" || got[1] != "kimi" {
-		t.Fatalf("providers = %v, want [glm kimi]", got)
+	if got := fc.providers; len(got) != 2 || got[0] != "glm" || got[1] != "deepseek" {
+		t.Fatalf("providers = %v, want [glm deepseek]", got)
 	}
 }
 
@@ -312,7 +312,7 @@ func TestFallbackClient_SetModel(t *testing.T) {
 
 func TestFallbackClient_WithModel(t *testing.T) {
 	c1 := &fakeFallbackClientStub{id: "a", model: "glm-4"}
-	c2 := &fakeFallbackClientStub{id: "b", model: "kimi-k2"}
+	c2 := &fakeFallbackClientStub{id: "b", model: "deepseek-k2"}
 	fc, _ := NewFallbackClient([]Client{c1, c2}, []string{"test-fb-0", "test-fb-1"})
 
 	newFC := fc.WithModel("new-model")
@@ -330,14 +330,14 @@ func TestFallbackClient_WithModel(t *testing.T) {
 
 func TestFallbackClient_WithModel_PreservesFallbackProviderModel(t *testing.T) {
 	c1 := &fakeFallbackClientStub{id: "a", model: "glm-5.2"}
-	c2 := &fakeFallbackClientStub{id: "b", model: "kimi-for-coding"}
-	fc, _ := NewFallbackClient([]Client{c1, c2}, []string{"glm", "kimi"})
+	c2 := &fakeFallbackClientStub{id: "b", model: "deepseek-v4-pro"}
+	fc, _ := NewFallbackClient([]Client{c1, c2}, []string{"glm", "deepseek"})
 
 	got := fc.WithModel("glm-5.2").(*FallbackClient)
 	if got.clients[0].GetModel() != "glm-5.2" {
 		t.Fatalf("primary model = %q, want glm-5.2", got.clients[0].GetModel())
 	}
-	if got.clients[1].GetModel() != "kimi-for-coding" {
+	if got.clients[1].GetModel() != "deepseek-v4-pro" {
 		t.Fatalf("fallback model = %q, want provider-native model", got.clients[1].GetModel())
 	}
 }
@@ -358,12 +358,12 @@ func TestFallbackClient_WithModel_SelectedProviderCanWrapToEarlierFallback(t *te
 	glm := &fakeFallbackClientStub{id: "glm", model: "glm-5.2", sendResp: fallbackTestStream(
 		ResponseChunk{Text: "glm recovered", Done: true},
 	)}
-	kimi := &fakeFallbackClientStub{id: "kimi", model: "kimi-for-coding", sendErr: errors.New("kimi unavailable")}
-	fc, _ := NewFallbackClient([]Client{glm, kimi}, []string{"glm", "kimi"})
-	selected := fc.WithModel("kimi-for-coding").(*FallbackClient)
+	deepseek := &fakeFallbackClientStub{id: "deepseek", model: "deepseek-v4-pro", sendErr: errors.New("deepseek unavailable")}
+	fc, _ := NewFallbackClient([]Client{glm, deepseek}, []string{"glm", "deepseek"})
+	selected := fc.WithModel("deepseek-v4-pro").(*FallbackClient)
 	// Health persistence is process-global; keep this failure isolated from
 	// adaptive-retry tests for the real provider names.
-	selected.providers = []string{"test-fb-wrap-glm", "test-fb-wrap-kimi"}
+	selected.providers = []string{"test-fb-wrap-glm", "test-fb-wrap-deepseek"}
 
 	stream, err := selected.SendMessage(context.Background(), "hello")
 	if err != nil {
@@ -614,7 +614,7 @@ func TestFallbackClient_SendMessage_FailsOverOnEarlyStreamError(t *testing.T) {
 		ResponseChunk{RateLimit: &RateLimitMetadata{RequestsRemaining: 0}},
 		ResponseChunk{Error: errors.New("GLM 1305 overloaded"), Done: true},
 	)}
-	secondary := &fakeFallbackClientStub{id: "b", model: "kimi-for-coding", sendResp: fallbackTestStream(
+	secondary := &fakeFallbackClientStub{id: "b", model: "deepseek-v4-pro", sendResp: fallbackTestStream(
 		ResponseChunk{Text: "fallback ok", Done: true, FinishReason: genai.FinishReasonStop},
 	)}
 	fc, _ := NewFallbackClient([]Client{primary, secondary}, []string{"test-fb-stream-0", "test-fb-stream-1"})

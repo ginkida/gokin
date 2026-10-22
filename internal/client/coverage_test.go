@@ -58,7 +58,7 @@ func TestTimeoutError_Error_AllFormats(t *testing.T) {
 			name: "provider_only",
 			err: &TimeoutError{
 				Reason:   FailureReasonModelRoundTimeout,
-				Provider: "kimi",
+				Provider: "deepseek",
 				Err:      errors.New("round timeout"),
 			},
 			want: "model_round_timeout",
@@ -358,7 +358,7 @@ func TestIsRetryableAPIError_Coverage(t *testing.T) {
 	if !IsRetryableAPIError(&HTTPError{StatusCode: 503}) {
 		t.Error("HTTPError 503 should be retryable")
 	}
-	// HTTPError 400 model_not_found (MiniMax transient).
+	// HTTPError 400 model_not_found (transient gateway response).
 	if !IsRetryableAPIError(&HTTPError{StatusCode: 400, Message: "model_not_found"}) {
 		t.Error("HTTPError 400 model_not_found should be retryable")
 	}

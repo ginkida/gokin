@@ -60,32 +60,11 @@ var knownModelProfiles = map[string]ModelProfile{
 	"glm-4":       {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 	"glm":         {Family: "glm", ContextWindow: 128000, SupportsTools: true},
 
-	// Kimi family — K3 flagship plus the stable K2.7 Coding Plan IDs.
-	// Older IDs remain aliases so legacy configs still match a sane profile
-	// before config migration rewrites them.
-	"k3":                        {Family: "kimi", ContextWindow: 1048576, SupportsTools: true, IsCoding: true},
-	"kimi-for-coding-highspeed": {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"kimi-for-coding":           {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"kimi-k2.6":                 {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"kimi":                      {Family: "kimi", ContextWindow: 262144, SupportsTools: true, IsCoding: true},
-	"moonshot":                  {Family: "kimi", ContextWindow: 128000, SupportsTools: true},
-
-	// Gemini family removed in v0.65 (provider gone). Five entries
-	// deleted in v0.78.30 — they were dead since the factory has no
-	// "gemini" case, so no client call ever returned a model with these
-	// IDs and InferModelProfile lookup was unreachable.
-
-	// MiniMax family
-	"minimax-m2.7-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
-	"minimax-m2.7":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
-	"minimax-m2.5-highspeed": {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
-	"minimax-m2.5":           {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
-	"minimax":                {Family: "minimax", ContextWindow: 204800, SupportsTools: true, IsCoding: true},
-
 	// DeepSeek family. V4 Pro/Flash ship with a 1M-token context window.
 	// Legacy chat/reasoner now route to V4 Flash until retirement on
 	// 2026-07-24. All support tool calling via the Anthropic-compatible
 	// endpoint.
+	"deepseek-flash":    {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"deepseek-v4-pro":   {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"deepseek-v4-flash": {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true, IsCoding: true},
 	"deepseek-chat":     {Family: "deepseek", ContextWindow: 1000000, SupportsTools: true},
@@ -120,6 +99,10 @@ func GetModelProfile(modelName string) ModelProfile {
 	}
 	if bestMatch != "" {
 		profile := knownModelProfiles[bestMatch]
+		profile.IsSmall = profile.IsSmall || isSmallByTag(modelName)
+		return profile
+	}
+	if profile, ok := ollamaCompatibilityProfile(baseName); ok {
 		profile.IsSmall = profile.IsSmall || isSmallByTag(modelName)
 		return profile
 	}

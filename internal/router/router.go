@@ -1433,7 +1433,7 @@ func (r *Router) selectToolSetsForDecision(
 //
 // Current allowlist:
 //   - Weak: Core, Git, FileOps, Memory, Web, Planning
-//   - Medium: also Advanced (Kimi/GLM-4/MiniMax are capable enough)
+//   - Medium: also Advanced (DeepSeek/GLM-4 are capable enough)
 //   - Strong: no filtering
 //
 // Dropped for non-Strong tiers:

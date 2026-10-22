@@ -1,7 +1,6 @@
 package router
 
 import (
-	"strconv"
 	"strings"
 )
 
@@ -10,7 +9,7 @@ type CapabilityTier int
 
 const (
 	CapabilityWeak   CapabilityTier = iota // Ollama small, unknown models
-	CapabilityMedium                       // GLM, DeepSeek, Kimi, MiniMax
+	CapabilityMedium                       // GLM and DeepSeek
 	CapabilityStrong                       // GLM-5+
 )
 
@@ -52,18 +51,6 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 		// GLM-5+ models are strong-tier
 		m := strings.ToLower(modelName)
 		if strings.HasPrefix(m, "glm-5") {
-			cap.Tier = CapabilityStrong
-		}
-	case "kimi", "minimax":
-		cap.Tier = CapabilityMedium
-		// Kimi K2.6 (kimi-for-coding on the Coding Plan endpoint) and
-		// newer K2.x variants are Strong-tier in practice: 262K context,
-		// comparable SWE-bench to Opus-class models, fine-grained tool
-		// use. Keeping them in Medium silently triggered decompose=-1
-		// + 1.2× thinking budget multiplier — both of which over-fire
-		// for the current Kimi generation. Older kimi-k2.5 stays Medium.
-		m := strings.ToLower(modelName)
-		if p == "kimi" && isStrongKimiCodingModel(m) {
 			cap.Tier = CapabilityStrong
 		}
 	case "deepseek":
@@ -109,39 +96,4 @@ func InferModelCapability(provider, modelName string) *ModelCapability {
 func isStrongDeepSeekModel(modelName string) bool {
 	m := strings.ToLower(strings.TrimSpace(modelName))
 	return strings.HasPrefix(m, "deepseek-v4-pro")
-}
-
-func isStrongKimiCodingModel(modelName string) bool {
-	m := strings.ToLower(strings.TrimSpace(modelName))
-	// Kimi K3 flagship (1M context, always-on reasoning, Opus-class
-	// SWE-bench) — the coding endpoint serves it as bare "k3". Match the
-	// exact id and any future "k3-*" variant, but not an unrelated model
-	// that merely contains "k3".
-	if m == "k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3") {
-		return true
-	}
-	if strings.HasPrefix(m, "kimi-for-coding") {
-		return true
-	}
-
-	const prefix = "kimi-k2."
-	if !strings.HasPrefix(m, prefix) {
-		return false
-	}
-	rest := m[len(prefix):]
-	end := 0
-	for end < len(rest) {
-		if rest[end] < '0' || rest[end] > '9' {
-			break
-		}
-		end++
-	}
-	if end == 0 {
-		return false
-	}
-	minor, err := strconv.Atoi(rest[:end])
-	if err != nil {
-		return false
-	}
-	return minor >= 6
 }

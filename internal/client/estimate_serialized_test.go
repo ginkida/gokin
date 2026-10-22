@@ -44,19 +44,19 @@ func TestEstimateTokens_MatchesProviderSpecificUnsignedThinkingReplay(t *testing
 			plain.TotalTokens, inflated.TotalTokens)
 	}
 
-	// Kimi accepts omission of unsigned thoughts and still uses the legacy drop
+	// A tolerant gateway accepts omission of unsigned thoughts and uses the drop
 	// behavior, so the same history must not inflate its serialized estimate.
-	kimi := &AnthropicClient{config: AnthropicConfig{Model: "kimi-for-coding", BaseURL: DefaultKimiBaseURL}}
-	kimiPlain, err := kimi.estimateTokens(base, "kimi-for-coding", "", "", nil)
+	deepseek := &AnthropicClient{config: AnthropicConfig{Model: "deepseek-v4-pro", BaseURL: DefaultDeepSeekBaseURL}}
+	deepseekPlain, err := deepseek.estimateTokens(base, "deepseek-v4-pro", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kimiDropped, err := kimi.estimateTokens(withUnsignedThinking, "kimi-for-coding", "", "", nil)
+	deepseekDropped, err := deepseek.estimateTokens(withUnsignedThinking, "deepseek-v4-pro", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diff := kimiDropped.TotalTokens - kimiPlain.TotalTokens; diff > 50 {
-		t.Fatalf("dropped Kimi thinking inflated estimate by %d tokens", diff)
+	if diff := deepseekDropped.TotalTokens - deepseekPlain.TotalTokens; diff > 50 {
+		t.Fatalf("dropped DeepSeek thinking inflated estimate by %d tokens", diff)
 	}
 
 	// SIGNED thinking IS serialized (replayable) and must still be counted.

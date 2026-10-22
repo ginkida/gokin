@@ -29,21 +29,21 @@ func TestGetTokenStatsIncludesCachedInput(t *testing.T) {
 
 func TestSessionCostLedgerDoesNotRepriceAfterModelSwitch(t *testing.T) {
 	glm := appcontext.NewTokenCounter(nil, "glm-5", nil)
-	kimi := appcontext.NewTokenCounter(nil, "kimi-for-coding", nil)
-	glmTurnCost := glm.CalculateCostWithCache(1_000_000, 0, 1_000_000) // $0.20 cached GLM input
-	kimiTurnCost := kimi.CalculateCostWithCache(1_000_000, 0, 0)       // $0.95 Kimi input
+	deepseek := appcontext.NewTokenCounter(nil, "deepseek-v4-pro", nil)
+	glmTurnCost := glm.CalculateCostWithCache(1_000_000, 0, 1_000_000)   // $0.20 cached GLM input
+	deepseekTurnCost := deepseek.CalculateCostWithCache(1_000_000, 0, 0) // $1.32 DeepSeek peak input
 
 	// Simulate two completed turns separated by /model. The ledger stores the
 	// price at execution time instead of repricing both million-token prompts
 	// with whichever model happens to be active when /stats is opened.
 	a := &App{
 		totalInputTokens:   2_000_000,
-		totalEstimatedCost: glmTurnCost + kimiTurnCost,
+		totalEstimatedCost: glmTurnCost + deepseekTurnCost,
 		costTracked:        true,
 	}
 	stats := a.GetTokenStats()
-	if stats.EstimatedCost != 1.15 {
-		t.Fatalf("mixed-model ledger cost = %v, want 1.15", stats.EstimatedCost)
+	if stats.EstimatedCost != 1.52 {
+		t.Fatalf("mixed-model ledger cost = %v, want 1.52", stats.EstimatedCost)
 	}
 	if !stats.CostTracked {
 		t.Fatal("mixed-model ledger should be authoritative")

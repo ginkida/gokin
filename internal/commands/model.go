@@ -19,14 +19,11 @@ func (c *ModelCommand) Usage() string {
 /model glm-5.3-flash    - GLM-5.3 Flash (default, native images, 1M context)
 /model glm-5.3          - GLM-5.3 (flagship, 1M context, always-on reasoning)
 /model glm-5.2          - GLM-5.2 (previous flagship)
-/model k3               - Kimi K3 (Coding Plan flagship, 1M context)
-/model kimi-for-coding  - Kimi K2.7 Coding Plan (256K context)
 /model glm-5.1          - GLM-5.1 (previous flagship)
 /model glm-5            - GLM-5 (stable)
 /model glm-4.7          - GLM-4.7 (thinking-enabled)
-/model MiniMax-M2.7     - MiniMax M2.7 (200K context)
 /model deepseek-v4-pro  - DeepSeek V4 Pro (Strong-tier, 1M context)
-/model deepseek-v4-flash - DeepSeek V4 Flash (fast & cheap, 1M context)`
+/model deepseek-flash   - DeepSeek Flash (1M context; deepseek-v4-flash alias accepted)`
 }
 func (c *ModelCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
@@ -89,19 +86,10 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		switch activeProvider {
 		case "glm":
 			sb.WriteString("\nExamples: /model glm-5.3  or  /model glm-5.3-flash  or  /model glm-4.7")
-		case "minimax":
-			sb.WriteString("\nExamples: /model M2.7  or  /model M2.7-highspeed  or  /model M2.5")
-		case "kimi":
-			// Kimi Coding Plan serves k3 (flagship, 1M ctx — requires
-			// Moderato+ / Allegretto+ subscription) plus the K2.7 coding
-			// models available on every tier.
-			sb.WriteString("\nExamples: /model k3  (flagship K3, 1M context, always-on reasoning)" +
-				"\n          /model kimi-for-coding  (K2.7, 256K context — all tiers)" +
-				"\n          /model kimi-for-coding-highspeed  (K2.7, faster output)")
 		case "deepseek":
 			sb.WriteString("\nExamples: /model deepseek-v4-pro  (flagship, Strong-tier, 1M ctx)" +
 				"\n          /model deepseek-v4-flash  (fast/cheap V4, 1M ctx)" +
-				"\n          /model deepseek-reasoner  (legacy, deprecates 2026-07-24)")
+				"\n          /model deepseek-flash  (current Flash model, 1M ctx)")
 		case "ollama":
 			sb.WriteString("\nExample: /model llama3.2  or any model pulled locally via `ollama pull …`")
 		}
@@ -203,12 +191,6 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 	if providerSwitched {
 		return fmt.Sprintf("Switched to %s (%s) on %s — session cleared", modelName, matchedModel, matchedProvider), nil
 	}
-	if matchedProvider == "kimi" {
-		// Kimi documents that a model switch invalidates the model-specific
-		// context cache. Keep same-provider history by user choice, but make the
-		// expensive first re-prefill explicit instead of looking like a cache bug.
-		return fmt.Sprintf("Switched to %s (%s) — Kimi model switch invalidates the prompt cache; use /clear for a fresh, lower-cost session", modelName, matchedModel), nil
-	}
 	return fmt.Sprintf("Switched to %s (%s)", modelName, matchedModel), nil
 }
 
@@ -281,19 +263,6 @@ func extractShortName(modelID string) string {
 	// GLM models
 	if strings.HasPrefix(modelID, "glm") {
 		return modelID // Return full ID for GLM (e.g., "glm-4.7")
-	}
-
-	// MiniMax models
-	if after, ok := strings.CutPrefix(modelID, "MiniMax-"); ok {
-		return after
-	}
-	if after, ok := strings.CutPrefix(modelID, "minimax-"); ok {
-		return after
-	}
-
-	// Kimi models
-	if after, ok := strings.CutPrefix(modelID, "kimi-"); ok {
-		return after
 	}
 
 	// DeepSeek models — strip the provider prefix so /model v4-pro works.

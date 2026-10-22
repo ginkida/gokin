@@ -26,13 +26,6 @@ var (
 // on moderately complex tasks. Users can override via cfg.Model.ThinkingBudget.
 const defaultGLMThinkingBudget = 8192
 
-// defaultKimiThinkingBudget mirrors the GLM default for Kimi Coding Plan.
-// The Coding Plan endpoint implements Anthropic's Extended Thinking
-// protocol, so the TUI gets dim-italic "thinking" content streamed via
-// thinking_delta events. 8192 tokens is enough for multi-step plans without
-// blowing through the subscription budget on short tasks.
-const defaultKimiThinkingBudget = 8192
-
 // thinkingBudgetMin / thinkingBudgetMax are the API-enforced bounds for
 // Anthropic-compat Extended Thinking. Requests outside this range 400 at
 // the provider with a cryptic error. We normalize to the default rather
@@ -44,7 +37,7 @@ const (
 )
 
 // normalizeThinkingBudget repairs a configured budget for a provider call.
-// Used by GLM / Kimi factories so a user's hand-edited typo in config.yaml
+// Used by GLM / DeepSeek factories so a user's hand-edited typo in config.yaml
 // doesn't produce a runtime 400 on the first message. 0 means "unset — use
 // the auto-default"; any other out-of-range value falls back to default.
 //
@@ -91,6 +84,7 @@ func ClosePool() {
 // clients for the primary provider and each fallback provider.
 // Uses the connection pool to reuse existing clients when possible.
 func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client, error) {
+	useConfiguredModel := modelID == "" || modelID == cfg.Model.Name
 	// Migrate configuration to new format
 	config.MigrateConfig(cfg)
 
@@ -99,8 +93,8 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 		return nil, err
 	}
 
-	// If modelID is not specified, use default from config
-	if modelID == "" {
+	// Follow migration/normalization when the caller passed the configured model.
+	if useConfiguredModel {
 		modelID = cfg.Model.Name
 	}
 
@@ -225,7 +219,7 @@ func fallbackProviderCandidates(primary string, fallbacks []string) []string {
 
 // fallbackConfigForProvider prevents the primary model's custom endpoint from
 // leaking into unrelated provider fallbacks. A custom GLM gateway cannot be
-// assumed to serve Kimi/MiniMax model namespaces.
+// assumed to serve DeepSeek/GLM model namespaces.
 func fallbackConfigForProvider(cfg *config.Config, primaryProvider, provider string) *config.Config {
 	if cfg == nil || strings.EqualFold(strings.TrimSpace(primaryProvider), strings.TrimSpace(provider)) ||
 		strings.TrimSpace(cfg.Model.CustomBaseURL) == "" {
@@ -238,7 +232,7 @@ func fallbackConfigForProvider(cfg *config.Config, primaryProvider, provider str
 
 // fallbackModelForProvider keeps the explicitly requested model on its primary
 // provider and uses each fallback provider's registered default everywhere
-// else. Provider APIs do not share model namespaces (for example, Kimi cannot
+// else. Provider APIs do not share model namespaces (for example, DeepSeek cannot
 // serve "glm-5.2").
 func fallbackModelForProvider(primaryProvider, provider, requestedModel string) string {
 	if strings.EqualFold(strings.TrimSpace(primaryProvider), strings.TrimSpace(provider)) {
@@ -311,10 +305,6 @@ func createClientForProvider(ctx context.Context, cfg *config.Config, provider, 
 	switch provider {
 	case "glm":
 		return newGLMClient(cfg, modelID)
-	case "minimax":
-		return newMiniMaxClient(cfg, modelID)
-	case "kimi":
-		return newKimiClient(cfg, modelID)
 	case "deepseek":
 		return newDeepSeekClient(cfg, modelID)
 	case "ollama":
@@ -373,14 +363,7 @@ func EffectiveProviderTimeouts(cfg *config.Config, provider string) ProviderTime
 	switch provider {
 	case "glm":
 		defaultIdle, defaultHTTP = 180*time.Second, 5*time.Minute
-	case "kimi":
-		// Kimi Coding Plan regularly emits partial output and then spends more
-		// than two minutes in a silent reasoning/tool phase. Runtime logs showed
-		// healthy-looking streams terminating exactly at the old 2m boundary;
-		// match GLM's patient stall-prone profile while retaining the 5m header
-		// and overall model-round backstops.
-		defaultIdle, defaultHTTP = 180*time.Second, 5*time.Minute
-	case "minimax", "deepseek":
+	case "deepseek":
 		defaultIdle, defaultHTTP = 120*time.Second, 5*time.Minute
 	case "ollama":
 		defaultIdle, defaultHTTP = 0, config.DefaultHTTPTimeout
@@ -489,152 +472,12 @@ func supportsGLMThinking(modelID string) bool {
 	return strings.HasPrefix(m, "glm-5") || strings.HasPrefix(m, "glm-4.7")
 }
 
-// newMiniMaxClient creates a MiniMax client using Anthropic-compatible API.
-func newMiniMaxClient(cfg *config.Config, modelID string) (Client, error) {
-	p := config.GetProvider("minimax")
-	if p == nil {
-		return nil, fmt.Errorf("provider registry missing entry for minimax")
-	}
-	legacyKey := ""
-	if p.UsesLegacyKey {
-		legacyKey = cfg.API.APIKey
-	}
-	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
-
-	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
-	}
-
-	logging.Debug("loaded API key",
-		"provider", p.Name,
-		"source", loadedKey.Source,
-		"model", modelID)
-
-	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
-	}
-
-	baseURL := cfg.Model.CustomBaseURL
-	if baseURL == "" {
-		baseURL = DefaultMiniMaxBaseURL
-	}
-
-	// MiniMax may have long silent reasoning/tool phases.
-	// Use relaxed defaults unless user explicitly configured stricter values.
-	timeouts := EffectiveProviderTimeouts(cfg, "minimax")
-
-	anthropicConfig := AnthropicConfig{
-		APIKey:            loadedKey.Value,
-		BaseURL:           baseURL,
-		Model:             modelID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    cfg.Model.EnableThinking,
-		ThinkingBudget:    cfg.Model.ThinkingBudget,
-		StreamIdleTimeout: timeouts.StreamIdleTimeout,
-		MaxRetries:        0, // Request retries are orchestrated at App layer.
-		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       timeouts.ResponseHeaderTimeout,
-		Provider:          "minimax",
-	}
-
-	return NewAnthropicClient(anthropicConfig)
-}
-
-// newKimiClient creates a Kimi Code client using Anthropic-compatible API.
-func newKimiClient(cfg *config.Config, modelID string) (Client, error) {
-	p := config.GetProvider("kimi")
-	if p == nil {
-		return nil, fmt.Errorf("provider registry missing entry for kimi")
-	}
-	legacyKey := ""
-	if p.UsesLegacyKey {
-		legacyKey = cfg.API.APIKey
-	}
-	loadedKey := security.GetProviderKey(p.EnvVars, p.GetKey(&cfg.API), legacyKey)
-
-	if !loadedKey.IsSet() {
-		return nil, fmt.Errorf("%s API key required (set %s environment variable or use /login %s <key>)", p.DisplayName, p.EnvVars[0], p.Name)
-	}
-
-	logging.Debug("loaded API key",
-		"provider", p.Name,
-		"source", loadedKey.Source,
-		"model", modelID)
-
-	if err := security.ValidateKeyFormat(loadedKey.Value); err != nil {
-		return nil, fmt.Errorf("invalid %s API key: %w", p.DisplayName, err)
-	}
-
-	baseURL := cfg.Model.CustomBaseURL
-	if baseURL == "" {
-		baseURL = DefaultKimiBaseURL
-	}
-
-	// Kimi may pause longer between chunks on complex tool chains.
-	timeouts := EffectiveProviderTimeouts(cfg, "kimi")
-
-	// Kimi Coding Plan models support Extended Thinking. Enable by default
-	// if the user hasn't explicitly configured it — the dim-italic reasoning
-	// content is exactly the signal users want when they see the model pause
-	// between tool calls. Mirrors the GLM auto-enable path above.
-	enableThinking := cfg.Model.EnableThinking
-	thinkingBudget := cfg.Model.ThinkingBudget
-	if !enableThinking && thinkingBudget == 0 && supportsKimiThinking(modelID) {
-		enableThinking = true
-		thinkingBudget = defaultKimiThinkingBudget
-	}
-	// If thinking is active, repair an out-of-range budget (hand-edited
-	// config.yaml with a typo) so the first message doesn't 400 at Kimi.
-	if enableThinking {
-		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultKimiThinkingBudget)
-	}
-
-	anthropicConfig := AnthropicConfig{
-		APIKey:            loadedKey.Value,
-		BaseURL:           baseURL,
-		Model:             modelID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    enableThinking,
-		ThinkingBudget:    thinkingBudget,
-		StreamIdleTimeout: timeouts.StreamIdleTimeout,
-		MaxRetries:        0, // Request retries are orchestrated at App layer.
-		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       timeouts.ResponseHeaderTimeout,
-		Provider:          "kimi",
-	}
-
-	return NewAnthropicClient(anthropicConfig)
-}
-
-// supportsKimiThinking returns true for Kimi models that implement Extended
-// Thinking on the Coding Plan endpoint. K3 and the stable K2.7 coding IDs do;
-// the prefix match also covers compatible future variants.
-func supportsKimiThinking(modelID string) bool {
-	m := strings.ToLower(modelID)
-	// K3 always reasons and emits SIGNED thinking on the Anthropic-compat
-	// endpoint (probed 2026-07: signature_delta present, thinking:{type:
-	// enabled,budget_tokens} accepted). "k3"/"k3-*"/"kimi-k3*" plus the K2.x
-	// coding models all support Extended Thinking.
-	return m == "k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3") ||
-		strings.HasPrefix(m, "kimi-for-coding") ||
-		strings.HasPrefix(m, "kimi-k2")
-}
-
-// defaultDeepSeekThinkingBudget mirrors the Kimi/GLM default — 8192 tokens
-// of reasoning is enough for tool-chain planning but keeps request cost
-// predictable. DeepSeek V4 supports Extended Thinking on the Anthropic-
-// compat endpoint with the same `thinking: {type: "enabled", budget_tokens: N}`
-// shape our AnthropicClient already emits.
+// defaultDeepSeekThinkingBudget selects high effort through the shared
+// adaptive-budget mapping. DeepSeek ignores numeric budget_tokens.
 const defaultDeepSeekThinkingBudget = 8192
 
 // newDeepSeekClient creates a DeepSeek client using the Anthropic-compat
-// endpoint (/anthropic). DeepSeek V4 speaks the same wire format as Kimi
-// Coding Plan, so we reuse AnthropicClient verbatim — only the base URL,
-// provider label, and thinking-auto-enable logic differ.
+// endpoint (/anthropic), using the shared Anthropic wire-format client.
 func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	p := config.GetProvider("deepseek")
 	if p == nil {
@@ -669,14 +512,16 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	// matches real-world behaviour.
 	timeouts := EffectiveProviderTimeouts(cfg, "deepseek")
 
-	// Auto-enable Extended Thinking for V4 / reasoner. deepseek-chat is
-	// a plain chat model and shouldn't get a thinking budget — the API
-	// rejects thinking blocks on that route with 400.
+	// Auto-enable thinking for supported model IDs. Saved retired IDs are
+	// resolved to current Flash before this factory runs.
 	enableThinking := cfg.Model.EnableThinking
 	thinkingBudget := cfg.Model.ThinkingBudget
 	if !enableThinking && thinkingBudget == 0 && supportsDeepSeekThinking(modelID) {
 		enableThinking = true
 		thinkingBudget = defaultDeepSeekThinkingBudget
+	}
+	if config.ResolveThinkingMode(cfg.Model.ThinkingMode) == config.ThinkingModeOff {
+		enableThinking = false
 	}
 	if enableThinking {
 		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultDeepSeekThinkingBudget)
@@ -691,6 +536,7 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    enableThinking,
 		ThinkingBudget:    thinkingBudget,
+		ReasoningEffort:   cfg.Model.ReasoningEffort,
 		StreamIdleTimeout: timeouts.StreamIdleTimeout,
 		MaxRetries:        0, // Request retries are orchestrated at App layer.
 		RetryDelay:        cfg.API.Retry.RetryDelay,
@@ -701,16 +547,14 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	return NewAnthropicClient(anthropicConfig)
 }
 
-// supportsDeepSeekThinking reports whether the model supports Extended
-// Thinking. V4 (pro + flash) and the legacy `deepseek-reasoner` do;
-// `deepseek-chat` does not — it's a pure chat model and the API rejects
-// thinking blocks on that route.
+// supportsDeepSeekThinking covers current IDs and legacy reasoning aliases.
+// Retired chat/reasoner config selections resolve to Flash before construction.
 func supportsDeepSeekThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
 	if m == "deepseek-chat" {
 		return false
 	}
-	return strings.HasPrefix(m, "deepseek-v4") ||
+	return m == "deepseek-flash" || strings.HasPrefix(m, "deepseek-v4") ||
 		strings.HasPrefix(m, "deepseek-reasoner") ||
 		m == "deepseek"
 }

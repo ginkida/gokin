@@ -43,7 +43,7 @@ func saveFixtureSessionForResume(t *testing.T, provider, workDir string) {
 func TestResumeLastSession_RefusesCrossProviderRestore(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	workDir := t.TempDir()
-	saveFixtureSessionForResume(t, "kimi", workDir)
+	saveFixtureSessionForResume(t, "glm", workDir)
 
 	session := chat.NewSession()
 	session.WorkDir = workDir
@@ -62,7 +62,7 @@ func TestResumeLastSession_RefusesCrossProviderRestore(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ResumeLastSession to refuse a cross-provider restore, got nil error")
 	}
-	if !strings.Contains(err.Error(), "kimi") || !strings.Contains(err.Error(), "deepseek") {
+	if !strings.Contains(err.Error(), "glm") || !strings.Contains(err.Error(), "deepseek") {
 		t.Fatalf("error = %q, want it to name both providers", err.Error())
 	}
 	if len(session.GetHistory()) != 0 {
@@ -169,9 +169,9 @@ func TestResumeSession_ExactFailuresNeverMutateActiveSession(t *testing.T) {
 		{
 			name: "provider mismatch",
 			id:   "fixture-session",
-			want: "kimi",
+			want: "glm",
 			prepare: func(t *testing.T, _ string, activeWorkDir string) {
-				saveFixtureSessionForResume(t, "kimi", activeWorkDir)
+				saveFixtureSessionForResume(t, "glm", activeWorkDir)
 			},
 		},
 	}

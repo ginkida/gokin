@@ -8,7 +8,7 @@ import (
 )
 
 // TestDetectUnslashedCommand verifies the "forgot the slash" heuristic that
-// surfaces when a user types `provider kimi` (no slash) and it silently
+// surfaces when a user types `provider deepseek` (no slash) and it silently
 // goes to the LLM instead of running as a command. Must fire for obvious
 // typos without flagging genuine natural-language prompts.
 func TestDetectUnslashedCommand(t *testing.T) {
@@ -22,21 +22,21 @@ func TestDetectUnslashedCommand(t *testing.T) {
 		wantHint bool
 	}{
 		// Should fire: obvious forgot-slash patterns the user reported.
-		{"provider + arg", "provider kimi", true},
+		{"provider + arg", "provider deepseek", true},
 		{"login + provider + key", "login deepseek sk-abc", true},
 		{"bare provider", "provider", true},
 		{"bare clear", "clear", true},
 		{"bare help", "help", true},
 		{"model + name", "model deepseek-v4-pro", true},
-		{"case insensitive first word", "Provider kimi", true},
+		{"case insensitive first word", "Provider deepseek", true},
 
 		// Should NOT fire: genuine natural language.
 		{"sentence with punctuation", "provider options, please.", false},
-		{"question mark", "provider kimi?", false},
+		{"question mark", "provider deepseek?", false},
 		{"long sentence", "I want to provider a new model for testing", false},
-		{"contains colon", "provider: kimi", false},
+		{"contains colon", "provider: deepseek", false},
 		{"first word not a command", "explain this code", false},
-		{"explicit command", "/provider kimi", false},
+		{"explicit command", "/provider deepseek", false},
 		{"empty", "", false},
 		{"spaces only", "   ", false},
 		{"first word unknown", "foo bar baz", false},
@@ -69,7 +69,7 @@ func TestDetectUnslashedCommand(t *testing.T) {
 // Nil-safe: if App is malformed (no commandHandler), must not panic.
 func TestDetectUnslashedCommand_NilHandler(t *testing.T) {
 	app := &App{}
-	got := app.detectUnslashedCommand("provider kimi")
+	got := app.detectUnslashedCommand("provider deepseek")
 	if got != "" {
 		t.Errorf("expected empty hint when commandHandler is nil, got %q", got)
 	}

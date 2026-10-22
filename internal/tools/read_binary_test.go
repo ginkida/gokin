@@ -11,7 +11,7 @@ import (
 )
 
 // Binary files used to return Success=true with a "Binary file..." text
-// payload — Kimi treated that as "file read, I'm done" and would then
+// payload — DeepSeek treated that as "file read, I'm done" and would then
 // confidently describe contents it never saw. The fix: Success=false so
 // the model knows to recover (use a different tool, give up on the
 // file, or explicitly ask).

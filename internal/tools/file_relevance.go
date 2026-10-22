@@ -62,7 +62,7 @@ func fileRelevanceScore(path string, matchCount int) float64 {
 	if !isTestPath(path) {
 		// Bonus sized so a 2-hit source file beats an 8-hit test file
 		// (bias target: definition sites outrank usage sites for
-		// "where is X?" — Kimi's dominant query pattern).
+		// "where is X?" — the model's dominant query pattern).
 		score += 2.5
 	}
 	if !isVendorPath(path) {

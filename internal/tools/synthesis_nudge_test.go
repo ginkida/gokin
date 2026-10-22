@@ -5,33 +5,33 @@ import (
 	"testing"
 )
 
-func TestShouldInjectSynthesisNudge_OnlyKimiFamily(t *testing.T) {
-	// Kimi at threshold → fire.
-	if !shouldInjectSynthesisNudge("kimi-for-coding", 3) {
-		t.Error("kimi at threshold must trigger nudge")
+func TestShouldInjectSynthesisNudge_OnlyDeepSeekFamily(t *testing.T) {
+	// DeepSeek at threshold → fire.
+	if !shouldInjectSynthesisNudge("deepseek-v4-pro", 3) {
+		t.Error("deepseek at threshold must trigger nudge")
 	}
-	// GLM / MiniMax / Ollama at threshold → no nudge (Strong-tier models
+	// GLM / Ollama at threshold → no nudge (Strong-tier models
 	// self-consolidate; nudging regresses their behaviour).
-	for _, model := range []string{"glm-5.1", "MiniMax-M2.7", "llama3.2", "gpt-4"} {
+	for _, model := range []string{"glm-5.1", "glm-4.7", "llama3.2", "gpt-4"} {
 		if shouldInjectSynthesisNudge(model, 10) {
-			t.Errorf("non-kimi %q should not trigger synthesis nudge", model)
+			t.Errorf("non-deepseek %q should not trigger synthesis nudge", model)
 		}
 	}
 }
 
 func TestShouldInjectSynthesisNudge_BelowThresholdSuppressed(t *testing.T) {
 	for i := 0; i < synthesisNudgeThreshold; i++ {
-		if shouldInjectSynthesisNudge("kimi-for-coding", i) {
+		if shouldInjectSynthesisNudge("deepseek-v4-pro", i) {
 			t.Errorf("nudge fired at count=%d (<%d threshold)", i, synthesisNudgeThreshold)
 		}
 	}
 }
 
 func TestShouldInjectSynthesisNudge_FiresAtExactThreshold(t *testing.T) {
-	if !shouldInjectSynthesisNudge("kimi-for-coding", synthesisNudgeThreshold) {
+	if !shouldInjectSynthesisNudge("deepseek-v4-pro", synthesisNudgeThreshold) {
 		t.Errorf("must fire at exact threshold %d", synthesisNudgeThreshold)
 	}
-	if !shouldInjectSynthesisNudge("kimi-for-coding", synthesisNudgeThreshold+10) {
+	if !shouldInjectSynthesisNudge("deepseek-v4-pro", synthesisNudgeThreshold+10) {
 		t.Error("must continue firing past threshold (gate is >=)")
 	}
 }

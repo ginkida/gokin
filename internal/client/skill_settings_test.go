@@ -26,13 +26,13 @@ func TestResolveSkillModelSettings(t *testing.T) {
 		{"glm", "glm-5.3", "glm-5.3-flashx", "max", "glm-5.3-flashx", "max", false},
 		{"glm", "glm-5.3", "GLM-5.3-FLASH", "high", "glm-5.3-flash", "high", false},
 		{"glm", "glm-5.3", "glm-4.7", "", "glm-4.7", "", false},
-		{"glm", "glm-5.3", "MiniMax-M2.7", "", "", "", true},
+		{"glm", "glm-5.3", "deepseek-v4-pro", "", "", "", true},
 		{"glm", "glm-5.3", "made-up", "", "", "", true},
 		{"glm", "glm-5.3", "glm-4.7", "max", "", "", true},
 		{"glm", "glm-5.3", "inherit", "garbage", "", "", true},
-		{"kimi", "k3", "sonnet", "", "", "", true},
-		{"kimi", "k3", "inherit", "high", "", "", true},
-		{"kimi", "k3", "inherit", "", "k3", "", false},
+		{"deepseek", "deepseek-v4-pro", "sonnet", "", "", "", true},
+		{"deepseek", "deepseek-v4-pro", "inherit", "high", "", "", true},
+		{"deepseek", "deepseek-v4-pro", "inherit", "", "deepseek-v4-pro", "", false},
 	} {
 		t.Run(tc.provider+"/"+tc.selection+"/"+tc.effort, func(t *testing.T) {
 			c := &AnthropicClient{config: AnthropicConfig{Provider: tc.provider, Model: tc.current}}
@@ -114,7 +114,7 @@ func TestRequestEffortOverrideIsConcurrentLocalAndCoversToolResults(t *testing.T
 
 func TestUnsupportedRequestEffortFailsBeforeNetwork(t *testing.T) {
 	for _, tc := range []struct{ provider, model, effort string }{
-		{"kimi", "k3", "high"}, {"glm", "glm-4.7", "max"}, {"glm", "glm-5.3", "medium"},
+		{"deepseek", "deepseek-v4-pro", "high"}, {"glm", "glm-4.7", "max"}, {"glm", "glm-5.3", "medium"},
 	} {
 		c := &AnthropicClient{config: AnthropicConfig{Provider: tc.provider, Model: tc.model}}
 		ctx := ContextWithReasoningEffort(t.Context(), tc.effort)

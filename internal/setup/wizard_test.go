@@ -104,8 +104,8 @@ func TestDetectEnvAPIKeys_LegacyGOKIN_APIKEY_Ignored(t *testing.T) {
 		"GOKIN_API_KEY",
 		"GOKIN_GLM_KEY", "GLM_API_KEY",
 		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY",
-		"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY",
-		"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
+		"GOKIN_GLM_KEY", "GLM_API_KEY",
+		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
 		"GOKIN_OLLAMA_KEY", "OLLAMA_API_KEY",
 	}
 	for _, k := range allKeyVars {
@@ -129,8 +129,8 @@ func TestDetectEnvAPIKeys_ProviderSpecific(t *testing.T) {
 		"GOKIN_ANTHROPIC_KEY", "ANTHROPIC_API_KEY",
 		"GOKIN_GLM_KEY", "GLM_API_KEY",
 		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY",
-		"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY",
-		"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
+		"GOKIN_GLM_KEY", "GLM_API_KEY",
+		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
 		"GOKIN_OLLAMA_KEY", "OLLAMA_API_KEY",
 	}
 	originals := make(map[string]string, len(allKeyVars))
@@ -175,8 +175,8 @@ func TestDetectEnvAPIKeys_NoneFound(t *testing.T) {
 		"GOKIN_ANTHROPIC_KEY", "ANTHROPIC_API_KEY",
 		"GOKIN_GLM_KEY", "GLM_API_KEY",
 		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY",
-		"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY",
-		"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
+		"GOKIN_GLM_KEY", "GLM_API_KEY",
+		"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
 		"GOKIN_OLLAMA_KEY", "OLLAMA_API_KEY",
 	}
 
@@ -440,7 +440,7 @@ func TestValidateAPIKeyReal(t *testing.T) {
 		t.Skip("skipping real HTTP validation tests in short mode")
 	}
 
-	providers := []string{"glm", "deepseek", "anthropic", "minimax", "kimi"}
+	providers := []string{"glm", "deepseek", "anthropic", "glm", "deepseek"}
 	for _, provider := range providers {
 		t.Run(provider, func(t *testing.T) {
 			err := validateAPIKeyReal(provider, "test-key")

@@ -8,13 +8,13 @@ import (
 
 // Regression: before v0.70.1, Memory toolset was only added on
 // StrategySubAgent AND dropped by filterToolSetsByCapability for
-// Medium-tier models (Kimi). The combined effect: running gokin with
-// Kimi, asking it "запомни это" / "remember X", and getting an honest
+// Medium-tier models (DeepSeek). The combined effect: running gokin with
+// DeepSeek, asking it "запомни это" / "remember X", and getting an honest
 // but wrong "I can't access persistent memory" because the tool list
 // the model actually saw for that request didn't include memory.
 //
 // Contract: Memory tools must be present for ALL strategies under
-// Medium-tier (Kimi/MiniMax/GLM-4.x) AND Weak-tier (ollama). Tested
+// Medium-tier (DeepSeek/GLM-4.x) AND Weak-tier (ollama). Tested
 // against every Strategy × TaskType combination that selectToolSets
 // handles.
 
@@ -27,7 +27,7 @@ func containsToolSet(sets []tools.ToolSet, target tools.ToolSet) bool {
 	return false
 }
 
-func TestRouter_MemoryPresentForKimiDirectStrategy(t *testing.T) {
+func TestRouter_MemoryPresentForDeepSeekDirectStrategy(t *testing.T) {
 	r := &Router{
 		modelCapability: &ModelCapability{Tier: CapabilityMedium},
 	}
@@ -41,7 +41,7 @@ func TestRouter_MemoryPresentForKimiDirectStrategy(t *testing.T) {
 	}
 }
 
-func TestRouter_MemoryPresentForKimiSingleTool(t *testing.T) {
+func TestRouter_MemoryPresentForDeepSeekSingleTool(t *testing.T) {
 	r := &Router{
 		modelCapability: &ModelCapability{Tier: CapabilityMedium},
 	}
@@ -54,7 +54,7 @@ func TestRouter_MemoryPresentForKimiSingleTool(t *testing.T) {
 	}
 }
 
-func TestRouter_MemoryPresentForKimiExecutorAllTaskTypes(t *testing.T) {
+func TestRouter_MemoryPresentForDeepSeekExecutorAllTaskTypes(t *testing.T) {
 	types := []TaskType{
 		TaskTypeQuestion,
 		TaskTypeExploration,
@@ -79,7 +79,7 @@ func TestRouter_MemoryPresentForKimiExecutorAllTaskTypes(t *testing.T) {
 	}
 }
 
-func TestRouter_MemoryPresentForKimiSubAgent(t *testing.T) {
+func TestRouter_MemoryPresentForDeepSeekSubAgent(t *testing.T) {
 	r := &Router{
 		modelCapability: &ModelCapability{Tier: CapabilityMedium},
 	}

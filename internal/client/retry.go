@@ -249,11 +249,10 @@ func AdaptiveStreamRetryPolicy(provider string) StreamRetryPolicy {
 
 // streamStallProneProvider reports whether a provider's endpoint is prone to
 // mid-stream silent stalls (partial data, then a pause before more) — warranting
-// extra cold + partial stream-idle retries. The kimi AND glm Coding-Plan
-// endpoints both do this; keep them in ONE set so a fix for one covers both.
+// extra cold + partial stream-idle retries. GLM uses this patient profile.
 func streamStallProneProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "kimi", "glm":
+	case "glm":
 		return true
 	}
 	return false
@@ -372,7 +371,7 @@ func ParseHeaderDuration(resp *http.Response, headerName string) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 
-	// Try parsing as Go duration string (e.g. from some proxies or Kimi)
+	// Try parsing as Go duration string (e.g. from some proxies or DeepSeek)
 	if d, err := time.ParseDuration(val); err == nil {
 		return d
 	}

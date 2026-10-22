@@ -45,22 +45,14 @@ func TestInferModelCapability(t *testing.T) {
 	}{
 		// Strong tier
 		{"glm", "glm-5-plus", CapabilityStrong},
-		{"kimi", "k3", CapabilityStrong},              // K3 flagship, Coding Plan endpoint
-		{"kimi", "k3-1m", CapabilityStrong},           // K3 variant
-		{"kimi", "kimi-k3", CapabilityStrong},         // K3, prefixed form
-		{"kimi", "kimi-for-coding", CapabilityStrong}, // K2.7, Coding Plan endpoint
-		{"kimi", "kimi-k2.6", CapabilityStrong},
-		{"kimi", "kimi-k2.7", CapabilityStrong},
-		{"kimi", "kimi-k2.8", CapabilityStrong},
-		{"kimi", "kimi-k2.10-preview", CapabilityStrong},
+
 		{"deepseek", "deepseek-v4-pro", CapabilityStrong},
 
 		// Medium tier
-		{"kimi", "kimi-k2.5", CapabilityMedium},
-		{"kimi", "kimi-k2-thinking", CapabilityMedium},
-		{"minimax", "MiniMax-M2.5", CapabilityMedium},
+
 		{"glm", "glm-4", CapabilityMedium},
 		{"deepseek", "deepseek-v4-flash", CapabilityMedium},
+		{"deepseek", "deepseek-flash", CapabilityMedium},
 		{"deepseek", "deepseek-chat", CapabilityMedium},
 		{"deepseek", "deepseek-reasoner", CapabilityMedium},
 
@@ -232,7 +224,7 @@ func TestCapabilityTierAdjustments(t *testing.T) {
 		t.Error("weak SelfReviewBoost should be true")
 	}
 
-	medium := InferModelCapability("kimi", "kimi-k2.5")
+	medium := InferModelCapability("deepseek", "deepseek-v4-flash")
 	if medium.DecomposeAdjust != -1 {
 		t.Errorf("medium DecomposeAdjust = %d, want -1", medium.DecomposeAdjust)
 	}

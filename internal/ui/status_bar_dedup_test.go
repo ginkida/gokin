@@ -110,20 +110,19 @@ func TestFormatAbsoluteTokens_SumsCompletion(t *testing.T) {
 }
 
 // v0.100.109: the identity segment shows the bare model when it belongs to
-// the active provider — the old prefix heuristic branded kimi's k3 as a
-// permanent mismatch and rendered a redundant "kimi→k3" on every frame. The
+// the active provider, including local model IDs without an ollama prefix. The
 // arrow form remains for a REAL provider/model mismatch (failover).
 func TestIdentitySegment_NoArrowForOwnModel(t *testing.T) {
 	m := NewModel()
-	m.currentModel = "k3"
-	m.runtimeStatus.Provider = "kimi"
-	if got := stripAnsi(m.identitySegment()); got != "k3" {
-		t.Fatalf("identity = %q, want bare k3 (model belongs to the provider)", got)
+	m.currentModel = "llama3.2"
+	m.runtimeStatus.Provider = "ollama"
+	if got := stripAnsi(m.identitySegment()); got != "llama3.2" {
+		t.Fatalf("identity = %q, want bare llama3.2 (model belongs to the provider)", got)
 	}
 
 	m.currentModel = "glm-5.2"
-	m.runtimeStatus.Provider = "kimi" // genuine mismatch → arrow stays
-	if got := stripAnsi(m.identitySegment()); got != "kimi→glm-5.2" {
+	m.runtimeStatus.Provider = "deepseek" // genuine mismatch → arrow stays
+	if got := stripAnsi(m.identitySegment()); got != "deepseek→glm-5.2" {
 		t.Fatalf("identity = %q, want the failover arrow for a real mismatch", got)
 	}
 

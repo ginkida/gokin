@@ -368,9 +368,9 @@ var toolSetDefinitions = map[ToolSet][]string{
 		// Semantic discovery tools — fundamental for code understanding.
 		"go_to_definition", "find_references", "go_search", "lsp",
 		// request_tool moved to ToolSetAgent — it was shipping in the
-		// Core declaration list for main-agent Kimi requests, but the
+		// Core declaration list for main-agent the model requests, but the
 		// requester dependency is only wired in the sub-agent path.
-		// Result: Kimi saw it, tried it, got "tool requester not
+		// Result: the model saw it, tried it, got "tool requester not
 		// initialized" error, looked like a silent failure. Sub-agents
 		// that genuinely need it still get it via ToolSetAgent.
 	},

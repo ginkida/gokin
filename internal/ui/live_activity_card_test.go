@@ -21,8 +21,8 @@ func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T
 	m.currentTool = "read"
 	m.currentToolInfo = "internal/ui/tui.go"
 	m.toolStartTime = time.Now().Add(-2 * time.Second)
-	m.currentModel = "kimi-for-coding"
-	m.runtimeStatus.Provider = "kimi"
+	m.currentModel = "deepseek-v4-pro"
+	m.runtimeStatus.Provider = "deepseek"
 	m.lastToolOutputIndex = 0
 	m.activityFeed.recentLog = []string{"Reading internal/ui/tui.go -> 240 lines"}
 
@@ -43,7 +43,7 @@ func TestRenderLiveActivityCard_ShowsCurrentWorkWithoutStatusBarDup(t *testing.T
 		"RUNNING",         // state word — status bar shows it
 		"WRITING",         //   ditto
 		"Esc cancel",      // status bar shows "esc Interrupt"
-		"kimi-for-coding", // model name — status bar shows it
+		"deepseek-v4-pro", // model name — status bar shows it
 		"240 lines",       // recent-completed echo — removed (already in scrollback)
 	} {
 		if strings.Contains(view, dup) {
@@ -103,8 +103,8 @@ func TestRenderLiveActivityCard_CollapsesWhenFeedOpen(t *testing.T) {
 	m.currentTool = "read"
 	m.currentToolInfo = "internal/ui/tui.go"
 	m.toolStartTime = time.Now().Add(-2 * time.Second)
-	m.currentModel = "kimi-for-coding"
-	m.runtimeStatus.Provider = "kimi"
+	m.currentModel = "deepseek-v4-pro"
+	m.runtimeStatus.Provider = "deepseek"
 	m.lastToolOutputIndex = 0
 	m.activityFeed.recentLog = []string{"Reading internal/ui/tui.go -> 240 lines"}
 	m.activityFeed.visible = true

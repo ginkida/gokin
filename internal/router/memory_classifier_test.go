@@ -23,7 +23,7 @@ func TestTaskAnalyzer_MemoryCommandsRouteToSingleTool(t *testing.T) {
 		{"ru запомни", "запомни путь к проекту"},
 		{"ru вспомни", "вспомни где лежит handler.go"},
 		{"ru забудь", "забудь что я говорил про X"},
-		{"ru закрепи", "закрепи это: мы работаем над Kimi reliability"},
+		{"ru закрепи", "закрепи это: мы работаем над DeepSeek reliability"},
 		{"ru в память", "запиши в память что makefile уже есть"},
 	}
 

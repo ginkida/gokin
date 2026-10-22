@@ -1789,7 +1789,7 @@ func getDataDir() (string, error) {
 func getCommandExample(name string) string {
 	examples := map[string]string{
 		"commit":   "  /commit              — AI generates commit message from staged changes\n  /commit fix typo     — commit with custom message",
-		"model":    "  /model glm-5.3               — switch to GLM 5.3 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model k3                    — switch to Kimi K3 (flagship, 1M ctx)\n  /model kimi-for-coding       — switch to Kimi K2.7\n  /model MiniMax-M2.7          — switch to MiniMax",
+		"model":    "  /model glm-5.3-flash         — switch to GLM Flash (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro",
 		"plan":     "  /plan                — toggle planning mode on/off\n  Then type a complex task and it will be broken into steps",
 		"resume":   "  /resume              — search saved sessions for this project\n  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
 		"save":     "  /save                — save current session for later /resume\n  /save mywork         — save with custom name (refuses to overwrite by default)\n  /save mywork --force — overwrite an existing 'mywork' checkpoint",
@@ -1797,13 +1797,13 @@ func getCommandExample(name string) string {
 		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)\n  /clear --force       — clear even if active-plan recovery cannot be saved",
 		"theme":    "  /theme               — show the active UI theme (gokin ships one unified Graphite + violet theme)",
 		"doctor":   "  /doctor              — check API key, git, config, and project setup",
-		"login":    "  /login glm <key>          — set Z.AI / GLM key\n  /login deepseek <key>     — set DeepSeek key\n  /login kimi <key>         — set Kimi Coding Plan key\n  /login minimax <key>      — set MiniMax key",
+		"login":    "  /login glm <key>          — set Z.AI / GLM key\n  /login deepseek <key>     — set DeepSeek key",
 		"undo":     "  /undo                — revert the last file change made by the AI\n  /undo all            — revert everything the last request changed, atomically\n  /undo 3              — revert the last three changes\n  /undo list           — preview what /undo would revert",
 		"redo":     "  /redo                — re-apply the last undone change\n  /redo all            — re-apply the whole request /undo all reverted",
 		"stats":    "  /stats               — show tokens, cost, cache hit rate, project info",
 		"status":   "  /status              — show provider, model, API keys, workdir, version",
 		"update":   "  /update              — check for new versions\n  /update install        — download and install latest\n  /update rollback       — revert to previous version",
-		"provider": "  /provider glm         — switch to GLM (Z.AI)\n  /provider deepseek    — switch to DeepSeek\n  /provider kimi        — switch to Kimi\n  /provider minimax     — switch to MiniMax\n  /provider ollama      — switch to local Ollama",
+		"provider": "  /provider glm         — switch to GLM (Z.AI)\n  /provider deepseek    — switch to DeepSeek\n  /provider ollama      — switch to local Ollama",
 		// v0.77.x git-inspect family + v0.78.12 /blame
 		"diff":     "  /diff                — show working-tree diff\n  /diff --staged       — show staged-only diff\n  /diff --stat         — summary instead of patch\n  /diff main.go        — diff one file",
 		"log":      "  /log                 — last 10 commits\n  /log 20              — last 20 commits\n  /log internal/app    — commits touching a path\n  /log 5 README.md     — last 5 touching README",

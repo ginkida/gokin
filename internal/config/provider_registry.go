@@ -51,49 +51,12 @@ var Providers = []ProviderDef{
 		},
 	},
 	{
-		Name:          "minimax",
-		DisplayName:   "MiniMax",
-		DefaultModel:  "MiniMax-M2.7",
-		EnvVars:       []string{"GOKIN_MINIMAX_KEY", "MINIMAX_API_KEY"},
-		UsesLegacyKey: true,
-		GetKey:        func(api *APIConfig) string { return api.MiniMaxKey },
-		SetKey:        func(api *APIConfig, key string) { api.MiniMaxKey = key },
-		ModelPrefixes: []string{"minimax"},
-		SetupKeyURL:   "https://platform.minimaxi.com/user-center/basic-information/interface-key",
-		KeyValidation: KeyValidationDef{
-			URL:             "https://api.minimax.io/anthropic/v1/models",
-			AuthMode:        "bearer",
-			SuccessStatuses: []int{200, 404},
-		},
-	},
-	{
-		Name:         "kimi",
-		DisplayName:  "Kimi Coding Plan",
-		DefaultModel: "k3",
-		// MOONSHOT_API_KEY retained as a fallback env var so users upgrading
-		// from pre-v0.69 (Moonshot Developer API era) don't suddenly find
-		// gokin unable to auto-discover their key. They'll still hit the
-		// Coding Plan endpoint by default — if that's wrong for them, they
-		// can set model.custom_base_url: https://api.moonshot.ai/anthropic.
-		EnvVars:       []string{"GOKIN_KIMI_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY"},
-		UsesLegacyKey: true,
-		GetKey:        func(api *APIConfig) string { return api.KimiKey },
-		SetKey:        func(api *APIConfig, key string) { api.KimiKey = key },
-		ModelPrefixes: []string{"kimi", "moonshot", "k3"},
-		SetupKeyURL:   "https://kimi.com",
-		KeyValidation: KeyValidationDef{
-			URL:             "https://api.kimi.com/coding/v1/models",
-			AuthMode:        "bearer",
-			SuccessStatuses: []int{200},
-		},
-	},
-	{
 		Name:         "deepseek",
 		DisplayName:  "DeepSeek",
 		DefaultModel: "deepseek-v4-pro",
 		// Anthropic-compatible endpoint at /anthropic — the OpenAI-compat
 		// endpoint (https://api.deepseek.com) is NOT what we hit; we route
-		// through AnthropicClient like GLM/Kimi/MiniMax for consistency,
+		// through AnthropicClient like GLM/DeepSeek for consistency,
 		// and that requires /anthropic.
 		EnvVars:       []string{"GOKIN_DEEPSEEK_KEY", "DEEPSEEK_API_KEY"},
 		UsesLegacyKey: true,

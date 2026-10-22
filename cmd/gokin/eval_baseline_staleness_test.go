@@ -51,7 +51,7 @@ func writeStaleBaselineFixture(t *testing.T) (manifest, baseline, results, added
 
 	// Built from a real committed row so the fixture matches the true schema
 	// rather than a guess at it — score and agent are structs, not scalars.
-	template, err := os.ReadFile(filepath.Join("..", "..", "evals", "coding", "baselines", "kimi.jsonl"))
+	template, err := os.ReadFile(filepath.Join("..", "..", "evals", "coding", "baselines", "deepseek.jsonl"))
 	if err != nil {
 		t.Skip("committed baseline unavailable")
 	}

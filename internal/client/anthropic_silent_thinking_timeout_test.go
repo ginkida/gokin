@@ -19,7 +19,6 @@ func TestSilentThinkingDefersToModelRoundDeadline(t *testing.T) {
 		enableThinking bool
 	}{
 		{name: "explicit GLM thinking", provider: "glm", model: "glm-5.2", enableThinking: true},
-		{name: "always-on K3 reasoning", provider: "kimi", model: "k3", enableThinking: false},
 	}
 
 	for _, tt := range tests {

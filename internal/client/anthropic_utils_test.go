@@ -581,7 +581,7 @@ func TestWrapProviderHTTPTimeout_NetTimeout(t *testing.T) {
 	// Simulate a net.Error timeout without real network I/O.
 	// We use a fake net.Error implementation to avoid network calls.
 	timeoutErr := fakeNetTimeout{msg: "read tcp: i/o timeout"}
-	wrapped := WrapProviderHTTPTimeout(timeoutErr, "kimi", 10*time.Second)
+	wrapped := WrapProviderHTTPTimeout(timeoutErr, "deepseek", 10*time.Second)
 	tel := DetectFailureTelemetry(wrapped)
 	if tel.Reason != string(FailureReasonHTTPTimeout) {
 		t.Errorf("net timeout telemetry reason = %q, want %q", tel.Reason, FailureReasonHTTPTimeout)

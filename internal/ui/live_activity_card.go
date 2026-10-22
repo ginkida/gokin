@@ -31,7 +31,7 @@ import (
 // the panel below.
 //
 // Earlier iterations had a bordered "chip" (● WRITING), repeated meta
-// (kimi · kimi-for-coding), and an "Esc cancel" footer — every one of
+// (deepseek · deepseek-v4-pro), and an "Esc cancel" footer — every one of
 // those duplicated something the status bar already shows. Removed.
 func (m Model) shouldShowLiveActivityCard() bool {
 	if m.isModalState() {

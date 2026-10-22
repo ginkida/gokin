@@ -617,8 +617,7 @@ func (m Model) identitySegment() string {
 	if provider != "" {
 		// The arrow form is for a REAL provider/model mismatch (failover).
 		// The old prefix heuristic ("model starts with provider") worked for
-		// glm-5.2 but branded kimi's k3 as a permanent mismatch — the bar
-		// showed a redundant "kimi→k3" on every frame (v0.100.109). Resolve
+		// glm-5.2 but fails for local IDs without an ollama prefix. Resolve
 		// through the registry instead; an unknown model (custom/ollama tag)
 		// falls back to the prefix heuristic conservatively.
 		detected := config.DetectKnownProviderFromModel(model)

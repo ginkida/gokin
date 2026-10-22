@@ -13,7 +13,7 @@ func TestJournalReportShowsStructuredTimeoutWithoutPromptPreview(t *testing.T) {
 	if err := journal.Append("request_failed", map[string]any{
 		"message_preview": "private user prompt that should not be repeated",
 		"failure_reason":  "model_round_timeout",
-		"provider":        "kimi",
+		"provider":        "deepseek",
 		"timeout":         "14m0s",
 		"partial":         true,
 	}); err != nil {
@@ -22,7 +22,7 @@ func TestJournalReportShowsStructuredTimeoutWithoutPromptPreview(t *testing.T) {
 	if err := journal.Append("auto_resume_scheduled", map[string]any{
 		"message_preview": "another private prompt",
 		"failure_reason":  "model_round_timeout",
-		"provider":        "kimi",
+		"provider":        "deepseek",
 		"attempt":         1,
 		"max_attempts":    2,
 	}); err != nil {
@@ -31,8 +31,8 @@ func TestJournalReportShowsStructuredTimeoutWithoutPromptPreview(t *testing.T) {
 
 	report := (&App{journal: journal}).GetJournalReport()
 	for _, want := range []string{
-		"request_failed | model_round_timeout · kimi · 14m0s · partial response",
-		"auto_resume_scheduled | model_round_timeout · kimi · attempt 1/2",
+		"request_failed | model_round_timeout · deepseek · 14m0s · partial response",
+		"auto_resume_scheduled | model_round_timeout · deepseek · attempt 1/2",
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("journal report missing %q:\n%s", want, report)

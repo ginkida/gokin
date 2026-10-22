@@ -31,10 +31,10 @@ func TestRuntimeProviderForConfig(t *testing.T) {
 		{
 			name: "unknown model falls back to active provider",
 			cfg: &config.Config{
-				API:   config.APIConfig{ActiveProvider: "kimi"},
+				API:   config.APIConfig{ActiveProvider: "deepseek"},
 				Model: config.ModelConfig{Name: "custom-coder"},
 			},
-			want: "kimi",
+			want: "deepseek",
 		},
 		{
 			name: "auto provider allows model detection",

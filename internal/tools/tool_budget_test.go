@@ -17,70 +17,70 @@ import (
 // conversation here would duplicate that scaffolding without added
 // signal.
 
-func TestShouldEnforceKimiToolBudget_DisabledWhenZero(t *testing.T) {
-	e := &Executor{kimiToolBudget: 0}
-	if e.shouldEnforceKimiToolBudget("kimi-for-coding", 99) {
+func TestShouldEnforceToolBudget_DisabledWhenZero(t *testing.T) {
+	e := &Executor{toolBudget: 0}
+	if e.shouldEnforceToolBudget("deepseek-v4-pro", 99) {
 		t.Errorf("expected disabled budget to never fire")
 	}
 }
 
-func TestShouldEnforceKimiToolBudget_BudgetedFamiliesOnly(t *testing.T) {
-	e := &Executor{kimiToolBudget: 10}
+func TestShouldEnforceToolBudget_BudgetedFamiliesOnly(t *testing.T) {
+	e := &Executor{toolBudget: 10}
 	// Every hosted family is quota-capped.
-	for _, model := range []string{"claude-sonnet-4", "glm-5.2", "deepseek-v4-pro", "kimi-for-coding", "MiniMax-M2.7"} {
-		if !e.shouldEnforceKimiToolBudget(model, 100) {
+	for _, model := range []string{"claude-sonnet-4", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-pro", "deepseek-v4-pro"} {
+		if !e.shouldEnforceToolBudget(model, 100) {
 			t.Errorf("budget not applied to hosted model %s", model)
 		}
 	}
 	// Local Ollama inference does not consume a hosted quota.
-	if e.shouldEnforceKimiToolBudget("llama3", 100) {
+	if e.shouldEnforceToolBudget("llama3", 100) {
 		t.Errorf("budget must not apply to local Ollama family")
 	}
-	if e.shouldEnforceKimiToolBudget("MiniMax-M2.7", 5) {
-		t.Errorf("MiniMax under budget must not fire")
+	if e.shouldEnforceToolBudget("deepseek-v4-pro", 5) {
+		t.Errorf("GLM under budget must not fire")
 	}
 }
 
-func TestShouldEnforceKimiToolBudget_TriggersAtThreshold(t *testing.T) {
-	e := &Executor{kimiToolBudget: 5}
-	if e.shouldEnforceKimiToolBudget("kimi-for-coding", 4) {
+func TestShouldEnforceToolBudget_TriggersAtThreshold(t *testing.T) {
+	e := &Executor{toolBudget: 5}
+	if e.shouldEnforceToolBudget("deepseek-v4-pro", 4) {
 		t.Errorf("fired too early (consumed=4 < budget=5)")
 	}
-	if !e.shouldEnforceKimiToolBudget("kimi-for-coding", 5) {
+	if !e.shouldEnforceToolBudget("deepseek-v4-pro", 5) {
 		t.Errorf("should fire at exact threshold (consumed=5 == budget=5)")
 	}
-	if !e.shouldEnforceKimiToolBudget("kimi-for-coding", 99) {
+	if !e.shouldEnforceToolBudget("deepseek-v4-pro", 99) {
 		t.Errorf("should fire when past threshold")
 	}
 }
 
-func TestSetKimiToolBudget_ClampsAndDisables(t *testing.T) {
+func TestSetToolBudget_ClampsAndDisables(t *testing.T) {
 	e := &Executor{}
-	e.SetKimiToolBudget(-5)
-	if e.kimiToolBudget != 0 {
-		t.Errorf("negative should disable, got %d", e.kimiToolBudget)
+	e.SetToolBudget(-5)
+	if e.toolBudget != 0 {
+		t.Errorf("negative should disable, got %d", e.toolBudget)
 	}
-	e.SetKimiToolBudget(0)
-	if e.kimiToolBudget != 0 {
-		t.Errorf("zero should disable, got %d", e.kimiToolBudget)
+	e.SetToolBudget(0)
+	if e.toolBudget != 0 {
+		t.Errorf("zero should disable, got %d", e.toolBudget)
 	}
-	e.SetKimiToolBudget(5) // below min
-	if e.kimiToolBudget != 10 {
-		t.Errorf("below min should clamp to 10, got %d", e.kimiToolBudget)
+	e.SetToolBudget(5) // below min
+	if e.toolBudget != 10 {
+		t.Errorf("below min should clamp to 10, got %d", e.toolBudget)
 	}
-	e.SetKimiToolBudget(40)
-	if e.kimiToolBudget != 40 {
-		t.Errorf("explicit 40 should survive, got %d", e.kimiToolBudget)
+	e.SetToolBudget(40)
+	if e.toolBudget != 40 {
+		t.Errorf("explicit 40 should survive, got %d", e.toolBudget)
 	}
 }
 
-func TestBuildKimiToolBudgetExhaustedResults_PreservesCallIDs(t *testing.T) {
-	e := &Executor{kimiToolBudget: 10}
+func TestBuildToolBudgetExhaustedResults_PreservesCallIDs(t *testing.T) {
+	e := &Executor{toolBudget: 10}
 	calls := []*genai.FunctionCall{
 		{ID: "call-1", Name: "read"},
 		{ID: "call-2", Name: "grep"},
 	}
-	results := e.buildKimiToolBudgetExhaustedResults(calls)
+	results := e.buildToolBudgetExhaustedResults(calls)
 	if len(results) != 2 {
 		t.Fatalf("result count = %d, want 2", len(results))
 	}
@@ -104,12 +104,12 @@ func TestBuildKimiToolBudgetExhaustedResults_PreservesCallIDs(t *testing.T) {
 	}
 }
 
-func TestBuildKimiToolBudgetExhaustedResults_HandlesNilCall(t *testing.T) {
-	e := &Executor{kimiToolBudget: 10}
+func TestBuildToolBudgetExhaustedResults_HandlesNilCall(t *testing.T) {
+	e := &Executor{toolBudget: 10}
 	// One nil call (defensive — shouldn't happen in practice but the
 	// synthesizer must not panic on it).
 	calls := []*genai.FunctionCall{nil, {ID: "x", Name: "bash"}}
-	results := e.buildKimiToolBudgetExhaustedResults(calls)
+	results := e.buildToolBudgetExhaustedResults(calls)
 	if len(results) != 2 {
 		t.Fatalf("result count = %d, want 2", len(results))
 	}
@@ -118,8 +118,8 @@ func TestBuildKimiToolBudgetExhaustedResults_HandlesNilCall(t *testing.T) {
 	}
 }
 
-func TestBuildKimiToolBudgetMessage_MentionsBudget(t *testing.T) {
-	msg := buildKimiToolBudgetMessage(25)
+func TestBuildToolBudgetMessage_MentionsBudget(t *testing.T) {
+	msg := buildToolBudgetMessage(25)
 	if !strings.Contains(msg, "25") {
 		t.Errorf("missing budget value: %q", msg)
 	}
@@ -130,9 +130,9 @@ func TestBuildKimiToolBudgetMessage_MentionsBudget(t *testing.T) {
 
 // Integration: with a 3-budget ceiling, the 4th iteration's tool calls
 // get short-circuited into synthetic budget-exhausted responses, and
-// Kimi's final text response lands after that synthetic round. Uses
+// DeepSeek's final text response lands after that synthetic round. Uses
 // varied file paths so stagnation guard stays out of the way.
-func TestExecutorExecuteLoop_KimiToolBudgetForcesFinalization(t *testing.T) {
+func TestExecutorExecuteLoop_ToolBudgetForcesFinalization(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -140,12 +140,12 @@ func TestExecutorExecuteLoop_KimiToolBudgetForcesFinalization(t *testing.T) {
 	}
 
 	cl := &scriptedExecutorClient{
-		model: "kimi-for-coding",
+		model: "deepseek-v4-pro",
 		responses: []*client.StreamingResponse{
-			buildKimiBudgetReadStream("b0", "a.go"),
-			buildKimiBudgetReadStream("b1", "b.go"),
-			buildKimiBudgetReadStream("b2", "c.go"),
-			buildKimiBudgetReadStream("b3", "d.go"),
+			buildBudgetReadStream("b0", "a.go"),
+			buildBudgetReadStream("b1", "b.go"),
+			buildBudgetReadStream("b2", "c.go"),
+			buildBudgetReadStream("b3", "d.go"),
 			buildExecutorTestTextStream("Finalized within budget."),
 		},
 	}
@@ -156,7 +156,7 @@ func TestExecutorExecuteLoop_KimiToolBudgetForcesFinalization(t *testing.T) {
 	// (prevents user-config mistakes). Tests need a smaller value to keep
 	// scripted responses short; the setter itself is covered in the unit
 	// test above.
-	exec.kimiToolBudget = 3
+	exec.toolBudget = 3
 
 	_, finalText, err := exec.Execute(context.Background(), nil, "survey Go files")
 	if err != nil {
@@ -189,7 +189,7 @@ func TestExecutorExecuteLoop_KimiToolBudgetForcesFinalization(t *testing.T) {
 	}
 }
 
-func TestExecutorExecuteLoop_KimiToolBudgetZeroKeepsAllCalls(t *testing.T) {
+func TestExecutorExecuteLoop_ToolBudgetZeroKeepsAllCalls(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -197,19 +197,19 @@ func TestExecutorExecuteLoop_KimiToolBudgetZeroKeepsAllCalls(t *testing.T) {
 	}
 
 	cl := &scriptedExecutorClient{
-		model: "kimi-for-coding",
+		model: "deepseek-v4-pro",
 		responses: []*client.StreamingResponse{
-			buildKimiBudgetReadStream("z0", "a.go"),
-			buildKimiBudgetReadStream("z1", "b.go"),
-			buildKimiBudgetReadStream("z2", "c.go"),
-			buildKimiBudgetReadStream("z3", "d.go"),
+			buildBudgetReadStream("z0", "a.go"),
+			buildBudgetReadStream("z1", "b.go"),
+			buildBudgetReadStream("z2", "c.go"),
+			buildBudgetReadStream("z3", "d.go"),
 			buildExecutorTestTextStream("All four read."),
 		},
 	}
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
-	exec.SetKimiToolBudget(0) // disabled
+	exec.SetToolBudget(0) // disabled
 
 	_, finalText, err := exec.Execute(context.Background(), nil, "survey Go files")
 	if err != nil {
@@ -233,17 +233,17 @@ func TestExecutorExecuteLoop_GLMUsesHostedBudget(t *testing.T) {
 	cl := &scriptedExecutorClient{
 		model: "glm-5.1",
 		responses: []*client.StreamingResponse{
-			buildKimiBudgetReadStream("g0", "a.go"),
-			buildKimiBudgetReadStream("g1", "b.go"),
-			buildKimiBudgetReadStream("g2", "c.go"),
-			buildKimiBudgetReadStream("g3", "d.go"),
+			buildBudgetReadStream("g0", "a.go"),
+			buildBudgetReadStream("g1", "b.go"),
+			buildBudgetReadStream("g2", "c.go"),
+			buildBudgetReadStream("g3", "d.go"),
 			buildExecutorTestTextStream("GLM ran all four."),
 		},
 	}
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
-	exec.kimiToolBudget = 3
+	exec.toolBudget = 3
 
 	_, finalText, err := exec.Execute(context.Background(), nil, "survey Go files")
 	if err != nil {
@@ -267,17 +267,17 @@ func TestExecutorExecuteLoop_BudgetStopsLocallyWhenFinalizeIgnored(t *testing.T)
 	cl := &scriptedExecutorClient{
 		model: "glm-5.2",
 		responses: []*client.StreamingResponse{
-			buildKimiBudgetReadStream("g0", "a.go"),
-			buildKimiBudgetReadStream("g1", "b.go"),
-			buildKimiBudgetReadStream("g2", "c.go"),
-			buildKimiBudgetReadStream("g3", "d.go"), // first synthetic guard response
-			buildKimiBudgetReadStream("g4", "e.go"), // ignores finalize; stop locally
+			buildBudgetReadStream("g0", "a.go"),
+			buildBudgetReadStream("g1", "b.go"),
+			buildBudgetReadStream("g2", "c.go"),
+			buildBudgetReadStream("g3", "d.go"), // first synthetic guard response
+			buildBudgetReadStream("g4", "e.go"), // ignores finalize; stop locally
 		},
 	}
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
-	exec.kimiToolBudget = 3
+	exec.toolBudget = 3
 
 	_, finalText, err := exec.Execute(context.Background(), nil, "survey Go files")
 	if err != nil {
@@ -294,10 +294,10 @@ func TestExecutorExecuteLoop_BudgetStopsLocallyWhenFinalizeIgnored(t *testing.T)
 	}
 }
 
-// buildKimiBudgetReadStream mints a stream that reads a different file
+// buildBudgetReadStream mints a stream that reads a different file
 // each turn — avoids tripping the identical-pattern stagnation guard so
 // only the budget check decides when to stop.
-func buildKimiBudgetReadStream(id, filePath string) *client.StreamingResponse {
+func buildBudgetReadStream(id, filePath string) *client.StreamingResponse {
 	return buildExecutorTestStream(client.ResponseChunk{
 		FunctionCalls: []*genai.FunctionCall{{
 			ID:   id,

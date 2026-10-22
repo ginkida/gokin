@@ -22,10 +22,10 @@ func TestRequiresThinkingReplay_ProviderMatrix(t *testing.T) {
 		// Anthropic native — strict.
 		{"anthropic native + thinking", DefaultAnthropicBaseURL, true, true},
 		{"empty url (anthropic default) + thinking", "", true, true},
-		// Kimi — strict for assistant tool-call turns: reasoning_content is required.
-		{"kimi + thinking", "https://api.kimi.com/coding", true, true},
-		// MiniMax — tolerates.
-		{"minimax + thinking", "https://api.minimax.io/anthropic", true, false},
+		// DeepSeek — strict for assistant tool-call turns: reasoning_content is required.
+
+		// GLM — tolerates.
+
 		// GLM — tolerates.
 		{"glm + thinking", "https://api.z.ai/api/anthropic", true, false},
 		// Thinking disabled — never need replay regardless of provider.
@@ -79,32 +79,12 @@ func TestCanSerialiseAssistantForProvider_DropsUnsignedThinkingForStrictProvider
 	}
 }
 
-// Kimi documents `thinking is enabled but reasoning_content is missing` for
-// assistant tool calls. An unsigned thought therefore makes the whole turn
-// unserialisable, just like DeepSeek; keeping the tool_use while dropping the
-// thought would deterministically 400 the next request.
-func TestCanSerialiseAssistantForProvider_KimiDropsUnsignedThinking(t *testing.T) {
-	kimi := &AnthropicClient{
-		config: AnthropicConfig{
-			BaseURL:        "https://api.kimi.com/coding",
-			EnableThinking: true,
-		},
-	}
-	parts := []*genai.Part{
-		{Thought: true, Text: "let me think"}, // no signature
-		{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "read"}},
-	}
-	if kimi.canSerialiseAssistantForProvider(parts) {
-		t.Error("Kimi must reject an unsigned-thinking assistant tool turn")
-	}
-}
-
 // Text-only assistant turn with no thinking at all — always serialisable.
 func TestCanSerialiseAssistantForProvider_PlainTextAlwaysOK(t *testing.T) {
 	for _, base := range []string{
 		DefaultAnthropicBaseURL,
 		"https://api.deepseek.com/anthropic",
-		"https://api.kimi.com/coding",
+		"https://api.deepseek.com/anthropic",
 	} {
 		ac := &AnthropicClient{config: AnthropicConfig{BaseURL: base, EnableThinking: true}}
 		parts := []*genai.Part{{Text: "I'll help you with that."}}

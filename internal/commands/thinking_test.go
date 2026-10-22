@@ -16,7 +16,7 @@ func newThinkingApp(cfg *config.Config) *fakeAppForAuth {
 // thinking is disabled — should tell the user exactly how to turn it on.
 func TestThinking_StatusOff_SuggestsEnable(t *testing.T) {
 	app := newThinkingApp(&config.Config{
-		Model: config.ModelConfig{Name: "kimi-for-coding", ThinkingMode: config.ThinkingModeOff},
+		Model: config.ModelConfig{Name: "deepseek-v4-pro", ThinkingMode: config.ThinkingModeOff},
 	})
 	cmd := &ThinkingCommand{}
 	out, err := cmd.Execute(context.Background(), nil, app)
@@ -76,7 +76,7 @@ func TestThinking_SetMode_AppliesAllThree(t *testing.T) {
 func TestThinking_StatusOn_ShowsBudget(t *testing.T) {
 	app := newThinkingApp(&config.Config{
 		Model: config.ModelConfig{
-			Name:           "kimi-for-coding",
+			Name:           "deepseek-v4-pro",
 			ThinkingMode:   config.ThinkingModeOn,
 			EnableThinking: true,
 			ThinkingBudget: 4096,
@@ -93,7 +93,7 @@ func TestThinking_StatusOn_ShowsBudget(t *testing.T) {
 	if !strings.Contains(out, "4096 tokens") {
 		t.Errorf("status should mention budget: %q", out)
 	}
-	if !strings.Contains(out, "kimi-for-coding") {
+	if !strings.Contains(out, "deepseek-v4-pro") {
 		t.Errorf("status should name current model: %q", out)
 	}
 }
@@ -121,7 +121,7 @@ func TestThinking_UnsupportedModelWarning(t *testing.T) {
 // the default so "on" means "actually working".
 func TestThinking_On_AppliesDefaultBudget(t *testing.T) {
 	app := newThinkingApp(&config.Config{
-		Model: config.ModelConfig{Name: "kimi-for-coding"},
+		Model: config.ModelConfig{Name: "deepseek-v4-pro"},
 	})
 	cmd := &ThinkingCommand{}
 	out, err := cmd.Execute(context.Background(), []string{"on"}, app)
@@ -147,7 +147,7 @@ func TestThinking_On_AppliesDefaultBudget(t *testing.T) {
 func TestThinking_On_PreservesExistingBudget(t *testing.T) {
 	app := newThinkingApp(&config.Config{
 		Model: config.ModelConfig{
-			Name:           "kimi-for-coding",
+			Name:           "deepseek-v4-pro",
 			ThinkingBudget: 2048, // user-set, thinking currently off
 		},
 	})
@@ -167,7 +167,7 @@ func TestThinking_On_PreservesExistingBudget(t *testing.T) {
 func TestThinking_Off_Disables(t *testing.T) {
 	app := newThinkingApp(&config.Config{
 		Model: config.ModelConfig{
-			Name:           "kimi-for-coding",
+			Name:           "deepseek-v4-pro",
 			EnableThinking: true,
 			ThinkingBudget: 4096,
 		},
@@ -196,7 +196,7 @@ func TestThinking_Off_Disables(t *testing.T) {
 // budget to signal "user explicitly disabled".
 func TestThinking_Off_FreshConfig_SurvivesRestart(t *testing.T) {
 	app := newThinkingApp(&config.Config{
-		Model: config.ModelConfig{Name: "kimi-for-coding"}, // fresh: budget=0
+		Model: config.ModelConfig{Name: "deepseek-v4-pro"}, // fresh: budget=0
 	})
 	cmd := &ThinkingCommand{}
 	_, err := cmd.Execute(context.Background(), []string{"off"}, app)
@@ -217,7 +217,7 @@ func TestThinking_Off_FreshConfig_SurvivesRestart(t *testing.T) {
 // would be inert.
 func TestThinking_NumericBudget_SetsAndEnables(t *testing.T) {
 	app := newThinkingApp(&config.Config{
-		Model: config.ModelConfig{Name: "kimi-for-coding"},
+		Model: config.ModelConfig{Name: "deepseek-v4-pro"},
 	})
 	cmd := &ThinkingCommand{}
 	out, err := cmd.Execute(context.Background(), []string{"12000"}, app)
@@ -252,7 +252,7 @@ func TestThinking_BudgetBounds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newThinkingApp(&config.Config{
-				Model: config.ModelConfig{Name: "kimi-for-coding"},
+				Model: config.ModelConfig{Name: "deepseek-v4-pro"},
 			})
 			cmd := &ThinkingCommand{}
 			out, _ := cmd.Execute(context.Background(), []string{tc.value}, app)
@@ -286,7 +286,7 @@ func TestThinking_On_ClampsOutOfRangeBudget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newThinkingApp(&config.Config{
 				Model: config.ModelConfig{
-					Name:           "kimi-for-coding",
+					Name:           "deepseek-v4-pro",
 					ThinkingBudget: tc.existing,
 				},
 			})
@@ -307,7 +307,7 @@ func TestThinking_On_ClampsOutOfRangeBudget(t *testing.T) {
 // error rather than silently changing something.
 func TestThinking_UnknownOption_Rejects(t *testing.T) {
 	app := newThinkingApp(&config.Config{
-		Model: config.ModelConfig{Name: "kimi-for-coding"},
+		Model: config.ModelConfig{Name: "deepseek-v4-pro"},
 	})
 	cmd := &ThinkingCommand{}
 	out, _ := cmd.Execute(context.Background(), []string{"maybe"}, app)
@@ -323,22 +323,22 @@ func TestThinking_UnknownOption_Rejects(t *testing.T) {
 // factory checks — see docstring on modelSupportsThinking.
 func TestModelSupportsThinking(t *testing.T) {
 	cases := map[string]bool{
-		"kimi-for-coding":  true,
-		"Kimi-for-Coding":  true,
-		"kimi-k2.6":        true,
-		"kimi-k2-thinking": true,
-		"glm-5.1":          true,
-		"glm-4.7":          true,
-		"GLM-5.1":          true,
-		"glm-4.5":          false, // below 4.7
-		"llama3.2":         false,
-		"minimax-m2.7":     false,
-		"":                 false,
+		"DeepSeek-V4-Pro":   true,
+		"unsupported-model": false,
+		"glm-5.1":           true,
+		"glm-4.7":           true,
+		"GLM-5.1":           true,
+		"glm-4.5":           false, // below 4.7
+		"llama3.2":          false,
+		"":                  false,
 		// DeepSeek family — added v0.71.5 to mirror supportsDeepSeekThinking
 		// in client/factory.go. Before this, /thinking status wrongly warned
 		// "model may not emit thinking content" for users on DeepSeek V4 Pro.
 		"deepseek-v4-pro":   true,
 		"deepseek-v4-flash": true,
+		"deepseek-flash":    true,
+		"deepseek":          true,
+		"deepseek-unknown":  false,
 		"deepseek-reasoner": true,
 		"DEEPSEEK-V4-PRO":   true,
 		// deepseek-chat is the only DeepSeek model that does NOT support

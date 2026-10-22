@@ -198,7 +198,7 @@ func shouldFallbackToNextProvider(err error) bool {
 			return false
 		}
 		switch strings.TrimSpace(terminal.Code) {
-		case "1210", "1211", "1212", "1213", "1214", "1215", "1301":
+		case "1210", "1211", "1212", "1213", "1214", "1215", "1301", "deepseek_invalid_request":
 			return false
 		default:
 			// Auth, account, quota, subscription, and plan failures are local
@@ -219,7 +219,7 @@ func shouldFallbackToNextProvider(err error) bool {
 	}
 
 	// Preserve explicitly typed API exceptions before applying the generic 4xx
-	// request-shape rule. MiniMax, for example, can return a temporary
+	// request-shape rule. A compatible gateway can return a temporary
 	// model_not_found as HTTP 400; the API status classifier knows that narrow
 	// exception and a healthy fallback provider may serve it immediately. Do not
 	// use the broader IsRetryableError here: its last-resort string heuristics
@@ -541,7 +541,7 @@ func (fc *FallbackClient) WithModelOnCurrentProvider(model string) Client {
 
 // WithModel returns a new FallbackClient with the provider matching the model
 // configured for it. Other providers retain their own model names; sending a
-// GLM model ID to Kimi or MiniMax makes a nominal fallback fail deterministically.
+// model ID to another provider makes a nominal fallback fail deterministically.
 func (fc *FallbackClient) WithModel(modelName string) Client {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()

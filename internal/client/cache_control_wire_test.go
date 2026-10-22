@@ -41,20 +41,10 @@ func TestCacheControlMarkersOnTheWire(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// kimi honours explicit cache_control; glm deliberately does not, so the
-	// markers would be a no-op there and prove nothing. The provider identity
-	// must be REAL — isProvider compares by equality, so the usual namespaced
-	// test name would switch caching off and make this test vacuous.
-	//
-	// That has a consequence worth stating, because it already bit once while
-	// writing this: a literal provider name shares the in-process provider
-	// health map with every sibling test, so this request MUST SUCCEED. The
-	// first version of the server replied with only message_stop, the client
-	// scored that as an empty response, kimi's health was degraded, and
-	// TestAdaptiveStreamRetryPolicyKimiDefaults failed several files away —
-	// green in isolation, red in the suite. Keep the content delta below.
+	// DeepSeek accepts cache markers while caching implicitly. Keep provider
+	// identity real so the marker path is exercised through a loopback endpoint.
 	c, err := NewAnthropicClient(AnthropicConfig{
-		APIKey: "test", BaseURL: srv.URL, Provider: "kimi", Model: "k3",
+		APIKey: "test", BaseURL: srv.URL, Provider: "deepseek", Model: "deepseek-v4-pro",
 	})
 	if err != nil {
 		t.Fatal(err)

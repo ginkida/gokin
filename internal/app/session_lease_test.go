@@ -215,7 +215,7 @@ func TestSwitchSessionBusyTargetRollsBackWithoutMutation(t *testing.T) {
 func TestSwitchSessionValidationFailureKeepsCurrentAndReleasesTarget(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	workDir := t.TempDir()
-	candidate := saveSessionLeaseFixture(t, "incompatible-target", "kimi", workDir, "target history")
+	candidate := saveSessionLeaseFixture(t, "incompatible-target", "deepseek", workDir, "target history")
 	application := newSessionLeaseTestApp(t, "protected-current", "glm", workDir, "current history")
 
 	if _, err := application.SwitchSession(context.Background(), candidate, false); !errors.Is(err, ErrSessionProviderMismatch) {

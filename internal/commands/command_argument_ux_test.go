@@ -79,16 +79,16 @@ func TestLogoutRejectsAmbiguousInputWithoutRemovingCredentials(t *testing.T) {
 		want string
 	}{
 		{name: "extra target", args: []string{"all", "extra", "--force"}, want: "Unexpected argument"},
-		{name: "force on one provider", args: []string{"kimi", "--force"}, want: "only valid with /logout all --force"},
+		{name: "force on one provider", args: []string{"deepseek", "--force"}, want: "only valid with /logout all --force"},
 		{name: "force without target", args: []string{"--force"}, want: "only valid with /logout all --force"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{API: config.APIConfig{
-				ActiveProvider: "kimi",
-				KimiKey:        "keep-kimi",
+				ActiveProvider: "deepseek",
 				DeepSeekKey:    "keep-deepseek",
+				GLMKey:         "keep-glm",
 			}}
 			app := newAuthApp(cfg)
 			got, err := (&LogoutCommand{}).Execute(context.Background(), tc.args, app)
@@ -98,7 +98,7 @@ func TestLogoutRejectsAmbiguousInputWithoutRemovingCredentials(t *testing.T) {
 			if !strings.Contains(got, tc.want) {
 				t.Fatalf("message = %q, want %q", got, tc.want)
 			}
-			if cfg.API.KimiKey != "keep-kimi" || cfg.API.DeepSeekKey != "keep-deepseek" || app.applyCalls != 0 {
+			if cfg.API.DeepSeekKey != "keep-deepseek" || cfg.API.GLMKey != "keep-glm" || app.applyCalls != 0 {
 				t.Fatalf("invalid input mutated credentials: cfg=%+v applyCalls=%d", cfg.API, app.applyCalls)
 			}
 		})

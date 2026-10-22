@@ -11,7 +11,7 @@
   <img src="https://minio.ginkida.dev/minion/github/gokin-demo.gif" alt="Gokin Demo" width="800">
 </p>
 
-<h3 align="center">AI-powered coding agent for your terminal<br>Kimi · GLM · MiniMax · DeepSeek · Ollama — 100% open source</h3>
+<h3 align="center">AI-powered coding agent for your terminal<br>GLM · DeepSeek · Ollama — 100% open source</h3>
 
 <p align="center">
   <a href="#installation">Install</a> •
@@ -29,12 +29,12 @@
 
 Most AI coding tools are closed-source, route your code through third-party servers, and give you zero control over what gets sent to the model. Gokin is different: **a fast, secure, zero-telemetry CLI where your code goes directly to the provider you chose — and nothing else leaves your machine.**
 
-Five providers, one interface: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets and credentials are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
+Three providers, one interface: **GLM (default), DeepSeek** (via Anthropic-compatible APIs) and **Ollama** (fully local). Secrets and credentials are automatically redacted before reaching any model, TLS is enforced on every connection, and no proxy or middleware ever touches your data.
 
 | | Gokin | Claude Code | Cursor |
 |---|-------|-------------|--------|
 | **Price** | Free → Pay-per-use | $20+/month | $20+/month |
-| **Providers** | 5 (Kimi, GLM, MiniMax, DeepSeek, Ollama) | 1 (Claude) | Multi |
+| **Providers** | 3 (GLM, DeepSeek, Ollama) | 1 (Claude) | Multi |
 | **Offline** | Ollama | — | — |
 | **Tools** | 59 built-in + MCP | ~30 | ~30 |
 | **Agents** | 5 parallel, shared memory | Basic | — |
@@ -46,10 +46,8 @@ Five providers, one interface: **Kimi, GLM, MiniMax, DeepSeek** (via Anthropic-c
 
 | Stack | Cost | Best For |
 |-------|------|----------|
-| **Gokin + DeepSeek V4** | Pay-per-use | **Recommended** — 1M context, top SWE-bench reasoning, prompt caching (95% savings) |
-| **Gokin + Kimi Coding Plan** | Subscription | K3: up to 1M context; K2.7: 256K, thinking + tool use |
 | **Gokin + GLM Coding Plan** | Subscription | **Default** — GLM-5.3-Flash, 1M context, low/high/max reasoning and native image input |
-| **Gokin + MiniMax** | Pay-per-use | 200K context, strong on agentic coding |
+| **Gokin + DeepSeek** | Pay-per-use | 1M context, reasoning, implicit prompt caching |
 | **Gokin + Ollama** | Free | Privacy, offline, no API costs |
 
 Automated tests exercise provider protocol handling. Live model availability and quota limits depend on your account.
@@ -90,13 +88,11 @@ go build -o gokin ./cmd/gokin
 gokin --setup
 
 # Or set an API key and go
-export GOKIN_DEEPSEEK_KEY="sk-..."   # DeepSeek V4 (recommended)
+export GOKIN_GLM_KEY="..."          # GLM Coding Plan (default)
 gokin
 
 # Other providers work the same way:
-# export GOKIN_KIMI_KEY="sk-kimi-..."   # Kimi Coding Plan
-# export GOKIN_GLM_KEY="..."            # GLM Coding Plan
-# export GOKIN_MINIMAX_KEY="..."        # MiniMax
+# export GOKIN_DEEPSEEK_KEY="sk-..."    # then run gokin --provider deepseek
 # Ollama needs no key — just run a local model
 ```
 
@@ -1642,7 +1638,7 @@ Physical tool restriction — plan mode limits the model to read-only tools (rea
 - `/cost` and `/stats` commands
 
 ### Prompt Caching
-- `cache_control` breakpoints for Kimi, MiniMax, and DeepSeek — Kimi cache hits are priced at 10–20% of ordinary input
+- Stable prefixes for GLM and DeepSeek implicit prompt caching; provider-reported cache reads reduce cost estimates
 - System prompt, tools, and conversation prefix cached
 
 ### Claude Code replacement readiness
@@ -1688,7 +1684,7 @@ selection, sending four synthetic prompts per model. It disables tools and
 provider fallback and caps each invocation at 90 seconds and an estimated $0.10.
 
 ### Extended Thinking
-- Full multi-turn support for Kimi / GLM / DeepSeek reasoning models
+- Full multi-turn support for GLM / DeepSeek reasoning models
 - Signed thinking blocks preserved for providers that emit signatures; GLM unsigned reasoning is replayed byte-for-byte across tool calls
 - GLM-5.3 reasoning stays enabled at every effort level. `/thinking off` selects `low`; `/effort low|high|max` overrides adaptive budgets, and `/effort auto` restores adaptation
 - The CLI defaults to GLM-5.3-Flash, including the `coding`, `fast`, and `glm` presets. Select `gokin --model glm-5.3`, `/model glm-5.3`, or the `balanced` preset for the flagship model. Explicit saved model selections are preserved.
@@ -1712,7 +1708,7 @@ provider fallback and caps each invocation at 90 seconds and an estimated $0.10.
 ```
 ┌──────────┐          ┌──────────────────────┐
 │  Gokin   │ ──TLS──▶ │  Provider API        │
-│  (local) │          │  (Kimi / Z.AI / ...) │
+│  (local) │          │  (Z.AI / DeepSeek)   │
 │          │ ◀──TLS── │                      │
 └──────────┘          └──────────────────────┘
        No middle servers. No telemetry. Direct.
@@ -1758,13 +1754,13 @@ LLM tool calls can accidentally expose secrets found in your codebase. Gokin aut
 
 | Provider | Models | Context | Cost ($/1M tokens) |
 |----------|--------|---------|---------------------|
-| **DeepSeek** | `deepseek-v4-pro`, `v4-flash`, `chat`, `reasoner` | 1M input, 384K output | Pro $0.44/$0.87, Flash $0.14/$0.28 |
-| **Kimi** | `k3`, `kimi-for-coding`, `kimi-for-coding-highspeed` | K3: up to 1M; K2.7: 256K | K3 $3/$15, K2.7 $0.95/$4 |
+| **DeepSeek** | `deepseek-v4-pro`, `deepseek-flash` (`deepseek-v4-flash` alias) | 1M context, 384K max output | Peak: Pro $1.32/$3.96; Flash $0.30/$1.20 (off-peak half) |
 | **GLM** | `glm-5.3`, `glm-5.3-flash`, `glm-5.3-flashx`; older 5.2/5.1/5/4.7/4.5 | 5.3: 1M input, 128K output | 5.3: $1.40/$4.40; Flash: $0.15/$0.50; FlashX: $0.37/$1.25 |
-| **MiniMax** | `MiniMax-M2.7`, `M2.7-highspeed`, `M2.5`, `M2.5-highspeed` | 200K input, 16K output | M2.7: $0.30/$1.20 |
 | **Ollama** | Any local model | Varies | Free |
 
-All cloud providers use Anthropic-compatible APIs and share the same client — fewer moving parts, consistent behavior. GLM uses server-managed implicit prefix caching; Kimi, MiniMax, and DeepSeek use explicit prompt caching markers. Ollama uses its own native client and makes zero network calls.
+DeepSeek model IDs, limits and peak/off-peak rates follow the [official DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing/) (checked 2026-10-22). Cost estimates use peak rates as a conservative ceiling.
+
+All cloud providers use Anthropic-compatible APIs and share the same client — fewer moving parts, consistent behavior. GLM and DeepSeek use server-managed implicit prefix caching; DeepSeek accepts and ignores explicit cache markers. Ollama uses its own native client and makes zero network calls.
 
 GLM model parameters and pay-as-you-go estimates follow [Z.ai model documentation](https://docs.z.ai/guides/llm/glm-5.3), [Flash documentation](https://docs.z.ai/guides/vlm/glm-5.3-flash), and [pricing](https://docs.z.ai/guides/overview/pricing) (checked 2026-10-08). Coding Plan subscription quotas are separate from token-cost estimates. FlashX is listed for pay-as-you-go access and is not included in Coding Plan.
 
@@ -1784,15 +1780,9 @@ GLM Coding Plan users can enable the first-party `web_search_prime` tool with `/
 Switch anytime:
 ```
 /provider deepseek    →  /model deepseek-v4-pro
-/provider kimi        →  /model k3
-/provider glm         →  /model glm-5.3
-/provider minimax     →  /model MiniMax-M2.7
+/provider glm         →  /model glm-5.3-flash
 /provider ollama      →  /model llama3.2
 ```
-
-Kimi's prompt cache is model-specific. After switching between `k3`, Standard,
-and HighSpeed, start a fresh session with `/clear` to avoid re-prefilling a long
-history under the new model.
 
 ---
 
@@ -1884,9 +1874,6 @@ model: { name: "glm-5.3-flash" }
 api: { deepseek_key: "sk-...", active_provider: "deepseek" }
 model: { name: "deepseek-v4-pro" }
 
-# Or Kimi
-api: { kimi_key: "sk-kimi-...", active_provider: "kimi" }
-model: { name: "kimi-for-coding" }
 
 ```
 
@@ -1894,12 +1881,10 @@ model: { name: "kimi-for-coding" }
 
 ```yaml
 api:
-  kimi_key: ""
   deepseek_key: ""
   glm_key: ""
-  minimax_key: ""
   ollama_key: ""                  # optional, for remote Ollama with auth
-  active_provider: "glm"          # glm | deepseek | kimi | minimax | ollama
+  active_provider: "glm"          # glm | deepseek | ollama
   ollama_base_url: "http://localhost:11434"
   retry:
     max_retries: 10
@@ -2170,7 +2155,7 @@ gokin/
 ├── internal/
 │   ├── app/            # Orchestrator (~2.7K LOC) & message loop (~3.7K LOC)
 │   ├── agent/          # Multi-agent system (~4.8K LOC)
-│   ├── client/         # AnthropicClient (Kimi/GLM/MiniMax/DeepSeek) + OllamaClient
+│   ├── client/         # AnthropicClient (GLM/DeepSeek) + OllamaClient
 │   ├── tools/          # 59 built-in tools, 9 tool sets
 │   ├── mcp/            # MCP client + manager (stdio/http)
 │   ├── loops/          # Autonomous loop scheduler

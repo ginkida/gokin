@@ -56,7 +56,7 @@ func TestSaveProviderConfigRejectsOversizedResultBeforeCreatingDirectory(t *test
 func TestConcurrentProviderSavesPreserveEveryProviderKey(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", root)
-	providers := []string{"glm", "kimi", "deepseek", "minimax"}
+	providers := []string{"glm", "deepseek", "deepseek", "glm"}
 	var wg sync.WaitGroup
 	errs := make(chan error, len(providers))
 	for _, provider := range providers {

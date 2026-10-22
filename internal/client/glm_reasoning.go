@@ -25,6 +25,23 @@ func (c *AnthropicClient) applyReasoningSettings(body map[string]any, model stri
 		body["temperature"] = 1.0
 		return
 	}
+	if c.isProvider("deepseek") {
+		// DeepSeek defaults to thinking on and ignores budget_tokens. Send the
+		// effective toggle explicitly on both prompt and tool continuations.
+		if enabled && budget > 0 {
+			if effort == "" || effort == "auto" {
+				effort = config.GLMEffortForBudget(budget)
+			}
+			body["thinking"] = map[string]any{"type": "enabled"}
+			body["output_config"] = map[string]any{"effort": effort}
+		} else {
+			body["thinking"] = map[string]any{"type": "disabled"}
+		}
+		if temperature > 0 {
+			body["temperature"] = temperature
+		}
+		return
+	}
 	if enabled && budget > 0 {
 		thinking := map[string]any{
 			"type":          "enabled",
@@ -36,9 +53,6 @@ func (c *AnthropicClient) applyReasoningSettings(body map[string]any, model stri
 		body["thinking"] = thinking
 		body["temperature"] = 1.0
 		return
-	}
-	if c.isProvider("kimi") && !kimiAlwaysOnReasoningModel(model) {
-		body["thinking"] = map[string]any{"type": "disabled"}
 	}
 	if temperature > 0 {
 		body["temperature"] = temperature

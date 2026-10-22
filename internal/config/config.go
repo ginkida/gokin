@@ -66,6 +66,8 @@ type Config struct {
 	snapshotTracked  bool
 	snapshotMCP      MCPConfig
 	snapshotMCPSet   bool
+
+	removedProviderWarned bool
 }
 
 // EngineConfig selects the orchestration data plane. "auto" is deliberately
@@ -193,15 +195,15 @@ type APIConfig struct {
 
 	// Separate keys for each provider
 	GLMKey      string `yaml:"glm_key,omitempty"`
-	MiniMaxKey  string `yaml:"minimax_key,omitempty"`
-	KimiKey     string `yaml:"kimi_key,omitempty"`
 	DeepSeekKey string `yaml:"deepseek_key,omitempty"`
 	OllamaKey   string `yaml:"ollama_key,omitempty"` // Optional, for remote Ollama servers with auth
+
+	RemovedProviderKeys `yaml:",inline"`
 
 	// Ollama server URL (default: http://localhost:11434)
 	OllamaBaseURL string `yaml:"ollama_base_url,omitempty"`
 
-	// Active provider: glm, minimax, kimi, deepseek, ollama (default: glm)
+	// Active provider: glm, deepseek, ollama (default: glm)
 	ActiveProvider string `yaml:"active_provider"`
 
 	// Backend: legacy alias for ActiveProvider
@@ -285,7 +287,7 @@ type RetryConfig struct {
 	RetryDelay        time.Duration                  `yaml:"retry_delay"`         // Initial delay between retries (default: 1s)
 	HTTPTimeout       time.Duration                  `yaml:"http_timeout"`        // First-response-header timeout (0 = provider default)
 	StreamIdleTimeout time.Duration                  `yaml:"stream_idle_timeout"` // Max pause between SSE chunks (0 = provider default)
-	Providers         map[string]ProviderRetryConfig `yaml:"providers,omitempty"` // Per-provider timeout overrides (e.g. glm/minimax/kimi).
+	Providers         map[string]ProviderRetryConfig `yaml:"providers,omitempty"` // Per-provider timeout overrides (e.g. glm/deepseek).
 }
 
 // ProviderRetryConfig holds retry timeout overrides for a specific provider.
@@ -352,13 +354,13 @@ type ToolsConfig struct {
 	Formatters                 map[string]string      `yaml:"formatters"`        // ext → command, e.g. {".py": "black"}
 	ProactiveContext           ProactiveContextConfig `yaml:"proactive_context"` // Auto-append related files to Read results.
 
-	// KimiToolBudget caps the number of tool calls a hosted model can issue per
+	// ToolBudget caps the number of tool calls a hosted model can issue per
 	// user turn before the executor synthesizes "budget reached" responses
 	// and forces the model to finalize. 0 disables the cap; values <10 are
-	// clamped up by the executor. The historical field/YAML name is retained
-	// for compatibility, but the guard covers every hosted provider family.
+	// clamped up by the executor. Loading accepts the historical YAML key.
+	// The guard covers every hosted provider family.
 	// Ollama stays uncapped because it consumes local compute. Default: 40.
-	KimiToolBudget int `yaml:"kimi_tool_budget"`
+	ToolBudget int `yaml:"tool_budget"`
 
 	// RequireReadBeforeEdit enforces the "model must Read before Edit"
 	// invariant at tool level. When true (default), Edit returns an error
@@ -674,7 +676,7 @@ func ResolveThinkingMode(mode string) string {
 // provider — glm-5.3-flash has a 1M context window and always-on reasoning with
 // low/high/max effort. The client preserves unsigned thinking and stable
 // request prefixes for provider-managed caching. The BaseURL is derived from the provider
-// at client construction (DefaultGLMBaseURL). Users with Kimi/DeepSeek/MiniMax/
+// at client construction (DefaultGLMBaseURL). Users with DeepSeek/GLM/
 // Ollama credentials can switch via /model or /provider at any time.
 func DefaultConfig() *Config {
 	return &Config{
@@ -725,7 +727,7 @@ func DefaultConfig() *Config {
 				MaxFiles:        3,
 				MaxLinesPerFile: 40,
 			},
-			KimiToolBudget:        40,
+			ToolBudget:            40,
 			RequireReadBeforeEdit: true,
 		},
 		UI: UIConfig{

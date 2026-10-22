@@ -88,7 +88,7 @@ func TestAuditBaselineCoverageAcceptsCompleteMultipleVariants(t *testing.T) {
 	manifest := writeBaselineAuditManifest(t, dir)
 	resultsPath := filepath.Join(dir, "baseline.jsonl")
 	var results []Result
-	for _, provider := range []string{"glm", "kimi"} {
+	for _, provider := range []string{"glm", "deepseek"} {
 		for _, id := range []string{"a", "b"} {
 			results = append(results, Result{ScenarioID: id, Provider: provider, Status: "passed"})
 		}

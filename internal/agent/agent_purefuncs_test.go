@@ -204,7 +204,7 @@ func TestMapModelName_StrongShorthand(t *testing.T) {
 }
 
 func TestMapModelName_Passthrough(t *testing.T) {
-	if got := mapModelName("kimi-k2"); got != "kimi-k2" {
+	if got := mapModelName("deepseek-k2"); got != "deepseek-k2" {
 		t.Fatalf("got %q, want passthrough", got)
 	}
 }
@@ -479,7 +479,7 @@ func TestAgent_DrainSteers_AppendsToHistory(t *testing.T) {
 
 func TestAgent_BuildWeakModelGuidance_NonGLM(t *testing.T) {
 	a := newTestAgent(t)
-	a.Model = "kimi-k2"
+	a.Model = "deepseek-k2"
 	got := a.buildWeakModelGuidance()
 	if !strings.Contains(got, "IMPORTANT RULES") {
 		t.Fatalf("missing base rules section: %q", got)

@@ -632,12 +632,12 @@ func TestMigrateConfig_PresetAlreadySet(t *testing.T) {
 
 func TestMigrateConfig_BackendAutoNormalized(t *testing.T) {
 	cfg := &Config{}
-	cfg.Model.Provider = "kimi"
+	cfg.Model.Provider = "deepseek"
 	cfg.API.Backend = "auto"
 
 	MigrateConfig(cfg)
 
-	if cfg.API.Backend != "kimi" {
+	if cfg.API.Backend != "deepseek" {
 		t.Errorf("backend 'auto' should normalize to provider: got %q", cfg.API.Backend)
 	}
 }
@@ -651,7 +651,7 @@ func TestDetectProvider(t *testing.T) {
 	}{
 		{"glm-5", "glm"},
 		{"deepseek-v4-pro", "deepseek"},
-		{"kimi-for-coding", "kimi"},
+
 		// Unknown models fall back to the default provider ("glm"), not "".
 		// Pin this so a future change to the fallback default is caught.
 		{"unknown-model", "glm"},
@@ -682,13 +682,13 @@ func TestNormalizeConfig_SetsProvider(t *testing.T) {
 
 func TestNormalizeConfig_SetsBackend(t *testing.T) {
 	cfg := &Config{}
-	cfg.Model.Provider = "kimi"
+	cfg.Model.Provider = "deepseek"
 	cfg.API.Backend = ""
 
 	if err := NormalizeConfig(cfg); err != nil {
 		t.Fatalf("NormalizeConfig: %v", err)
 	}
-	if cfg.API.Backend != "kimi" {
+	if cfg.API.Backend != "deepseek" {
 		t.Errorf("backend not synced: got %q", cfg.API.Backend)
 	}
 }
@@ -719,8 +719,8 @@ func TestNormalizeConfig_BadPreset(t *testing.T) {
 func TestNormalizeConfig_NormalizesRetryProviderKeys(t *testing.T) {
 	cfg := &Config{}
 	cfg.API.Retry.Providers = map[string]ProviderRetryConfig{
-		"  GLM ": {HTTPTimeout: 30_000_000_000},
-		"kimi":   {StreamIdleTimeout: 60_000_000_000},
+		"  GLM ":   {HTTPTimeout: 30_000_000_000},
+		"deepseek": {StreamIdleTimeout: 60_000_000_000},
 	}
 
 	if err := NormalizeConfig(cfg); err != nil {
@@ -729,8 +729,8 @@ func TestNormalizeConfig_NormalizesRetryProviderKeys(t *testing.T) {
 	if _, ok := cfg.API.Retry.Providers["glm"]; !ok {
 		t.Error("retry provider key 'GLM' not normalized to 'glm'")
 	}
-	if _, ok := cfg.API.Retry.Providers["kimi"]; !ok {
-		t.Error("retry provider key 'kimi' missing after normalization")
+	if _, ok := cfg.API.Retry.Providers["deepseek"]; !ok {
+		t.Error("retry provider key 'deepseek' missing after normalization")
 	}
 }
 

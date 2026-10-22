@@ -322,15 +322,15 @@ func TestSanitizePastedKey(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"  sk-kimi-abc  ", "sk-kimi-abc"},       // surrounding whitespace
-		{"\"sk-kimi-abc\"", "sk-kimi-abc"},       // double quotes
-		{"'sk-kimi-abc'", "sk-kimi-abc"},         // single quotes
-		{"  \"sk-kimi-abc\"  \n", "sk-kimi-abc"}, // quotes + whitespace
-		{"sk-kimi-abc", "sk-kimi-abc"},           // no artifacts
-		{"", ""},                                 // empty
-		{"   ", ""},                              // only whitespace
-		{"'unmatched\"", "'unmatched\""},         // mismatched quotes → unchanged
-		{"\"\"", ""},                             // empty quotes
+		{"  sk-deepseek-abc  ", "sk-deepseek-abc"},       // surrounding whitespace
+		{"\"sk-deepseek-abc\"", "sk-deepseek-abc"},       // double quotes
+		{"'sk-deepseek-abc'", "sk-deepseek-abc"},         // single quotes
+		{"  \"sk-deepseek-abc\"  \n", "sk-deepseek-abc"}, // quotes + whitespace
+		{"sk-deepseek-abc", "sk-deepseek-abc"},           // no artifacts
+		{"", ""},                                         // empty
+		{"   ", ""},                                      // only whitespace
+		{"'unmatched\"", "'unmatched\""},                 // mismatched quotes → unchanged
+		{"\"\"", ""},                                     // empty quotes
 	}
 	for _, tc := range cases {
 		got := sanitizePastedKey(tc.in)

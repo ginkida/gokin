@@ -875,7 +875,7 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 	}
 
 	// After session restore, check if context exceeds model limits and compact if needed.
-	// Some models (MiniMax, weak models) silently return empty responses on context overflow
+	// Some models silently return empty responses on context overflow
 	// instead of returning a 400 error, so we must proactively manage context size.
 	if sessionRestored && a.contextManager != nil {
 		history := a.session.GetHistory()
@@ -1585,9 +1585,9 @@ func (a *App) runAcceptedSubmitWithRecoveryIdentity(
 
 	// Forgot-slash detection: if the message starts with a word that's
 	// a registered command AND the rest looks like args rather than a
-	// sentence, flag it. Users kept reporting "/provider kimi didn't
+	// sentence, flag it. Users kept reporting "/provider deepseek didn't
 	// switch, Generating started" when they actually typed `provider
-	// kimi` without the slash — it went to the LLM which then ran a
+	// deepseek` without the slash — it went to the LLM which then ran a
 	// 20s reasoning round producing an unhelpful response. We don't
 	// block the LLM call (their intent might genuinely be a message),
 	// but we surface a toast so they know which command they meant and
@@ -1801,7 +1801,7 @@ func (a *App) handleRecoveryResubmit(message, memoryQuery, recoveryID, recoveryS
 
 // detectUnslashedCommand returns a user-facing hint when the input looks
 // like a slash command the user typed without the leading slash (e.g.
-// `provider kimi` instead of `/provider kimi`). Returns "" when the input
+// `provider deepseek` instead of `/provider deepseek`). Returns "" when the input
 // is plain natural language and no warning should fire.
 //
 // Heuristic:
@@ -3130,7 +3130,7 @@ func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionI
 	// sessionRestored = true }`), so this is the ONLY place that can catch
 	// a cross-provider restore on this path. Without it, `gokin --provider
 	// deepseek --resume` against a session authored under a different
-	// provider (e.g. kimi/glm) silently drops assistant turns on the next
+	// provider (e.g. deepseek/glm) silently drops assistant turns on the next
 	// request (unsigned thinking-signature replay across providers). Empty
 	// state.Provider = legacy session predating the provider tag; treat as
 	// compatible.
@@ -3968,7 +3968,7 @@ func (a *App) PersistCurrentConfig() error {
 }
 
 // shortActiveProviderName returns a display-friendly label for the active
-// provider, intended for inline status messages like toasts ("Kimi rate
+// provider, intended for inline status messages like toasts ("DeepSeek rate
 // limit — resumes in 30s"). We take the first word of the provider's
 // registered DisplayName rather than the raw key: "glm" alone reads as
 // lowercase unexpanded, and the full DisplayName ("GLM (BigModel /
@@ -5511,15 +5511,8 @@ func (a *App) buildModelEnhancement() string {
 		enhancement += "\n\n**GLM Execution Policy:** For multi-step work, state a short plan and keep the todo list current. Use the 1M context deliberately: batch independent reads/searches, retain verified facts, and do not repeat a read/grep without a new question. After tool results, briefly synthesize what changed and choose the single next action; never stop immediately after a tool call. Before claiming completion, inspect the resulting diff or files and run the narrowest relevant verification. A tool succeeding is evidence, not completion: finish only when the user's requested behavior is implemented and verified."
 	}
 
-	if profile.Family == "kimi" {
-		enhancement += "\n\n**Kimi Execution Policy:** Plan briefly before tools. Prefer grep -> targeted read over broad repeated exploration. Reuse tool results and do not repeat the same read/grep/glob without a new hypothesis. After 1-3 tool calls, synthesize what is established, what remains unknown, and the next best action."
-	}
-
 	if profile.Family == "deepseek" {
-		// Same class of issues as Kimi: eagerness to re-read and
-		// skipping the verification step. DeepSeek V4's 1M context
-		// tempts over-exploration even more than Kimi's 262K, so the
-		// nudge is sharper.
+		// Keep exploration bounded and verify edits despite the large context window.
 		enhancement += "\n\n**DeepSeek Execution Policy:** Match Claude-Code-style execution: for multi-step work, create a live todo list before editing and keep exactly one item in progress. Plan briefly before tools. 1M context is not a license to re-read — remember what you already loaded. Prefer grep -> targeted read, then edit. After code edits, run the narrowest verification (targeted go test / pytest / cargo check) and cite the result before finalising. Before the final answer, inspect git status or git diff when files changed, and do not claim changes you did not verify. After 3 tool calls: consolidate Established / Unknown / Next before continuing."
 	}
 

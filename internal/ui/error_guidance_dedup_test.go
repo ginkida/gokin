@@ -36,7 +36,7 @@ func TestErrorGuidance_PolishedTitlesAreReachable(t *testing.T) {
 		{"unknown model → Model Not Available",
 			"unknown model: gpt-99", "Model Not Available"},
 		{"context window → Context Window Exceeded",
-			"context window exceeded for kimi-for-coding", "Context Window Exceeded"},
+			"context window exceeded for deepseek-v4-pro", "Context Window Exceeded"},
 		{"prompt is too long → Context Window Exceeded",
 			"the prompt is too long for this model", "Context Window Exceeded"},
 		{"max tokens → Context Window Exceeded",

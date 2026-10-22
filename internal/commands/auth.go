@@ -44,8 +44,6 @@ func (c *LoginCommand) Description() string { return "Set API key for a provider
 func (c *LoginCommand) Usage() string {
 	return `/login                        - Show current status
 /login glm <api_key>          - Set GLM API key
-/login minimax <api_key>      - Set MiniMax API key
-/login kimi <api_key>         - Set Kimi API key
 /login deepseek <api_key>     - Set DeepSeek API key
 `
 }
@@ -55,7 +53,7 @@ func (c *LoginCommand) GetMetadata() CommandMetadata {
 		Icon:     "key",
 		Priority: 0,
 		HasArgs:  true,
-		ArgHint:  "glm|minimax|kimi|deepseek <key>",
+		ArgHint:  "glm|deepseek <key>",
 	}
 }
 
@@ -135,7 +133,7 @@ func (c *LoginCommand) Execute(ctx context.Context, args []string, app AppInterf
 	// that history to a new provider usually 400s — DeepSeek in
 	// particular rejects with "content[].thinking must be passed back"
 	// because it requires thinking blocks from prior assistant turns
-	// but Kimi/GLM stores them differently.
+	// but DeepSeek/GLM stores them differently.
 	//
 	// Read the RAW field (not GetActiveProvider) so first-time setup
 	// (ActiveProvider=="" and Backend=="") doesn't masquerade as a
@@ -572,7 +570,7 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 		// re-invokes /login <provider> <key>, which saves the key AND
 		// completes the switch (login sets ActiveProvider + the provider's
 		// default model + clears the cross-provider session) — so typing
-		// /provider kimi with no key configured becomes ONE flow, not two
+		// /provider deepseek with no key configured becomes ONE flow, not two
 		// commands.
 		return LoginKeyMarker + newProvider, nil
 	}
@@ -679,7 +677,7 @@ func padSpaces(n int) string {
 // removes leading/trailing whitespace (incl. \n, \r, \t) and a matching pair
 // of wrapping single or double quotes — both common artifacts when copying
 // keys from a browser console or a shell export statement like
-// `export GOKIN_KIMI_KEY="sk-kimi-..."`.
+// `export GOKIN_DEEPSEEK_KEY="sk-deepseek-..."`.
 //
 // Conservative: only strips a matching pair of quotes, never partial ones.
 func sanitizePastedKey(raw string) string {

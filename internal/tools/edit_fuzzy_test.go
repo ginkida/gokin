@@ -13,7 +13,7 @@ import (
 // The following pin the existing fuzzyStrategies chain in edit.go. They
 // guard against a common future regression: someone "simplifies" the
 // chain and silently drops the whitespace-tolerant matching that makes
-// Kimi's Edit calls land on the first attempt instead of the third.
+// DeepSeek's Edit calls land on the first attempt instead of the third.
 
 func TestTryFuzzyReplace_TrailingWhitespaceTolerant(t *testing.T) {
 	// File has trailing spaces on the line; model's old_string doesn't.

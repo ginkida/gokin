@@ -405,10 +405,9 @@ type Executor struct {
 	goDiagnosticsTimeout  time.Duration
 	goDiagnosticsStalled  atomic.Bool
 
-	// Hosted-provider per-turn tool budget. The field/setter retain their legacy
-	// Kimi names for config compatibility. Stagnation only catches identical
+	// Hosted-provider per-turn tool budget. Stagnation only catches identical
 	// repeats; this cap also catches diverse runaway exploration. 0 disables it.
-	kimiToolBudget int
+	toolBudget int
 
 	// Optional deep-compressor for structured function-response fields.
 	// ResultCompactor trims Content strings per-tool; this compresses
@@ -835,19 +834,19 @@ func (e *Executor) SetSelfReviewThreshold(n int) {
 	}
 }
 
-// SetKimiToolBudget sets the per-turn tool call cap applied to hosted models.
-// The legacy name is kept for source/config compatibility. n <= 0 disables
+// SetToolBudget sets the per-turn tool call cap applied to hosted models.
+// n <= 0 disables
 // the cap entirely. Values below 10 are clamped up so legitimate multi-step
 // tasks retain enough room to finish.
-func (e *Executor) SetKimiToolBudget(n int) {
+func (e *Executor) SetToolBudget(n int) {
 	if n <= 0 {
-		e.kimiToolBudget = 0
+		e.toolBudget = 0
 		return
 	}
 	if n < 10 {
 		n = 10
 	}
-	e.kimiToolBudget = n
+	e.toolBudget = n
 }
 
 // getClient returns the current client under read lock.
@@ -1534,10 +1533,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	var lastToolResult ToolResult   // Track the last tool result for context
 	var recentToolPatterns []string // Track tool name patterns per iteration for stagnation detection
 	var lastWorkingMemoryNote string
-	var lastKimiRecoveryNote string
+	var lastRecoveryNote string
 	// synthesisNudgeInjected ensures the per-turn consolidation reminder
 	// fires at most once. Without this guard the prompt would repeat every
-	// iteration past the threshold, training Kimi to output boilerplate
+	// iteration past the threshold, training DeepSeek to output boilerplate
 	// synthesis blocks instead of actually thinking.
 	synthesisNudgeInjected := false
 	// intentNudgeInjected gates the "announce your plan before tools"
@@ -1545,7 +1544,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 	// just adds noise — the model saw it already.
 	intentNudgeInjected := false
 	// todoNudgeInjected gates the live-checklist reminder. It is a soft
-	// Claude-Code contract nudge for Kimi/DeepSeek-class models that start
+	// Claude-Code contract nudge for DeepSeek-class models that start
 	// mutating across multiple tool calls without using todo.
 	todoNudgeInjected := false
 	// Once the hosted-provider tool budget is reached, give the model one
@@ -1818,7 +1817,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// Intent announcement nudge: if the very first assistant-turn of
 		// this request jumped straight into tool calls with no preceding
 		// prose, queue a reminder for the NEXT round asking for a
-		// one-line plan. Kimi-family only — Strong-tier models typically
+		// one-line plan. DeepSeek-family only — Strong-tier models typically
 		// self-narrate and don't need this. Once per turn, gated by
 		// len(toolsUsed)==0 rather than i==0 so outer-loop retries on
 		// transient errors (which bump i without executing tools) don't
@@ -1859,24 +1858,24 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// prevent runaway exploration. Unlike stagnation (which catches
 			// identical repeats), this catches diverse-but-wasteful fan-out.
 			// We count already-consumed calls in toolsUsed, not toolsUsed +
-			// current batch, so Kimi gets to finish a small final batch if
+			// current batch, so DeepSeek gets to finish a small final batch if
 			// it's right at the edge — the clamp is on the NEXT batch.
-			if e.shouldEnforceKimiToolBudget(cl.GetModel(), len(toolsUsed)-len(resp.FunctionCalls)) {
+			if e.shouldEnforceToolBudget(cl.GetModel(), len(toolsUsed)-len(resp.FunctionCalls)) {
 				toolBudgetFinalizationRounds++
 				if toolBudgetFinalizationRounds == 1 && e.handler != nil && e.handler.OnToolBudgetExhausted != nil {
 					e.handler.OnToolBudgetExhausted()
 				}
 				logging.Warn("hosted model tool budget exceeded: forcing finalization",
-					"budget", e.kimiToolBudget,
+					"budget", e.toolBudget,
 					"consumed", len(toolsUsed)-len(resp.FunctionCalls),
 					"model", cl.GetModel(),
 					"finalization_round", toolBudgetFinalizationRounds)
 				if e.handler != nil && e.handler.OnWarning != nil {
 					e.handler.OnWarning(fmt.Sprintf(
 						"Tool budget (%d) reached — forcing final answer instead of running %d more tools",
-						e.kimiToolBudget, len(resp.FunctionCalls)))
+						e.toolBudget, len(resp.FunctionCalls)))
 				}
-				results = e.buildKimiToolBudgetExhaustedResults(resp.FunctionCalls)
+				results = e.buildToolBudgetExhaustedResults(resp.FunctionCalls)
 				budgetStopAfterPair = toolBudgetFinalizationRounds > 1
 			}
 
@@ -1978,7 +1977,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			// (v0.87.0): per-target and progress-gated, so paging, distinct
 			// files, and read→edit cycles never trip it. Only observed for
 			// batches that will actually execute — a batch already replaced
-			// by the kimi budget or stagnation recovery must not leave ghost
+			// by the tool budget or stagnation recovery must not leave ghost
 			// coverage.
 			if results == nil {
 				if offender := coverage.observeBatch(resp.FunctionCalls); offender != nil {
@@ -2054,8 +2053,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				e.AddPendingNotification(note)
 			}
 
-			if note := buildKimiToolErrorRecoveryNotification(cl.GetModel(), results); note != "" && note != lastKimiRecoveryNote {
-				lastKimiRecoveryNote = note
+			if note := buildToolErrorRecoveryNotification(cl.GetModel(), results); note != "" && note != lastRecoveryNote {
+				lastRecoveryNote = note
 				e.AddPendingNotification(note)
 			}
 
@@ -2064,12 +2063,12 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				e.AddPendingNotification(todoNudgeMessage)
 			}
 
-			// Synthesis nudge: when Kimi has issued >=3 tool calls in this
+			// Synthesis nudge: when DeepSeek has issued >=3 tool calls in this
 			// turn without any intervening final text, inject a once-per-turn
 			// consolidation reminder. It is appended to the current tool result
 			// instead of inserted as a separate user message; Anthropic-compatible
 			// APIs require tool_result blocks to immediately follow tool_use blocks.
-			// Not emitted for non-Kimi models — Strong-tier models self-
+			// Not emitted for non-DeepSeek models — Strong-tier models self-
 			// consolidate, and spamming GLM/Opus with pause reminders
 			// regresses their behaviour.
 			if !synthesisNudgeInjected && shouldInjectSynthesisNudge(cl.GetModel(), len(toolsUsed)) {
@@ -4483,7 +4482,7 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 	case "list_dir", "tree", "git_status":
 		// Local inspection over a PATH — listing/statting different
 		// directories is exploration progress, not a loop (v0.100.95, same
-		// class as the todo empty-fingerprint bug: a reasoning-heavy Kimi K3
+		// class as the todo empty-fingerprint bug: a reasoning-heavy model
 		// turn that inspects 5 distinct dirs collapsed to one `list_dir:`
 		// pattern). Distinct paths ⇒ distinct fingerprints.
 		path, _ := args["path"].(string)
@@ -4520,7 +4519,7 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 		// Updating the task list with DIFFERENT items each time is progress,
 		// not a loop — the model checks off a task and adds the next. Hash the
 		// serialized todos so only a truly-identical re-write collapses to one
-		// fingerprint (field report: a Kimi K3 turn that narrates + updates its
+		// fingerprint (field report: a reasoning-heavy model turn that narrates + updates its
 		// checklist frequently tripped the 5-repeat abort with `todo:` — an
 		// empty default fingerprint that treated every distinct update as the
 		// same call). Mirrors edit's edits-array hash.
@@ -4560,7 +4559,7 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 // content for read-only tools) — so handing out hints is always side-effect free.
 //   - read-only idempotent tools: 3. A re-read/re-search loop is benign and the
 //     model almost always course-corrects once it gets the content back. This is
-//     model-agnostic; it used to be Kimi-only, which silently hard-aborted every
+//     model-agnostic; it used to be provider-specific, which silently hard-aborted every
 //     other provider's entire turn — the bug this fixes.
 //   - edit: 1, paired with a tailored "old_string isn't matching" hint. A model
 //     retrying the same failing edit needs to be told WHY, not killed.
@@ -4694,23 +4693,21 @@ func shouldAttemptStagnationRecovery(calls []*genai.FunctionCall, attempts int) 
 
 // toolBudgetFamilies are the model families subject to the per-turn tool cap.
 // Hosted providers share the quota-burning runaway mode this guard prevents.
-// The YAML key stays `kimi_tool_budget` for backwards compatibility.
+// The setting is tools.tool_budget; config loading accepts the historical key.
 var toolBudgetFamilies = map[string]bool{
 	"anthropic": true,
 	"deepseek":  true,
 	"glm":       true,
-	"kimi":      true,
-	"minimax":   true,
 }
 
-// shouldEnforceKimiToolBudget reports whether the per-turn tool budget cap
+// shouldEnforceToolBudget reports whether the per-turn tool budget cap
 // has been reached for the currently active hosted model family. Local models
 // and a disabled budget (0) always return false. `consumed` is the count of tool calls
 // already executed in this turn before the current batch — callers pass
 // len(toolsUsed)-len(newCalls) so the cap applies to the NEXT batch rather
 // than trimming an in-flight one.
-func (e *Executor) shouldEnforceKimiToolBudget(model string, consumed int) bool {
-	if e == nil || e.kimiToolBudget <= 0 {
+func (e *Executor) shouldEnforceToolBudget(model string, consumed int) bool {
+	if e == nil || e.toolBudget <= 0 {
 		return false
 	}
 	family := client.GetModelProfile(model).Family
@@ -4720,10 +4717,10 @@ func (e *Executor) shouldEnforceKimiToolBudget(model string, consumed int) bool 
 	if !toolBudgetFamilies[family] && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-") {
 		return false
 	}
-	return consumed >= e.kimiToolBudget
+	return consumed >= e.toolBudget
 }
 
-// buildKimiToolBudgetExhaustedResults synthesizes error-result FunctionResponses
+// buildToolBudgetExhaustedResults synthesizes error-result FunctionResponses
 // for the current batch of calls, one per call, carrying an explicit
 // "budget reached — wrap up" hint. The IDs are preserved so the model's
 // next-turn expectation (each function-call must be paired with a response)
@@ -4751,9 +4748,9 @@ func (e *Executor) buildStagnationStopResults(calls []*genai.FunctionCall) []*ge
 	return results
 }
 
-func (e *Executor) buildKimiToolBudgetExhaustedResults(calls []*genai.FunctionCall) []*genai.FunctionResponse {
+func (e *Executor) buildToolBudgetExhaustedResults(calls []*genai.FunctionCall) []*genai.FunctionResponse {
 	results := make([]*genai.FunctionResponse, len(calls))
-	msg := buildKimiToolBudgetMessage(e.kimiToolBudget)
+	msg := buildToolBudgetMessage(e.toolBudget)
 	for i, call := range calls {
 		toolName := "tool"
 		callID := ""
@@ -4770,7 +4767,7 @@ func (e *Executor) buildKimiToolBudgetExhaustedResults(calls []*genai.FunctionCa
 	return results
 }
 
-func buildKimiToolBudgetMessage(budget int) string {
+func buildToolBudgetMessage(budget int) string {
 	return fmt.Sprintf(
 		"Tool budget guard: this turn already issued %d tool calls — the configured per-turn cap for this model. Stop calling tools and write the final answer now, citing what you've already found. Do not re-request the same tools.",
 		budget,
@@ -4785,7 +4782,7 @@ const synthesisNudgeThreshold = 3
 
 // shouldInjectSynthesisNudge gates the per-turn synthesis reminder.
 // Only families where empirical drift-after-3-tool-calls was observed —
-// kimi and deepseek. GLM-5/Opus-class models self-consolidate and a
+// DeepSeek. GLM-5/Opus-class models self-consolidate and a
 // reminder regresses their behaviour; we don't nudge them. Threshold
 // comparison uses >= so the nudge lands immediately after the 3rd tool
 // result, before the model picks a 4th call.
@@ -4803,7 +4800,7 @@ func shouldInjectSynthesisNudge(model string, totalToolsThisTurn int) bool {
 // must come with evidence of the specific drift the nudge prevents.
 func isNudgeEligibleFamily(model string) bool {
 	family := client.GetModelProfile(model).Family
-	return family == "kimi" || family == "deepseek"
+	return family == "deepseek"
 }
 
 func buildSynthesisNudgeMessage(toolsCount int) string {
@@ -4821,7 +4818,7 @@ func buildSynthesisNudgeMessage(toolsCount int) string {
 const intentNudgeMinPlanChars = 30
 
 // intentNudgeMessage is the system reminder queued when the model skips
-// the plan phase. Wording mirrors the Kimi operating-rules addendum so
+// the plan phase. Wording mirrors the DeepSeek operating-rules addendum so
 // the model sees the same vocabulary in-prompt and in-runtime.
 const intentNudgeMessage = "Plan-then-act reminder: your last response jumped to tool calls without a one-line plan. Before your next set of tool calls, write a single line starting with 'Plan:' that states the concrete objective (3-7 words), so the user can tell what you're about to do. Skip the plan only for a single trivial read/grep with no follow-up."
 
@@ -4833,7 +4830,7 @@ const intentNudgeMessage = "Plan-then-act reminder: your last response jumped to
 //   - the model produced tool calls (otherwise there's nothing to plan)
 //   - the response text before the tool calls is under the threshold
 //     (≈ no plan written)
-//   - the model family is Kimi (Strong-tier models self-narrate)
+//   - the model family is DeepSeek (Strong-tier models self-narrate)
 func shouldInjectIntentNudge(toolsExecuted int, model string, resp *client.Response) bool {
 	if toolsExecuted > 0 || resp == nil {
 		return false
@@ -5056,7 +5053,7 @@ func describeStagnationTarget(toolName string, args map[string]any) string {
 }
 
 func (e *Executor) buildModelWorkingMemoryNotification(model string, calls []*genai.FunctionCall, results []*genai.FunctionResponse) string {
-	if !shouldInjectKimiWorkingMemory(model, calls, results) {
+	if !shouldInjectWorkingMemory(model, calls, results) {
 		return ""
 	}
 
@@ -5084,15 +5081,13 @@ func (e *Executor) buildModelWorkingMemoryNotification(model string, calls []*ge
 		return ""
 	}
 
-	return "[Kimi working memory] Established: " +
+	return "[Working memory] Established: " +
 		strings.Join(items, "; ") +
 		". Before more tools: reuse these results, do not repeat the same read/grep/glob without a new hypothesis, prefer grep -> targeted read, and after 1-3 tool calls synthesize what is established and what remains unknown."
 }
 
-func shouldInjectKimiWorkingMemory(model string, calls []*genai.FunctionCall, results []*genai.FunctionResponse) bool {
-	// Retained name for stability of log markers, but now eligibility
-	// extends to any nudge-eligible family — DeepSeek benefits from the
-	// same "don't re-explore, synthesise" reminder as Kimi.
+func shouldInjectWorkingMemory(model string, calls []*genai.FunctionCall, results []*genai.FunctionResponse) bool {
+	// Eligibility follows the same model-family policy as other runtime nudges.
 	if !isNudgeEligibleFamily(model) {
 		return false
 	}
@@ -5106,17 +5101,14 @@ func shouldInjectKimiWorkingMemory(model string, calls []*genai.FunctionCall, re
 	if call == nil {
 		return false
 	}
-	if isKimiExplorationTool(call.Name) {
+	if isExplorationTool(call.Name) {
 		return true
 	}
 	return workingMemoryResponseSize(results[0]) >= 700
 }
 
-func buildKimiToolErrorRecoveryNotification(model string, results []*genai.FunctionResponse) string {
-	// Name retained for log marker stability; eligibility now includes
-	// deepseek so V4 users get the same concrete recovery steps Kimi
-	// users do when read-before-edit / delta-check / ambiguity errors
-	// fire. The message text is generic — not family-specific.
+func buildToolErrorRecoveryNotification(model string, results []*genai.FunctionResponse) string {
+	// Give nudge-eligible models concrete recovery steps for tool failures.
 	if !isNudgeEligibleFamily(model) {
 		return ""
 	}
@@ -5135,13 +5127,13 @@ func buildKimiToolErrorRecoveryNotification(model string, results []*genai.Funct
 		}
 		switch {
 		case strings.Contains(lower, "read-before-edit"):
-			return "[Kimi recovery] read-before-edit blocked the mutation. Next call must be read(file_path=...) for the exact file, then retry one edit using exact surrounding context. Do not issue another mutation first."
+			return "[Tool recovery] read-before-edit blocked the mutation. Next call must be read(file_path=...) for the exact file, then retry one edit using exact surrounding context. Do not issue another mutation first."
 		case strings.Contains(lower, "delta-check guard") || strings.Contains(lower, "delta-check failed"):
-			return "[Kimi recovery] delta-check failed after a mutation. Fix the reported build/typecheck/lint error before any unrelated edit, then rerun the same verification."
+			return "[Tool recovery] delta-check failed after a mutation. Fix the reported build/typecheck/lint error before any unrelated edit, then rerun the same verification."
 		case strings.Contains(lower, "old_string not found") ||
 			(strings.Contains(lower, "ambiguous") && strings.Contains(lower, "old_string")) ||
 			strings.Contains(lower, "fuzzy match"):
-			return "[Kimi recovery] edit matching failed. Re-read the target region if needed, then retry with 3-5 exact surrounding lines in old_string or use line_start/line_end when the tool suggested it."
+			return "[Tool recovery] edit matching failed. Re-read the target region if needed, then retry with 3-5 exact surrounding lines in old_string or use line_start/line_end when the tool suggested it."
 		}
 	}
 	return ""
@@ -5184,7 +5176,7 @@ func appendTextBlock(base, addition string) string {
 	return base + "\n\n" + addition
 }
 
-func isKimiExplorationTool(toolName string) bool {
+func isExplorationTool(toolName string) bool {
 	switch toolName {
 	case "read", "grep", "glob", "list_dir", "tree":
 		return true

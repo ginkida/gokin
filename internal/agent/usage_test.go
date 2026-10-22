@@ -73,15 +73,15 @@ func TestRecordResponseUsagePricesEachProviderRound(t *testing.T) {
 		InputTokens:          0,
 		CacheReadInputTokens: 1_000_000,
 	}) // cached GLM-5 input: $0.20
-	identified.provider = "kimi"
-	mock.SetModel("kimi-for-coding")
+	identified.provider = "deepseek"
+	mock.SetModel("deepseek-v4-pro")
 	a.recordResponseUsageLocked(&client.Response{
 		InputTokens: 1_000_000,
-	}) // Kimi input: $0.95
+	}) // DeepSeek peak input: $1.32
 	a.stateMu.Unlock()
 
-	if !a.usageCostTracked || a.usageEstimatedCost != 1.15 {
-		t.Fatalf("mixed-provider ledger = tracked %v cost %v, want 1.15",
+	if !a.usageCostTracked || a.usageEstimatedCost != 1.52 {
+		t.Fatalf("mixed-provider ledger = tracked %v cost %v, want 1.52",
 			a.usageCostTracked, a.usageEstimatedCost)
 	}
 }

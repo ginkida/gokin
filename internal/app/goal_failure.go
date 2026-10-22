@@ -94,8 +94,7 @@ func unrecoverableGoalError(err error) bool {
 	var terminal *client.TerminalProviderError
 	if errors.As(err, &terminal) {
 		switch terminal.Code {
-		case "1000", "1001", "1003", "1005", "1113", "1211", "1212", "1261",
-			"kimi_authentication_failed", "kimi_model_not_found", "kimi_k3_access_denied", "kimi_highspeed_access_denied":
+		case "1000", "1001", "1003", "1005", "1113", "1211", "1212", "1261", "deepseek_authentication_failed", "deepseek_insufficient_balance":
 			return true
 		}
 		// Typed usage-window limits may share a billing HTTP status. They are

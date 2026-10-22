@@ -34,7 +34,7 @@ func TestBroadLoopThreshold_ExplorationToolsGetHigherCeiling(t *testing.T) {
 	}
 
 	// The confirmed-omitted siblings from review must now be covered — incl.
-	// the v0.100.95 semantic/review inspection tools (Kimi-friendliness).
+	// the v0.100.95 semantic/review inspection tools (provider reliability).
 	for _, tool := range []string{
 		"diff", "git_status", "git_diff", "git_log", "git_blame", "check_impact", "history_search",
 		"go_search", "go_to_definition", "find_references", "review_changes",

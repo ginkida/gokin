@@ -16,8 +16,8 @@ func TestCloneForAuxiliaryStripsForegroundRequestState(t *testing.T) {
 	base, err := NewAnthropicClient(AnthropicConfig{
 		APIKey:         "test-key",
 		BaseURL:        "https://example.test/anthropic",
-		Provider:       "kimi",
-		Model:          "k3",
+		Provider:       "deepseek",
+		Model:          "deepseek-v4-pro",
 		ThinkingBudget: 8192,
 	})
 	if err != nil {
@@ -91,9 +91,9 @@ func TestCloneForAuxiliaryFailsClosedForUncloneableFallbackChild(t *testing.T) {
 
 func TestCloneForAuxiliaryIsolatesFallbackChainAndClearsCallbacks(t *testing.T) {
 	first := &fakeFallbackClientStub{id: "first", model: "glm-5.2"}
-	second := &fakeFallbackClientStub{id: "second", model: "k3"}
+	second := &fakeFallbackClientStub{id: "second", model: "deepseek-v4-pro"}
 	fallback, err := NewFallbackClient(
-		[]Client{first, second}, []string{"glm", "kimi"})
+		[]Client{first, second}, []string{"glm", "deepseek"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,13 +140,13 @@ func TestCloneForAuxiliaryFallbackSharesBuiltInProviderTransports(t *testing.T) 
 		t.Fatal(err)
 	}
 	second, err := NewAnthropicClient(AnthropicConfig{
-		APIKey: "second", BaseURL: "https://second.example.test", Provider: "kimi", Model: "k3",
+		APIKey: "second", BaseURL: "https://second.example.test", Provider: "deepseek", Model: "deepseek-v4-pro",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fallback, err := NewFallbackClient(
-		[]Client{first, second}, []string{"glm", "kimi"})
+		[]Client{first, second}, []string{"glm", "deepseek"})
 	if err != nil {
 		t.Fatal(err)
 	}

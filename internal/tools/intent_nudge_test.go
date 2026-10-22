@@ -14,31 +14,31 @@ func TestShouldInjectIntentNudge_OnlyBeforeAnyToolsExecuted(t *testing.T) {
 		Text:          "",
 		FunctionCalls: []*genai.FunctionCall{{Name: "read"}},
 	}
-	if !shouldInjectIntentNudge(0, "kimi-for-coding", resp) {
+	if !shouldInjectIntentNudge(0, "deepseek-v4-pro", resp) {
 		t.Error("should fire when no tools have been executed yet + tool calls + empty text")
 	}
 	// Once tools have run, the nudge would be stale — the model already
 	// committed to a direction, lecturing about plan now adds noise.
-	if shouldInjectIntentNudge(1, "kimi-for-coding", resp) {
+	if shouldInjectIntentNudge(1, "deepseek-v4-pro", resp) {
 		t.Error("should NOT fire once tools have executed (even 1)")
 	}
-	if shouldInjectIntentNudge(5, "kimi-for-coding", resp) {
+	if shouldInjectIntentNudge(5, "deepseek-v4-pro", resp) {
 		t.Error("should NOT fire deep into the turn")
 	}
 }
 
-func TestShouldInjectIntentNudge_OnlyKimiFamily(t *testing.T) {
+func TestShouldInjectIntentNudge_OnlyDeepSeekFamily(t *testing.T) {
 	resp := &client.Response{
 		FunctionCalls: []*genai.FunctionCall{{Name: "read"}},
 	}
 	if shouldInjectIntentNudge(0, "glm-5.1", resp) {
-		t.Error("must not fire for non-Kimi models")
+		t.Error("must not fire for non-DeepSeek models")
 	}
-	if shouldInjectIntentNudge(0, "MiniMax-M2.7", resp) {
-		t.Error("must not fire for MiniMax")
+	if shouldInjectIntentNudge(0, "glm-4.7", resp) {
+		t.Error("must not fire for GLM")
 	}
-	if !shouldInjectIntentNudge(0, "kimi-for-coding", resp) {
-		t.Error("should fire for Kimi")
+	if !shouldInjectIntentNudge(0, "deepseek-v4-pro", resp) {
+		t.Error("should fire for DeepSeek")
 	}
 }
 
@@ -47,7 +47,7 @@ func TestShouldInjectIntentNudge_SkipsWhenPlanTextPresent(t *testing.T) {
 		Text:          "Plan: update the handler to handle empty input edge case.",
 		FunctionCalls: []*genai.FunctionCall{{Name: "read"}},
 	}
-	if shouldInjectIntentNudge(0, "kimi-for-coding", resp) {
+	if shouldInjectIntentNudge(0, "deepseek-v4-pro", resp) {
 		t.Error("should NOT fire when plan text is present")
 	}
 }
@@ -57,7 +57,7 @@ func TestShouldInjectIntentNudge_SkipsWhenNoToolCalls(t *testing.T) {
 		Text:          "",
 		FunctionCalls: nil,
 	}
-	if shouldInjectIntentNudge(0, "kimi-for-coding", resp) {
+	if shouldInjectIntentNudge(0, "deepseek-v4-pro", resp) {
 		t.Error("text-only response has nothing to plan for; must not fire")
 	}
 }
@@ -71,7 +71,7 @@ func TestShouldInjectIntentNudge_ThinkingCountsAsPlan(t *testing.T) {
 		Thinking:      "The user wants X. I'll read the handler, then edit it, then run tests.",
 		FunctionCalls: []*genai.FunctionCall{{Name: "read"}},
 	}
-	if shouldInjectIntentNudge(0, "kimi-for-coding", resp) {
+	if shouldInjectIntentNudge(0, "deepseek-v4-pro", resp) {
 		t.Error("visible thinking trace should suppress the nudge")
 	}
 }
@@ -83,13 +83,13 @@ func TestShouldInjectIntentNudge_FillerTextStillTriggers(t *testing.T) {
 		Text:          "OK.",
 		FunctionCalls: []*genai.FunctionCall{{Name: "read"}},
 	}
-	if !shouldInjectIntentNudge(0, "kimi-for-coding", resp) {
+	if !shouldInjectIntentNudge(0, "deepseek-v4-pro", resp) {
 		t.Error("'OK.' filler should still trigger the nudge")
 	}
 }
 
 func TestShouldInjectIntentNudge_NilRespSafe(t *testing.T) {
-	if shouldInjectIntentNudge(0, "kimi-for-coding", nil) {
+	if shouldInjectIntentNudge(0, "deepseek-v4-pro", nil) {
 		t.Error("nil resp must not trigger")
 	}
 }

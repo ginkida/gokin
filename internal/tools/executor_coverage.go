@@ -70,7 +70,7 @@ type coverageOffender struct {
 // observeBatch records coverage for one round's calls and returns the first
 // offender whose consecutive no-progress redundancy reached its budget, or
 // nil. Must only be called for batches that will actually execute — skipped
-// batches (kimi budget / stagnation recovery) must not leave ghost coverage.
+// batches (tool budget / stagnation recovery) must not leave ghost coverage.
 func (t *executorCoverageTracker) observeBatch(calls []*genai.FunctionCall) *coverageOffender {
 	var offender *coverageOffender
 	for _, fc := range calls {

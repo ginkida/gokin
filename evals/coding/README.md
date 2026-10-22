@@ -21,7 +21,7 @@ go run ./cmd/gokin eval run --dry-run --scenario go_bugfix_targeted_test
 Run the same manifest across providers:
 
 ```sh
-go run ./cmd/gokin eval run --provider kimi --provider glm --provider minimax --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
+go run ./cmd/gokin eval run --provider glm --provider deepseek --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
 The headless script uses `gokin` from PATH by default; point `GOKIN_BIN` at a
@@ -29,13 +29,13 @@ freshly built binary when iterating locally:
 
 ```sh
 go build -o /tmp/gokin ./cmd/gokin
-GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run --provider kimi --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
+GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run --provider glm --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
 Run a provider/model matrix:
 
 ```sh
-go run ./cmd/gokin eval run --provider kimi --model kimi-for-coding --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
+go run ./cmd/gokin eval run --provider deepseek --model deepseek-v4-pro --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh"
 ```
 
 For the dedicated repository-analytics A/B suite, including positive and
@@ -259,8 +259,7 @@ rows. Check baseline coverage without spending provider tokens:
 ```sh
 go run ./cmd/gokin eval baseline-audit \
   --input evals/coding/baselines/glm.jsonl \
-  --input evals/coding/baselines/deepseek.jsonl \
-  --input evals/coding/baselines/kimi.jsonl
+  --input evals/coding/baselines/deepseek.jsonl
 ```
 
 The command fails closed on missing, unknown, or duplicate rows in any
@@ -282,15 +281,10 @@ GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
   --provider glm --model glm-5.3 \
   --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
   --output evals/coding/baselines/glm.jsonl
-
-GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
-  --provider kimi \
-  --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
-  --output evals/coding/baselines/kimi.jsonl
 ```
 
 Each provider needs its key in the environment for the run (the headless
-adapter inherits it): `GOKIN_DEEPSEEK_KEY`, `GOKIN_GLM_KEY`, `GOKIN_KIMI_KEY`.
+adapter inherits it): `GOKIN_DEEPSEEK_KEY`, `GOKIN_GLM_KEY`.
 
 Commit `evals/coding/baselines/*.jsonl`. After any prompt/tool/routing
 change, re-run for the affected provider into `.gokin/evals/results.jsonl`

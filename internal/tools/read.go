@@ -337,7 +337,7 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	validPath, err := t.pathValidator.ValidateFile(filePath)
 	if err != nil {
 		// Path-validation usually fires when a model fabricates an
-		// absolute path outside the workdir (classic Kimi hallucination
+		// absolute path outside the workdir (classic the model hallucination
 		// mode). Suggest same-basename files under the workdir so it
 		// can recover with one corrected read instead of a flailing
 		// grep. Also surface the workdir so the model sees where its
@@ -412,7 +412,7 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		// Detect binary files by extension or null bytes in first 512
 		// bytes. Return as ERROR (not success) so the model treats this
 		// as a signal to do something else — previously Success=true
-		// with a "Binary file" message caused Kimi to believe it had
+		// with a "Binary file" message caused the model to believe it had
 		// successfully read the file and make confident claims based on
 		// the (nonexistent) contents.
 		if isBinaryFile(filePath) {
@@ -639,7 +639,7 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 
 	// Truncation hint. Emitted only when we actually stopped early —
 	// partial-read indistinguishable from a complete read is a documented
-	// Kimi pitfall that leads to "I read the file, nothing else to do"
+	// the model pitfall that leads to "I read the file, nothing else to do"
 	// followed by confident-but-wrong claims. Placed before the Related-
 	// files block so it sits close to the numbered content.
 	if hasMoreAfterLimit {
@@ -700,7 +700,7 @@ func (t *ReadTool) readText(ctx context.Context, filePath string, args map[strin
 // Returns up to 5 paths, formatted like suggestSimilarFiles output.
 //
 // Designed as the fallback when the exact path doesn't exist — the
-// common "wrong dir, right filename" model failure mode Kimi hits.
+// common "wrong dir, right filename" model failure mode the model hits.
 func suggestFilesInWorkDir(workDir, base string) []string {
 	if workDir == "" || base == "" {
 		return nil

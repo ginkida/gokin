@@ -190,7 +190,7 @@ func (t *MemoryTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		// This condition CANNOT change within the session, so the error must
 		// steer the model to an action available NOW and forbid retries — the
 		// old "enable it in config and restart" advice describes something
-		// only the USER can do, and models (Kimi especially) retried the
+		// only the USER can do, and models (the model especially) retried the
 		// identical call forever (the v0.100.100 memory-loop field report).
 		return NewErrorResult("The keyed memory store is disabled — do NOT retry this call, it will fail the same way every time this session. To save durable project knowledge NOW, use the `memorize` tool instead (project memory, always available). If the user wants the keyed store, they can set `memory.enabled: true` in ~/.config/gokin/config.yaml and restart."), nil
 	}

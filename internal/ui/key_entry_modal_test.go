@@ -67,7 +67,7 @@ func TestKeyEntryFailureReopensEmptyRetryWithoutSecret(t *testing.T) {
 	_ = m.handleKeyEntryKeys(tea.KeyMsg{Type: tea.KeyEnter})
 
 	// A result for another provider cannot steal or resolve this attempt.
-	_ = m.handleMessageTypes(KeyEntryResultMsg{Provider: "kimi", Success: true, Message: "saved"})
+	_ = m.handleMessageTypes(KeyEntryResultMsg{Provider: "deepseek", Success: true, Message: "saved"})
 	if m.keyEntryPendingProvider != "glm" || m.state != StateInput {
 		t.Fatalf("stale result changed login lifecycle: pending=%q state=%v", m.keyEntryPendingProvider, m.state)
 	}

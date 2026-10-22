@@ -303,7 +303,7 @@ func IsRetryableAPIError(err error) bool {
 		return true
 	}
 
-	// Some providers (MiniMax) return transient 400 "model_not_found" that resolves on retry.
+	// Some compatible gateways return transient 400 "model_not_found" that resolves on retry.
 	if errors.As(err, &httpErr) && httpErr.StatusCode == 400 {
 		msg := strings.ToLower(httpErr.Message)
 		if strings.Contains(msg, "model_not_found") || strings.Contains(msg, "model not found") {
@@ -463,7 +463,7 @@ func IsContextTooLongError(err error) bool {
 // Real overflows reliably say "context", "too long"/"too large", or pair "token"
 // with a limit/exceed/maximum qualifier; a bare "maximum" or bare "token" does not.
 func messageIndicatesContextOverflow(msg string) bool {
-	// Kimi Code enforces a separate 2 MB serialized-message ceiling and says
+	// Some gateways enforce a serialized-message ceiling and report
 	// `total message size N exceeds limit 2097152`. This is recoverable by the
 	// same history compaction as a token-window overflow.
 	if strings.Contains(msg, "message size") &&

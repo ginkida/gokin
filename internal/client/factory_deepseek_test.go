@@ -6,8 +6,7 @@ import (
 	"gokin/internal/config"
 )
 
-// newDeepSeekTestConfig mirrors newKimiTestConfig for the deepseek
-// factory path — a minimal config that lets newDeepSeekClient build
+// newDeepSeekTestConfig lets newDeepSeekClient build
 // without network calls. Key is long enough to pass ValidateKeyFormat.
 func newDeepSeekTestConfig() *config.Config {
 	return &config.Config{
@@ -22,9 +21,7 @@ func newDeepSeekTestConfig() *config.Config {
 }
 
 // TestSupportsDeepSeekThinking pins which DeepSeek models get Extended
-// Thinking auto-enabled. V4 (pro + flash) and legacy reasoner: yes.
-// deepseek-chat: no — it's a pure chat model and the API rejects
-// thinking blocks on that route.
+// Thinking auto-enabled. Saved retired IDs are resolved separately.
 func TestSupportsDeepSeekThinking(t *testing.T) {
 	cases := []struct {
 		model string
@@ -33,16 +30,17 @@ func TestSupportsDeepSeekThinking(t *testing.T) {
 		// V4 generation — both variants support thinking.
 		{"deepseek-v4-pro", true},
 		{"deepseek-v4-flash", true},
+		{"deepseek-flash", true},
 		{"DeepSeek-V4-Pro", true}, // case-insensitive
 		// Legacy reasoner.
 		{"deepseek-reasoner", true},
-		// Plain chat must NOT get thinking — endpoint rejects it.
+		// The raw retired chat ID is not auto-enabled by this gate.
 		{"deepseek-chat", false},
 		// Bare "deepseek" is a family-level fallback — treat as V4-ish.
 		{"deepseek", true},
 		// Non-DeepSeek models must not trip.
 		{"glm-5.1", false},
-		{"kimi-for-coding", false},
+
 		{"", false},
 		{"random", false},
 	}
@@ -85,8 +83,7 @@ func TestNewClient_DetectsDeepSeekProviderFromModelName(t *testing.T) {
 }
 
 // TestNewDeepSeekClient_AutoEnablesThinking confirms that a user who
-// did not configure thinking still gets it on for V4 Pro. Parallels
-// TestNewKimiClient_AutoEnablesThinking.
+// did not configure thinking still gets it on for V4 Pro.
 func TestNewDeepSeekClient_AutoEnablesThinking(t *testing.T) {
 	cfg := newDeepSeekTestConfig()
 	c, err := newDeepSeekClient(cfg, "deepseek-v4-pro")
@@ -112,23 +109,22 @@ func TestNewDeepSeekClient_AutoEnablesThinking(t *testing.T) {
 	}
 }
 
-// TestNewDeepSeekClient_NoThinkingForChat confirms deepseek-chat is
-// correctly left without a thinking budget — otherwise API requests
-// to that route would 400.
-func TestNewDeepSeekClient_NoThinkingForChat(t *testing.T) {
-	cfg := newDeepSeekTestConfig()
-	cfg.Model.Name = "deepseek-chat"
-	c, err := newDeepSeekClient(cfg, "deepseek-chat")
-	if err != nil {
-		t.Fatalf("newDeepSeekClient: %v", err)
-	}
-	ac := c.(*AnthropicClient)
-	if ac.config.EnableThinking {
-		t.Error("thinking must NOT auto-enable for deepseek-chat")
-	}
-	if ac.config.ThinkingBudget != 0 {
-		t.Errorf("ThinkingBudget should stay 0 for deepseek-chat, got %d",
-			ac.config.ThinkingBudget)
+func TestNewClient_RetiredDeepSeekModelsUseCurrentFlash(t *testing.T) {
+	for _, model := range []string{"deepseek-chat", "deepseek-reasoner"} {
+		cfg := newDeepSeekTestConfig()
+		cfg.Model.Provider = "deepseek"
+		cfg.Model.Name = model
+		c, err := NewClient(t.Context(), cfg, model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if c.GetModel() != "deepseek-flash" || cfg.Model.Name != "deepseek-flash" {
+			t.Fatalf("retired %s resolved to client=%q config=%q", model, c.GetModel(), cfg.Model.Name)
+		}
+		if !c.(*AnthropicClient).config.EnableThinking {
+			t.Fatal("Flash must support thinking")
+		}
 	}
 }
 
@@ -160,14 +156,7 @@ func TestNewDeepSeekClient_MissingKey(t *testing.T) {
 	}
 }
 
-// TestAnthropicClient_SupportsPromptCachingForDeepSeek pins that the
-// caching gate recognises the DeepSeek base URL. Live testing (Apr
-// 2026) confirmed DeepSeek V4 honours cache_control markers and
-// reports cache_read_input_tokens on repeat prefixes — a 1.2K-token
-// system prompt saw 95% input-token reduction on the second call.
-// If this test starts failing, someone dropped the DeepSeek clause
-// from supportsPromptCaching and users are now paying full price
-// per turn.
+// DeepSeek accepts (and ignores) cache_control; caching is implicit.
 func TestAnthropicClient_SupportsPromptCachingForDeepSeek(t *testing.T) {
 	cases := []struct {
 		baseURL string
@@ -176,10 +165,7 @@ func TestAnthropicClient_SupportsPromptCachingForDeepSeek(t *testing.T) {
 		// DeepSeek endpoints — must all pass the gate.
 		{"https://api.deepseek.com/anthropic", true},
 		{"https://api.deepseek.com/anthropic/v1/messages", true},
-		// Other Anthropic-compat endpoints we already support.
-		{"https://api.kimi.com/coding", true},
-		{"https://api.moonshot.ai/anthropic", true},
-		{"https://api.minimax.io/anthropic", true},
+
 		// Native Anthropic.
 		{DefaultAnthropicBaseURL, true},
 		{"", true}, // empty BaseURL defaults to Anthropic

@@ -9,6 +9,7 @@ import (
 
 // MigrateConfig migrates old configuration format to new format.
 func MigrateConfig(cfg *Config) {
+	migrateRemovedProviders(cfg)
 	migrated := false
 
 	// Auto-detect provider if not set
@@ -48,6 +49,7 @@ func DetectProvider(modelName string) string {
 
 // NormalizeConfig ensures configuration is consistent and valid.
 func NormalizeConfig(cfg *Config) error {
+	migrateRemovedProviders(cfg)
 	if err := ValidateKeybindings(cfg.UI.Keybindings); err != nil {
 		return err
 	}
@@ -89,7 +91,7 @@ func NormalizeConfig(cfg *Config) error {
 		looksLikeDefaultModelConfig(&cfg.Model) {
 		// Provider was set explicitly (e.g. "glm") but Name/MaxOutputTokens
 		// are still the zero-preset defaults (glm-5 / glm-5.1 / glm-5.2 /
-		// kimi-for-coding / 131072 — see looksLikeDefaultModelConfig in
+		// 131072 — see looksLikeDefaultModelConfig in
 		// presets.go). The user almost certainly wanted the provider's
 		// preset — apply it so output isn't truncated just because they
 		// skipped the preset.

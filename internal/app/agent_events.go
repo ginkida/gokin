@@ -544,7 +544,7 @@ func (p *tuiPresenter) Warning(warning string) {
 	case strings.Contains(lower, "loop guard"), strings.Contains(lower, "model may be looping"):
 		details["tag"] = "loop-guard"
 	case strings.Contains(lower, "tool budget"):
-		// Budget fires can repeat across iterations if Kimi keeps
+		// Budget fires can repeat across iterations if the model keeps
 		// producing tool calls after the hint. Tagging collapses
 		// the N toasts into one that updates in place.
 		details["tag"] = "tool-budget"

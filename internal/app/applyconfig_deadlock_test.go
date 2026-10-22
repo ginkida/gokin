@@ -62,12 +62,12 @@ func TestApplyConfig_NoSelfDeadlock(t *testing.T) {
 	app := &App{
 		config: &config.Config{
 			API: config.APIConfig{
-				ActiveProvider: "kimi",
-				KimiKey:        "sk-kimi-test-key-1234567890",
+				ActiveProvider: "deepseek",
+				DeepSeekKey:    "sk-deepseek-test-key-1234567890",
 			},
 			Model: config.ModelConfig{
-				Name:     "kimi-for-coding",
-				Provider: "kimi",
+				Name:     "deepseek-v4-pro",
+				Provider: "deepseek",
 			},
 		},
 	}

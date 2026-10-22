@@ -30,13 +30,13 @@ func TestDefaultConfig_CompletionEvidenceFooterDefault(t *testing.T) {
 	}
 }
 
-// Pins: Kimi tool budget default. Raising it weakens the runaway guard;
+// Pins: hosted tool budget default. Raising it weakens the runaway guard;
 // dropping to 0 disables it entirely — both changes deserve an explicit
 // test-update so they can't slip in silently.
-func TestDefaultConfig_KimiToolBudgetDefault(t *testing.T) {
+func TestDefaultConfig_ToolBudgetDefault(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Tools.KimiToolBudget != 40 {
-		t.Errorf("expected Tools.KimiToolBudget=40 by default, got %d", cfg.Tools.KimiToolBudget)
+	if cfg.Tools.ToolBudget != 40 {
+		t.Errorf("expected Tools.ToolBudget=40 by default, got %d", cfg.Tools.ToolBudget)
 	}
 }
 

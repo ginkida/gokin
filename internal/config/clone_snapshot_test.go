@@ -169,7 +169,7 @@ func TestClone_DeepCopiesSlicesAndMaps(t *testing.T) {
 		Env:     map[string]string{"K": "V"},
 		Headers: map[string]string{"H": "1"},
 	}}
-	c.Model.FallbackProviders = []string{"glm", "kimi"}
+	c.Model.FallbackProviders = []string{"glm", "deepseek"}
 	c.Tools.AllowedDirs = []string{"/tmp"}
 	c.Tools.Formatters = map[string]string{"go": "gofmt"}
 	c.Permission.Rules = map[string]string{"bash": "ask"}

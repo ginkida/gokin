@@ -54,19 +54,19 @@ func (f *fakeClient) CountTokens(_ context.Context, _ []*genai.Content) (*genai.
 func TestClientPool_InvalidateEvictsAndClosesEntry(t *testing.T) {
 	pool := NewClientPool(5)
 	oldClient := &fakeClient{id: "old-key-client"}
-	pool.Put("kimi", "kimi-for-coding", oldClient)
+	pool.Put("deepseek", "deepseek-v4-pro", oldClient)
 
 	// Sanity: the entry is there.
-	got, ok := pool.Get("kimi", "kimi-for-coding")
+	got, ok := pool.Get("deepseek", "deepseek-v4-pro")
 	if !ok || got != oldClient {
 		t.Fatalf("pre-check: pool.Get should return the put client, got %+v ok=%v", got, ok)
 	}
 
 	// Invalidate — this is the one fix.
-	pool.Invalidate("kimi", "kimi-for-coding")
+	pool.Invalidate("deepseek", "deepseek-v4-pro")
 
 	// Cache miss now.
-	got, ok = pool.Get("kimi", "kimi-for-coding")
+	got, ok = pool.Get("deepseek", "deepseek-v4-pro")
 	if ok || got != nil {
 		t.Errorf("after Invalidate, pool.Get should miss; got %+v ok=%v", got, ok)
 	}
@@ -77,8 +77,8 @@ func TestClientPool_InvalidateEvictsAndClosesEntry(t *testing.T) {
 	// A subsequent Put should populate a fresh entry (the new client built
 	// with the new key in production).
 	newClient := &fakeClient{id: "new-key-client"}
-	pool.Put("kimi", "kimi-for-coding", newClient)
-	got, ok = pool.Get("kimi", "kimi-for-coding")
+	pool.Put("deepseek", "deepseek-v4-pro", newClient)
+	got, ok = pool.Get("deepseek", "deepseek-v4-pro")
 	if !ok || got != newClient {
 		t.Errorf("after re-Put, should see new client; got %+v ok=%v", got, ok)
 	}
@@ -93,7 +93,7 @@ func TestClientPool_InvalidateEvictsAndClosesEntry(t *testing.T) {
 func TestClientPool_InvalidateMissingEntryIsNoOp(t *testing.T) {
 	pool := NewClientPool(5)
 	// Should not panic or error.
-	pool.Invalidate("kimi", "kimi-for-coding")
+	pool.Invalidate("deepseek", "deepseek-v4-pro")
 	pool.Invalidate("", "")
 
 	// Closing a still-empty pool must stay fine after spurious Invalidates.
@@ -105,41 +105,41 @@ func TestClientPool_InvalidateMissingEntryIsNoOp(t *testing.T) {
 func TestClientPool_InvalidateOnClosedPool(t *testing.T) {
 	pool := NewClientPool(5)
 	c := &fakeClient{id: "x"}
-	pool.Put("kimi", "kimi-for-coding", c)
+	pool.Put("deepseek", "deepseek-v4-pro", c)
 
 	pool.Close() // all entries closed by Close itself.
 
 	// Further Invalidates must be inert.
-	pool.Invalidate("kimi", "kimi-for-coding")
+	pool.Invalidate("deepseek", "deepseek-v4-pro")
 }
 
 // Invalidate must scope to (provider, model) — it must not drop other
-// providers' pooled clients. Important when /login kimi runs: any DeepSeek
+// providers' pooled clients. Important when /login deepseek runs: any DeepSeek
 // or GLM clients in the pool (from fallback chains) must survive.
 func TestClientPool_InvalidateIsScoped(t *testing.T) {
 	pool := NewClientPool(5)
-	kimi := &fakeClient{id: "kimi"}
 	deepseek := &fakeClient{id: "deepseek"}
-	pool.Put("kimi", "kimi-for-coding", kimi)
+	glm := &fakeClient{id: "glm"}
 	pool.Put("deepseek", "deepseek-v4-pro", deepseek)
+	pool.Put("glm", "glm-5.3", glm)
 
-	pool.Invalidate("kimi", "kimi-for-coding")
+	pool.Invalidate("deepseek", "deepseek-v4-pro")
 
-	// kimi gone
-	if _, ok := pool.Get("kimi", "kimi-for-coding"); ok {
-		t.Error("kimi entry should be gone")
+	// deepseek gone
+	if _, ok := pool.Get("deepseek", "deepseek-v4-pro"); ok {
+		t.Error("deepseek entry should be gone")
 	}
-	if !kimi.closed {
-		t.Error("kimi client should be closed")
+	if !deepseek.closed {
+		t.Error("deepseek client should be closed")
 	}
 
-	// deepseek survives
-	got, ok := pool.Get("deepseek", "deepseek-v4-pro")
-	if !ok || got != deepseek {
-		t.Errorf("deepseek entry should remain; got %+v ok=%v", got, ok)
+	// glm survives
+	got, ok := pool.Get("glm", "glm-5.3")
+	if !ok || got != glm {
+		t.Errorf("glm entry should remain; got %+v ok=%v", got, ok)
 	}
-	if deepseek.closed {
-		t.Error("deepseek client must not be closed by an unrelated Invalidate")
+	if glm.closed {
+		t.Error("glm client must not be closed by an unrelated Invalidate")
 	}
 }
 
@@ -147,10 +147,10 @@ func TestClientPool_InvalidateRemovesAllConfigFingerprints(t *testing.T) {
 	pool := NewClientPool(5)
 	first := &fakeClient{id: "endpoint-a"}
 	second := &fakeClient{id: "endpoint-b"}
-	pool.Put("kimi", "kimi-for-coding", first, "config-a")
-	pool.Put("kimi", "kimi-for-coding", second, "config-b")
+	pool.Put("deepseek", "deepseek-v4-pro", first, "config-a")
+	pool.Put("deepseek", "deepseek-v4-pro", second, "config-b")
 
-	pool.Invalidate("kimi", "kimi-for-coding")
+	pool.Invalidate("deepseek", "deepseek-v4-pro")
 	if pool.Size() != 0 {
 		t.Fatalf("pool size = %d, want all config variants removed", pool.Size())
 	}
@@ -211,13 +211,13 @@ func TestClientPool_PutReplacementAtCapacityKeepsUnrelatedClient(t *testing.T) {
 	unrelated := &fakeClient{id: "unrelated"}
 	old := &fakeClient{id: "old"}
 	replacement := &fakeClient{id: "replacement"}
-	pool.Put("kimi", "kimi-for-coding", unrelated)
+	pool.Put("deepseek", "deepseek-v4-pro", unrelated)
 	pool.Put("glm", "glm-5.2", old)
 
 	// Make eviction order deterministic. The old implementation incorrectly
 	// evicted the unrelated entry before replacing an already-present key.
 	pool.mu.Lock()
-	pool.lastUsed[poolKey("kimi", "kimi-for-coding")] = time.Unix(1, 0)
+	pool.lastUsed[poolKey("deepseek", "deepseek-v4-pro")] = time.Unix(1, 0)
 	pool.lastUsed[poolKey("glm", "glm-5.2")] = time.Unix(2, 0)
 	pool.mu.Unlock()
 
@@ -232,7 +232,7 @@ func TestClientPool_PutReplacementAtCapacityKeepsUnrelatedClient(t *testing.T) {
 	if unrelated.closed {
 		t.Error("replacement at capacity evicted an unrelated client")
 	}
-	if got, ok := pool.Get("kimi", "kimi-for-coding"); !ok || got != unrelated {
+	if got, ok := pool.Get("deepseek", "deepseek-v4-pro"); !ok || got != unrelated {
 		t.Fatalf("unrelated client missing after replacement: client=%v ok=%v", got, ok)
 	}
 	if got, ok := pool.Get("glm", "glm-5.2"); !ok || got != replacement {
@@ -257,7 +257,7 @@ func TestClientPool_PutSameInstanceDoesNotCloseStoredClient(t *testing.T) {
 func TestClientPool_GetOrCreateAtCapacityEvictsOldest(t *testing.T) {
 	pool := NewClientPool(1)
 	old := &fakeClient{id: "old"}
-	pool.Put("kimi", "kimi-for-coding", old)
+	pool.Put("deepseek", "deepseek-v4-pro", old)
 
 	created := &fakeClient{id: "new"}
 	got, err := pool.GetOrCreate("glm", "glm-5.2", "config", func() (Client, error) {

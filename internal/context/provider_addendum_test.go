@@ -5,34 +5,14 @@ import (
 	"testing"
 )
 
-func TestProviderAddendum_KimiNonEmpty(t *testing.T) {
-	got := providerAddendum("kimi")
-	if got == "" {
-		t.Fatal("kimi addendum should be non-empty")
-	}
-	// Spot-check that the key guardrails surface somewhere in the text.
-	for _, needle := range []string{
-		"Plan:",
-		"evidence ledger",
-		"read-before-edit",
-		"delta-check",
-		"Verification discipline",
-		"Tool budget",
-	} {
-		if !strings.Contains(got, needle) {
-			t.Errorf("kimi addendum missing %q marker", needle)
-		}
-	}
-}
-
 func TestProviderAddendum_NormalizesCase(t *testing.T) {
 	// SetProvider lowercases before storing; providerAddendum should be
 	// a pure map lookup on the exact family key.
-	if providerAddendum("Kimi") != "" {
+	if providerAddendum("DeepSeek") != "" {
 		t.Error("providerAddendum is case-sensitive by contract; caller must lowercase")
 	}
-	if providerAddendum("kimi") == "" {
-		t.Error("lowercase kimi must hit the mapping")
+	if providerAddendum("deepseek") == "" {
+		t.Error("lowercase deepseek must hit the mapping")
 	}
 }
 
@@ -65,35 +45,14 @@ func TestProviderAddendum_UnknownProvider(t *testing.T) {
 	}
 }
 
-func TestProviderAddendum_MiniMaxNonEmpty(t *testing.T) {
-	// MiniMax was the only Medium-tier provider running on the bare base
-	// prompt — every other compat provider has operating rules.
-	got := providerAddendum("minimax")
-	if got == "" {
-		t.Fatal("minimax addendum should be non-empty")
-	}
-	for _, needle := range []string{
-		"MiniMax-specific",
-		"Plan:",
-		"Read discipline",
-		"never call read just to verify an edit",
-		"Edit discipline",
-		"Verification discipline",
-	} {
-		if !strings.Contains(got, needle) {
-			t.Errorf("minimax addendum missing %q marker", needle)
-		}
-	}
-}
-
 func TestProviderAddendum_DeepSeekNonEmpty(t *testing.T) {
 	got := providerAddendum("deepseek")
 	if got == "" {
 		t.Fatal("deepseek addendum should be non-empty")
 	}
-	// Spot-check the key guardrails — same structure as Kimi's, so
+	// Spot-check the key guardrails — same structure as DeepSeek's, so
 	// the identifiers should overlap. Ensures a copy-paste refactor
-	// in kimiOperatingRules doesn't silently drift the deepseek rules.
+	// in deepseekOperatingRules doesn't silently drift the deepseek rules.
 	for _, needle := range []string{
 		"Plan:",
 		"todo",
@@ -110,7 +69,7 @@ func TestProviderAddendum_DeepSeekNonEmpty(t *testing.T) {
 			t.Errorf("deepseek addendum missing %q marker", needle)
 		}
 	}
-	// DeepSeek-specific language should differ from Kimi's intro.
+	// DeepSeek-specific language should differ from DeepSeek's intro.
 	if !strings.Contains(got, "DeepSeek-specific") {
 		t.Error("deepseek addendum should identify itself as DeepSeek-specific")
 	}
@@ -140,17 +99,17 @@ func TestPromptBuilder_SetProviderInjectsAddendum(t *testing.T) {
 		Type: ProjectTypeGo,
 		Name: "fake",
 	})
-	pb.SetProvider("kimi")
+	pb.SetProvider("deepseek")
 	prompt := pb.Build()
-	if !strings.Contains(prompt, "Kimi-specific") {
-		t.Errorf("kimi provider didn't inject addendum; prompt tail: %q",
+	if !strings.Contains(prompt, "DeepSeek-specific") {
+		t.Errorf("deepseek provider didn't inject addendum; prompt tail: %q",
 			prompt[maxInt(0, len(prompt)-400):])
 	}
 	if !strings.Contains(prompt, "read-before-edit") {
-		t.Error("kimi addendum did not reach the built prompt")
+		t.Error("deepseek addendum did not reach the built prompt")
 	}
 	if !strings.Contains(prompt, "Verification discipline") {
-		t.Error("kimi verification rules did not reach the built prompt")
+		t.Error("deepseek verification rules did not reach the built prompt")
 	}
 }
 
@@ -184,8 +143,8 @@ func TestPromptBuilder_SetProviderEmptyNoAddendum(t *testing.T) {
 	})
 	pb.SetProvider("")
 	prompt := pb.Build()
-	if strings.Contains(prompt, "Kimi-specific") {
-		t.Error("empty provider must not inject Kimi addendum")
+	if strings.Contains(prompt, "DeepSeek-specific") {
+		t.Error("empty provider must not inject DeepSeek addendum")
 	}
 }
 
@@ -195,7 +154,7 @@ func TestPromptBuilder_SetProviderInvalidatesCache(t *testing.T) {
 		Name: "fake",
 	})
 	first := pb.Build()
-	pb.SetProvider("kimi")
+	pb.SetProvider("deepseek")
 	second := pb.Build()
 	if first == second {
 		t.Error("cached prompt survived provider change — cache invalidation broken")
@@ -206,11 +165,11 @@ func TestPromptBuilder_SetProviderUnchangedSkipsDirty(t *testing.T) {
 	// Setting the same provider twice must not force a rebuild on the
 	// second call — avoids noisy cache churn.
 	pb := NewPromptBuilder("/tmp/fake", &ProjectInfo{Type: ProjectTypeGo})
-	pb.SetProvider("kimi")
+	pb.SetProvider("deepseek")
 	_ = pb.Build() // warm cache + clear dirty
 	// Directly inspect dirty flag: the setter must leave it false when
 	// the provider didn't change.
-	pb.SetProvider("kimi")
+	pb.SetProvider("deepseek")
 	if pb.promptDirty {
 		t.Error("re-setting same provider should not flip promptDirty")
 	}

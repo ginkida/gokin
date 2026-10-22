@@ -70,11 +70,11 @@ func TestActivateEmergencyFailover_SwapsClientAndReturnsSummary(t *testing.T) {
 			Model: config.ModelConfig{
 				Provider:          "glm",
 				Name:              "glm-5.1",
-				FallbackProviders: []string{"kimi"},
+				FallbackProviders: []string{"deepseek"},
 			},
 			API: config.APIConfig{
-				GLMKey:  "x",
-				KimiKey: "y",
+				GLMKey:      "x",
+				DeepSeekKey: "y",
 			},
 		},
 	}
@@ -107,7 +107,7 @@ func TestActivateEmergencyFailover_SwapsClientAndReturnsSummary(t *testing.T) {
 	}
 
 	// Summary describes the fallback chain.
-	if !strings.Contains(summary, "glm") || !strings.Contains(summary, "kimi") {
+	if !strings.Contains(summary, "glm") || !strings.Contains(summary, "deepseek") {
 		t.Errorf("summary = %q, expected both providers in chain", summary)
 	}
 	if !strings.Contains(summary, "->") {
@@ -146,10 +146,10 @@ func TestActivateEmergencyFailover_PropagatesSystemInstructionAndThinking(t *tes
 			Model: config.ModelConfig{
 				Provider:          "glm",
 				Name:              "glm-5.1",
-				FallbackProviders: []string{"kimi"},
+				FallbackProviders: []string{"deepseek"},
 				ThinkingBudget:    2048,
 			},
-			API: config.APIConfig{GLMKey: "x", KimiKey: "y"},
+			API: config.APIConfig{GLMKey: "x", DeepSeekKey: "y"},
 		},
 	}
 	if err := app.ConfigureRunSystemPrompt(nil, "run-only"); err != nil {
@@ -190,9 +190,9 @@ func TestActivateEmergencyFailover_ClosesOldClientAsync(t *testing.T) {
 		config: &config.Config{
 			Model: config.ModelConfig{
 				Provider:          "glm",
-				FallbackProviders: []string{"kimi"},
+				FallbackProviders: []string{"deepseek"},
 			},
-			API: config.APIConfig{GLMKey: "x", KimiKey: "y"},
+			API: config.APIConfig{GLMKey: "x", DeepSeekKey: "y"},
 		},
 	}
 
@@ -219,9 +219,9 @@ func TestActivateEmergencyFailover_ClientFactoryErrorPropagates(t *testing.T) {
 		config: &config.Config{
 			Model: config.ModelConfig{
 				Provider:          "glm",
-				FallbackProviders: []string{"kimi"},
+				FallbackProviders: []string{"deepseek"},
 			},
-			API: config.APIConfig{GLMKey: "x", KimiKey: "y"},
+			API: config.APIConfig{GLMKey: "x", DeepSeekKey: "y"},
 		},
 	}
 

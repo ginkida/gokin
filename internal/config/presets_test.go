@@ -14,11 +14,13 @@ func TestApplyPreset(t *testing.T) {
 		{"coding", true, "glm-5.3-flash", "glm"},
 		{"fast", true, "glm-5.3-flash", "glm"},
 		{"balanced", true, "glm-5.3", "glm"},
-		{"creative", true, "MiniMax-M2.7", "minimax"},
+		{"creative", true, DefaultGLMModel, "glm"},
+		{"deepseek", true, "deepseek-v4-pro", "deepseek"},
+
 		{"ollama", true, "llama3.2", "ollama"},
-		{"kimi", true, "k3", "kimi"},
+
 		{"glm", true, "glm-5.3-flash", "glm"},
-		{"minimax", true, "MiniMax-M2.7", "minimax"},
+
 		{"nonexistent", false, "", ""},
 	}
 
@@ -43,11 +45,10 @@ func TestApplyPreset(t *testing.T) {
 
 func TestApplyPresetTemperature(t *testing.T) {
 	cases := map[string]float32{
-		"coding":  1.0, // glm-5.3 provider recommendation
-		"kimi":    0.6,
-		"glm":     1.0,
-		"ollama":  0.7,
-		"minimax": 0.7,
+		"coding":   1.0, // glm-5.3 provider recommendation
+		"deepseek": 0.6,
+		"glm":      1.0,
+		"ollama":   0.7,
 	}
 	for preset, wantTemp := range cases {
 		m := &ModelConfig{}
@@ -60,11 +61,11 @@ func TestApplyPresetTemperature(t *testing.T) {
 
 func TestApplyPresetMaxTokens(t *testing.T) {
 	cases := map[string]int32{
-		"coding": 65536, // glm-5.3 default coding cap (headroom)
-		"fast":   65536,
-		"kimi":   65536,
-		"glm":    131072,
-		"ollama": 4096,
+		"coding":   65536, // glm-5.3 default coding cap (headroom)
+		"fast":     65536,
+		"deepseek": 16384,
+		"glm":      131072,
+		"ollama":   4096,
 	}
 	for preset, wantTokens := range cases {
 		m := &ModelConfig{}
@@ -92,9 +93,9 @@ func TestIsValidPreset(t *testing.T) {
 
 func TestListPresets(t *testing.T) {
 	presets := ListPresets()
-	// 9 presets: coding, fast, balanced, creative, glm, kimi, minimax, deepseek, ollama
-	if len(presets) != 9 {
-		t.Errorf("len(ListPresets) = %d, want 9", len(presets))
+	// Seven presets: coding, fast, balanced, creative, glm, deepseek, ollama.
+	if len(presets) != 7 {
+		t.Errorf("len(ListPresets) = %d, want 7", len(presets))
 	}
 	for _, p := range presets {
 		if !IsValidPreset(p) {
@@ -104,19 +105,18 @@ func TestListPresets(t *testing.T) {
 }
 
 func TestPresetCount(t *testing.T) {
-	if len(ModelPresets) != 9 {
-		t.Errorf("len(ModelPresets) = %d, want 9", len(ModelPresets))
+	if len(ModelPresets) != 7 {
+		t.Errorf("len(ModelPresets) = %d, want 7", len(ModelPresets))
 	}
 }
 
 func TestProviderDefaultPreset(t *testing.T) {
 	cases := map[string]string{
-		"glm":     "glm",
-		"kimi":    "kimi",
-		"minimax": "minimax",
-		"ollama":  "ollama",
-		"unknown": "", // unrecognised providers must not auto-apply
-		"":        "",
+		"glm":      "glm",
+		"deepseek": "deepseek",
+		"ollama":   "ollama",
+		"unknown":  "", // unrecognised providers must not auto-apply
+		"":         "",
 	}
 	for provider, want := range cases {
 		if got := providerDefaultPreset(provider); got != want {
@@ -138,7 +138,7 @@ func TestLooksLikeDefaultModelConfig(t *testing.T) {
 		{"glm 5.1 default name, default tokens", &ModelConfig{Name: "glm-5.1", MaxOutputTokens: 131072}, true},
 		{"glm 5.2 default name, default tokens", &ModelConfig{Name: "glm-5.2", MaxOutputTokens: 131072}, true},
 		{"glm default name, zero tokens", &ModelConfig{Name: "glm-5"}, true},
-		{"kimi-for-coding default, zero tokens", &ModelConfig{Name: "kimi-for-coding"}, true},
+
 		{"custom name blocks auto-apply", &ModelConfig{Name: "glm-4.5", MaxOutputTokens: 131072}, false},
 		{"custom tokens blocks auto-apply", &ModelConfig{Name: "glm-5", MaxOutputTokens: 16384}, false},
 	}
@@ -165,15 +165,15 @@ func TestNormalizeConfig_AutoApplyProviderPreset(t *testing.T) {
 		t.Errorf("Name = %q, want glm-4.5 preserved", cfg.Model.Name)
 	}
 
-	// Explicit minimax preset wins over auto-apply heuristic
+	// Explicit glm preset wins over auto-apply heuristic
 	cfg = &Config{Model: ModelConfig{
 		Provider: "glm",
-		Preset:   "minimax",
+		Preset:   "glm",
 	}}
 	if err := NormalizeConfig(cfg); err != nil {
 		t.Fatalf("NormalizeConfig: %v", err)
 	}
-	if cfg.Model.Name != "MiniMax-M2.7" {
-		t.Errorf("Name = %q, want MiniMax-M2.7 (explicit preset)", cfg.Model.Name)
+	if cfg.Model.Name != DefaultGLMModel {
+		t.Errorf("Name = %q, want deepseek-v4-pro (explicit preset)", cfg.Model.Name)
 	}
 }
