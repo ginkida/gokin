@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"gokin/internal/hooks"
@@ -119,7 +120,14 @@ func (e *CommandApprovalError) Error() string {
 	if e.Mode != "" {
 		mode = " (" + e.Mode + " mode)"
 	}
-	return fmt.Sprintf("command was not run%s: %s\nReview it, then repeat with --accept-command %s", mode, e.Command, e.SHA256)
+	command := e.Command
+	for _, c := range command {
+		if c < 32 || c > 126 {
+			command = strconv.Quote(command)
+			break
+		}
+	}
+	return fmt.Sprintf("command was not run%s: %s\nReview it, then repeat with --accept-command %s", mode, command, e.SHA256)
 }
 
 type InstallOptions struct {

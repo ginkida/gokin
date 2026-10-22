@@ -91,24 +91,15 @@ func (s *Scope) CaptureEvent(kind Type) *Scope {
 			original.owner.mu.Unlock()
 			continue
 		}
-		hook := *original.hook
-		definition := CloneClaudeCommands([]ClaudeCommand{*hook.Claude})[0]
-		hook.Claude = &definition
-		entry := &scopedHook{hook: &hook, owner: captured, index: original.index}
-		entry.onceObserver = func(index int) {
-			original.owner.mu.Lock()
-			original.consumed = true
-			observer := original.onceObserver
-			original.owner.mu.Unlock()
-			if observer != nil {
-				observer(index)
-			}
-		}
+		// Definitions are immutable after registration. Retain the entry, as
+		// inherited/render scopes do, so every capture shares its once claim
+		// and completion observer even after the live scope is replaced.
+		hook := original.hook
 		original.owner.mu.Unlock()
 		if _, exists := captured.groups[hook.Source]; !exists {
 			captured.order = append(captured.order, hook.Source)
 		}
-		captured.groups[hook.Source] = append(captured.groups[hook.Source], entry)
+		captured.groups[hook.Source] = append(captured.groups[hook.Source], original)
 		captured.count++
 	}
 	return captured
@@ -120,12 +111,18 @@ func (s *Scope) ConsumedEntries() map[string][]int {
 		return result
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	groups := make(map[string][]*scopedHook, len(s.groups))
 	for source, entries := range s.groups {
+		groups[source] = append([]*scopedHook(nil), entries...)
+	}
+	s.mu.Unlock()
+	for source, entries := range groups {
 		for _, entry := range entries {
+			entry.owner.mu.Lock()
 			if entry.consumed {
 				result[source] = append(result[source], entry.index)
 			}
+			entry.owner.mu.Unlock()
 		}
 	}
 	return result

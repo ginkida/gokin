@@ -34,41 +34,36 @@ func (m *Manager) commitStaged(staged *Manager) error {
 	return m.save(documents)
 }
 
+// Resolve settings before applying them to each selected install's defaults.
+// A higher null removes the lower declaration rather than preserving a boolean
+// that was already applied to a lower-scope node.
 func (m *Manager) effectiveDependencyNodes(scope string) (map[string]installedDependencyNode, error) {
-	result := map[string]installedDependencyNode{}
-	policy, err := m.policy()
+	aliases, err := m.pluginAliases()
 	if err != nil {
 		return nil, err
 	}
+	enabled := map[string]bool{}
+	var tiers []string
 	for _, tier := range []string{"user", "project", "local"} {
-		nodes, err := m.dependencyNodes(tier)
-		if err != nil {
-			return nil, err
-		}
-		for id, node := range nodes {
-			result[id] = node
-		}
 		_, fields, err := m.settings(tier)
 		if err != nil {
 			return nil, err
 		}
-		enabled, err := enabledEntries(fields)
-		if err != nil {
+		if err := pluginpolicy.MergePluginEnableJSON(enabled, fields["enabledPlugins"], aliases); err != nil {
 			return nil, err
 		}
-		for id, on := range enabled {
-			if node, exists := result[id]; exists {
-				node.Enabled = on
-				result[id] = node
-			}
-		}
+		tiers = append(tiers, tier)
 		if tier == scope {
 			break
 		}
 	}
-	for id, on := range policy.Enabled {
-		if node, exists := result[id]; exists {
-			node.Enabled = on
+	result := map[string]installedDependencyNode{}
+	for _, tier := range tiers {
+		nodes, err := m.dependencyNodes(tier, enabled)
+		if err != nil {
+			return nil, err
+		}
+		for id, node := range nodes {
 			result[id] = node
 		}
 	}
@@ -200,7 +195,7 @@ func (m *Manager) stageRemove(id, scope string) error {
 	if err != nil {
 		return err
 	}
-	enabled, err := enabledEntries(settings)
+	enabled, err := rawEnabledEntries(settings)
 	if err != nil {
 		return err
 	}
@@ -254,11 +249,11 @@ func (m *Manager) guardDependencyChange(id, scope string, remove bool) error {
 		if err != nil {
 			return err
 		}
-		enabled, err := enabledEntries(fields)
+		enabled, err := rawEnabledEntries(fields)
 		if err != nil {
 			return err
 		}
-		enabled[id] = false
+		enabled[id] = json.RawMessage("false")
 		fields["enabledPlugins"], _ = json.Marshal(enabled)
 		if err := staged.save(map[string]any{path: fields}); err != nil {
 			return err

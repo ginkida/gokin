@@ -265,17 +265,26 @@ func setOptionValues(settings map[string]json.RawMessage, id string, values map[
 			return fmt.Errorf("pluginConfigs must be an object")
 		}
 	}
+	if configs == nil {
+		configs = map[string]json.RawMessage{}
+	}
 	entry := map[string]json.RawMessage{}
 	if raw, set := configs[id]; set {
 		if json.Unmarshal(raw, &entry) != nil {
 			return fmt.Errorf("pluginConfigs entry must be an object")
 		}
 	}
+	if entry == nil {
+		entry = map[string]json.RawMessage{}
+	}
 	options := map[string]any{}
 	if raw, set := entry["options"]; set {
 		if json.Unmarshal(raw, &options) != nil {
 			return fmt.Errorf("plugin options must be an object")
 		}
+	}
+	if options == nil {
+		options = map[string]any{}
 	}
 	manifest, err := readObject(filepath.Join(root, ".claude-plugin", "plugin.json"))
 	if err != nil {

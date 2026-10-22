@@ -144,6 +144,22 @@ func pluginRuntimeFingerprint(p *claudePluginRuntime) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Durable definitions bind executable inputs, while live authority checks use
+// pluginRuntimeFingerprint so forced/explicit policy changes remain visible.
+func durablePluginRuntimeFingerprint(p *claudePluginRuntime) string {
+	if p == nil {
+		return ""
+	}
+	data, _ := json.Marshal(struct {
+		ID, Root, Data string
+		Options        map[string]string
+		Sensitive      map[string]bool
+		Project        bool
+	}{p.ID, p.Root, p.Data, p.Options, p.Sensitive, p.Project})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func (p ClaudePlugin) BindHooks(definitions []ClaudeCommand) []ClaudeCommand {
 	definitions = CloneClaudeCommands(definitions)
 	for i := range definitions {

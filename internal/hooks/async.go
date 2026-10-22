@@ -453,7 +453,8 @@ func (m *Manager) asyncHookConfigured(hook *Hook, fingerprint string) bool {
 		return false
 	}
 	for _, entry := range current.snapshotEntries() {
-		if entry.hook.Source == hook.Source && CommandFingerprint([]ClaudeCommand{*entry.hook.Claude}) == fingerprint {
+		currentHook := entry.snapshotHook()
+		if currentHook.Source == hook.Source && CommandFingerprint([]ClaudeCommand{*currentHook.Claude}) == fingerprint {
 			return true
 		}
 	}

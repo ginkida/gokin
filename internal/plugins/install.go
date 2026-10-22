@@ -188,7 +188,7 @@ func (m *Manager) installOne(ctx context.Context, input string, opts InstallOpti
 	if err != nil {
 		return Result{}, err
 	}
-	enabled, err := enabledEntries(scopeSettings)
+	enabled, err := rawEnabledEntries(scopeSettings)
 	if err != nil {
 		return Result{}, err
 	}
@@ -462,7 +462,7 @@ func (m *Manager) installOne(ctx context.Context, input string, opts InstallOpti
 		installs[id] = append(installs[id], recordData)
 	}
 	if !opts.Update && !opts.KeepEnabledSettings {
-		enabled[id] = true
+		enabled[id] = json.RawMessage("true")
 	}
 	scopeSettings["enabledPlugins"], _ = json.Marshal(enabled)
 	doc["plugins"], _ = json.Marshal(installs)
@@ -534,15 +534,14 @@ func (m *Manager) SetEnabled(ctx context.Context, input, requestedScope string, 
 	if err != nil {
 		return Result{}, err
 	}
-	enabled, err := enabledEntries(settings)
+	enabled, err := rawEnabledEntries(settings)
 	if err != nil {
 		return Result{}, err
 	}
-	changed, current := true, enabled[id]
-	if _, set := enabled[id]; set && current == on {
-		changed = false
-	}
-	enabled[id] = on
+	var current *bool
+	_ = json.Unmarshal(enabled[id], &current)
+	changed := current == nil || *current != on
+	enabled[id], _ = json.Marshal(on)
 	settings["enabledPlugins"], _ = json.Marshal(enabled)
 	if err := m.save(map[string]any{path: settings}); err != nil {
 		return Result{}, err
@@ -603,7 +602,7 @@ func (m *Manager) Uninstall(ctx context.Context, input string, opts RemoveOption
 	if err != nil {
 		return Result{}, err
 	}
-	enabled, err := enabledEntries(settings)
+	enabled, err := rawEnabledEntries(settings)
 	if err != nil {
 		return Result{}, err
 	}

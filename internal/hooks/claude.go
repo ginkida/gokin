@@ -72,7 +72,7 @@ func CommandFingerprint(definitions []ClaudeCommand) string {
 	}
 	canonical := make([]contract, len(definitions))
 	for i, definition := range definitions {
-		canonical[i] = contract{definition.Event, definition.Matcher, definition.Command, definition.Args, definition.Timeout, definition.Once, pluginRuntimeFingerprint(definition.plugin), definition.Handler, definition.Prompt, definition.Model, definition.ContinueOnBlock, definition.URL, definition.Headers, definition.AllowedEnvVars, definition.OnFailure, definition.MCPServer, definition.MCPTool, definition.MCPInput, definition.Async, definition.AsyncRewake, definition.TimeoutExplicit}
+		canonical[i] = contract{definition.Event, definition.Matcher, definition.Command, definition.Args, definition.Timeout, definition.Once, durablePluginRuntimeFingerprint(definition.plugin), definition.Handler, definition.Prompt, definition.Model, definition.ContinueOnBlock, definition.URL, definition.Headers, definition.AllowedEnvVars, definition.OnFailure, definition.MCPServer, definition.MCPTool, definition.MCPInput, definition.Async, definition.AsyncRewake, definition.TimeoutExplicit}
 	}
 	data, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(data)

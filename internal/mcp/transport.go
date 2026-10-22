@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,7 +217,7 @@ func newStdioTransport(command string, args []string, env map[string]string, wor
 
 	logging.Debug("MCP stdio transport started",
 		"command", command,
-		"args", args,
+		"arg_count", len(args),
 		"work_dir", cleanWorkDir,
 		"pid", cmd.Process.Pid)
 
@@ -371,6 +373,7 @@ type HTTPTransport struct {
 	url     string
 	headers map[string]string
 	timeout time.Duration
+	client  *http.Client
 
 	// For receiving messages (long-polling or SSE)
 	recvChan chan *JSONRPCMessage
@@ -406,11 +409,46 @@ func NewHTTPTransport(ctx context.Context, url string, headers map[string]string
 		errChan:  make(chan error, 1),
 		ctx:      ctx,
 		cancel:   cancel,
+		client: &http.Client{
+			Timeout:       timeout,
+			CheckRedirect: checkHTTPRedirect,
+		},
 	}
 
-	logging.Debug("MCP HTTP transport created", "url", url)
+	logging.Debug("MCP HTTP transport created")
 
 	return t, nil
+}
+
+func httpOrigin(address string) string {
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Host == "" {
+		return "(invalid origin)"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func checkHTTPRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > 5 {
+		return fmt.Errorf("MCP server exceeded 5 redirects; refusing to forward credentials")
+	}
+	previous := via[len(via)-1].URL
+	if !strings.EqualFold(req.URL.Host, via[0].URL.Host) ||
+		!(req.URL.Scheme == previous.Scheme || previous.Scheme == "http" && req.URL.Scheme == "https") {
+		return fmt.Errorf("MCP server redirected to another origin (%s); refusing to forward credentials", httpOrigin(req.URL.String()))
+	}
+	return nil
+}
+
+// net/http wraps connection, redirect and parse failures with the full URL.
+// Keep its error semantics (including cancellation/timeout) without retaining
+// expanded credentials or private paths in diagnostics.
+func sanitizeHTTPError(err error) error {
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		return &url.Error{Op: requestError.Op, URL: httpOrigin(requestError.URL), Err: sanitizeHTTPError(requestError.Err)}
+	}
+	return err
 }
 
 // Send sends a JSON-RPC message to the server via HTTP POST.
@@ -445,7 +483,7 @@ func (t *HTTPTransport) SendContext(caller context.Context, msg *JSONRPCMessage)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.url, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("failed to create request: %w", sanitizeHTTPError(err))
 	}
 
 	// Set headers
@@ -465,10 +503,9 @@ func (t *HTTPTransport) SendContext(caller context.Context, msg *JSONRPCMessage)
 	}
 
 	// Send request
-	client := &http.Client{Timeout: t.timeout}
-	resp, err := client.Do(req)
+	resp, err := t.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
+		return fmt.Errorf("HTTP request failed: %w", sanitizeHTTPError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

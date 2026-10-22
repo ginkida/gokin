@@ -151,21 +151,8 @@ func FromDocuments(documents [][]byte) (Policy, error) {
 				return p, fmt.Errorf("disableCommandPluginSources must be boolean")
 			}
 		}
-		if raw, set := fields["enabledPlugins"]; set {
-			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-				clear(p.Enabled)
-			}
-			var entries map[string]*bool
-			if json.Unmarshal(raw, &entries) != nil {
-				return p, fmt.Errorf("managed enabledPlugins must be an object")
-			}
-			for id, on := range entries {
-				if on == nil {
-					delete(p.Enabled, id)
-				} else {
-					p.Enabled[id] = *on
-				}
-			}
+		if err := MergePluginEnableJSON(p.Enabled, fields["enabledPlugins"]); err != nil {
+			return p, fmt.Errorf("managed %w", err)
 		}
 		if raw, set := fields["extraKnownMarketplaces"]; set {
 			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {

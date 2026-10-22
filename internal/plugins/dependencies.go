@@ -18,18 +18,23 @@ type installedDependencyNode struct {
 	Record InstallRecord
 }
 
-func (m *Manager) dependencyNodes(scope string) (map[string]installedDependencyNode, error) {
+func (m *Manager) dependencyNodes(scope string, effectiveEnablement ...map[string]bool) (map[string]installedDependencyNode, error) {
 	doc, installed, err := m.installs()
 	if err != nil {
 		return nil, err
 	}
-	_, settings, err := m.settings(scope)
-	if err != nil {
-		return nil, err
-	}
-	enabled, err := enabledEntries(settings)
-	if err != nil {
-		return nil, err
+	var enabled map[string]bool
+	if len(effectiveEnablement) > 0 {
+		enabled = effectiveEnablement[0]
+	} else {
+		_, settings, err := m.settings(scope)
+		if err != nil {
+			return nil, err
+		}
+		enabled, err = enabledEntries(settings)
+		if err != nil {
+			return nil, err
+		}
 	}
 	policy, err := m.policy()
 	if err != nil {
@@ -383,11 +388,11 @@ func (m *Manager) enableDependency(id, scope string) error {
 	if err != nil {
 		return err
 	}
-	enabled, err := enabledEntries(fields)
+	enabled, err := rawEnabledEntries(fields)
 	if err != nil {
 		return err
 	}
-	enabled[id] = true
+	enabled[id] = json.RawMessage("true")
 	fields["enabledPlugins"], _ = json.Marshal(enabled)
 	return m.save(map[string]any{path: fields})
 }

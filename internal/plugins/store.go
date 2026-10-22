@@ -231,14 +231,27 @@ func (m *Manager) settingsPath(scope string) (string, error) {
 	}
 }
 func enabledEntries(doc map[string]json.RawMessage) (map[string]bool, error) {
-	var entries map[string]bool
+	entries := map[string]bool{}
+	if err := pluginpolicy.MergePluginEnableJSON(entries, doc["enabledPlugins"]); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// Writers preserve per-key null resets instead of turning unrelated entries
+// into explicit disables (or removing the resets while changing another key).
+func rawEnabledEntries(doc map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if _, err := enabledEntries(doc); err != nil {
+		return nil, err
+	}
+	var entries map[string]json.RawMessage
 	if raw, set := doc["enabledPlugins"]; set {
-		if json.Unmarshal(raw, &entries) != nil {
-			return nil, fmt.Errorf("enabledPlugins must be a boolean map")
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return nil, err
 		}
 	}
 	if entries == nil {
-		entries = map[string]bool{}
+		entries = map[string]json.RawMessage{}
 	}
 	return entries, nil
 }
@@ -499,15 +512,10 @@ func (m *Manager) List() ([]Installed, error) {
 		if err != nil {
 			return nil, err
 		}
-		enabled, err := enabledEntries(doc)
-		if err != nil {
+		if err := pluginpolicy.MergePluginEnableJSON(merged, doc["enabledPlugins"], aliases); err != nil {
 			return nil, err
 		}
-		for id, on := range enabled {
-			merged[id] = on
-		}
 	}
-	merged = aliases.RenameFlags(merged)
 	for id, on := range policy.Enabled {
 		merged[id] = on
 	}

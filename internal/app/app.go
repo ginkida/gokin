@@ -2068,32 +2068,11 @@ func (a *App) EnableMCP() error {
 			Message: fmt.Sprintf("MCP %q: tool list updated", name),
 		})
 	})
-	// Boot-parity wiring (review catch): without these a runtime-enabled
-	// manager ran with NO health monitor and NO health toasts until restart.
-	healthToasts := newHealthToastLimiter()
-	a.mcpManager.SetHealthChangeCallback(func(name string, healthy bool) {
-		if !healthToasts.ShouldEmit(name, time.Now()) {
-			return
-		}
-		if healthy {
-			a.safeSendToProgram(ui.StatusUpdateMsg{
-				Type:    ui.StatusStreamResume,
-				Message: fmt.Sprintf("MCP server %q reconnected", name),
-			})
-		} else {
-			a.safeSendToProgram(ui.StatusUpdateMsg{
-				Type:    ui.StatusRecoverableError,
-				Message: fmt.Sprintf("MCP server %q disconnected", name),
-			})
-		}
-	})
-	if a.config != nil && a.config.MCP.HealthCheckInterval > 0 {
-		// Safe on an empty manager (no servers = cheap no-op ticks); the boot
-		// path only starts it when connected>0, but a runtime-enabled manager
-		// gains servers AFTER this point and would otherwise never be
-		// monitored until restart.
-		a.mcpManager.StartHealthCheck(a.ctx, a.config.MCP.HealthCheckInterval)
+	var healthInterval time.Duration
+	if a.config != nil {
+		healthInterval = a.config.MCP.HealthCheckInterval
 	}
+	a.wireMCPManagerHealth(a.mcpManager, a.ctx, healthInterval)
 	if a.config == nil {
 		a.config = config.DefaultConfig()
 	}
