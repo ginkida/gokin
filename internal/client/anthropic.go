@@ -48,7 +48,7 @@ func (e *HTTPError) Unwrap() error {
 type AnthropicConfig struct {
 	APIKey        string
 	BaseURL       string // Default: "https://api.anthropic.com"; providers set their compatible endpoint.
-	Provider      string // For telemetry/logging (glm, minimax, kimi)
+	Provider      string // For telemetry/logging (glm, deepseek)
 	Model         string
 	MaxTokens     int32
 	Temperature   float32
@@ -343,9 +343,6 @@ func appendTurnContextBlock(messages []map[string]any, turnContext string) []map
 // Verified by live request-usage inspection (April 2026):
 //   - Anthropic native: honours cache_control, reports both
 //     cache_creation_input_tokens and cache_read_input_tokens.
-//   - MiniMax: same as Anthropic.
-//   - Moonshot Developer API / Kimi Coding Plan (api.kimi.com/coding):
-//     honours cache_control.
 //   - DeepSeek (api.deepseek.com/anthropic): caches automatically on
 //     the server side. cache_control markers are accepted (don't 400)
 //     and server reports cache_read_input_tokens on repeat prefixes —
@@ -366,8 +363,7 @@ func (c *AnthropicClient) supportsPromptCaching() bool {
 	if base == DefaultAnthropicBaseURL || base == "" {
 		return true
 	}
-	return c.isProvider("minimax") || c.isProvider("kimi") || c.isProvider("deepseek") ||
-		strings.Contains(base, "moonshot")
+	return c.isProvider("deepseek")
 }
 
 // isProvider keeps provider semantics stable when a custom endpoint (notably
@@ -383,10 +379,6 @@ func (c *AnthropicClient) isProvider(want string) bool {
 	switch want {
 	case "glm":
 		return strings.Contains(base, "api.z.ai") || strings.Contains(base, "bigmodel.cn")
-	case "minimax":
-		return strings.Contains(base, "minimax")
-	case "kimi":
-		return strings.Contains(base, "api.kimi.com") || strings.Contains(base, "moonshot")
 	case "deepseek":
 		return strings.Contains(base, "api.deepseek.com")
 	default:
@@ -490,7 +482,7 @@ func (c *AnthropicClient) SetStatusCallback(cb StatusCallback) {
 
 // CountTokens counts tokens for the given contents.
 // For native Anthropic, uses the /v1/messages/count_tokens API endpoint.
-// For compatible providers (GLM, DeepSeek, MiniMax, Kimi), falls back to estimation.
+// For compatible providers (GLM, DeepSeek), falls back to estimation.
 func (c *AnthropicClient) CountTokens(ctx context.Context, contents []*genai.Content) (*genai.CountTokensResponse, error) {
 	resp, _, err := c.CountTokensWithAccuracy(ctx, contents)
 	return resp, err
@@ -569,14 +561,9 @@ func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*gen
 	req.Header.Set("anthropic-beta", "token-counting-2024-11-01")
 
 	// Same gateway-specific auth swap as the main request path — keep in
-	// sync with sendRequest() below. Kimi Coding Plan is Bearer-only,
-	// MiniMax + Z.AI/GLM accept Bearer alongside x-api-key.
-	if c.isProvider("glm") || c.isProvider("minimax") {
+	// sync with sendRequest() below. Z.AI/GLM accepts both header forms.
+	if c.isProvider("glm") {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	if c.isProvider("kimi") {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Del("x-api-key")
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -827,8 +814,7 @@ type toolCallAccumulator struct {
 	currentBlockType string          // "thinking", "text", or "tool_use"
 	thinkingBuilder  strings.Builder // Accumulates thinking content
 	// currentThinkingSignature holds the `signature_delta` payload that
-	// closes a thinking block. Anthropic Extended Thinking and Kimi
-	// Coding Plan both require this signature to be echoed back in
+	// closes a thinking block. Replay the provider signature in
 	// multi-turn assistant messages; without it the provider rejects
 	// subsequent requests with "reasoning_content is missing".
 	currentThinkingSignature string
@@ -897,7 +883,7 @@ func (c *AnthropicClient) isRetryableError(err error, statusCode int) bool {
 		return true
 	}
 
-	// Some providers (MiniMax) return transient 400 errors that resolve on retry.
+	// Some compatible gateways return transient 400 errors that resolve on retry.
 	// Only retry 400s with known transient patterns, not all bad requests.
 	if statusCode == 400 && err != nil {
 		errStr := strings.ToLower(err.Error())
@@ -1347,9 +1333,6 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		} else {
 			url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
 		}
-	} else if strings.Contains(c.config.BaseURL, "minimax") {
-		// MiniMax API - Anthropic-compatible endpoint
-		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
 	} else {
 		// Other custom endpoints - assume Anthropic-compatible
 		url = strings.TrimSuffix(c.config.BaseURL, "/") + "/v1/messages"
@@ -1370,19 +1353,6 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	// Z.AI / BigModel accept both x-api-key and Authorization: Bearer
 	if c.isProvider("glm") {
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	}
-
-	// MiniMax uses Bearer token authentication
-	if c.isProvider("minimax") {
-		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	}
-
-	// Kimi Coding Plan (api.kimi.com) expects Bearer-only. Drop the
-	// x-api-key header to avoid confusing gateways that reject requests
-	// with both header styles.
-	if c.isProvider("kimi") {
-		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-		req.Header.Del("x-api-key")
 	}
 
 	// Perform request
@@ -1435,8 +1405,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 				}
 			}
 		}
-		if c.isProvider("kimi") {
-			return nil, newKimiHTTPError(resp.StatusCode, retryAfter, body)
+		if c.isProvider("deepseek") {
+			return nil, newDeepSeekHTTPError(resp.StatusCode, retryAfter, body)
 		}
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
@@ -1492,7 +1462,6 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	modelSnap := c.config.Model
 	c.mu.RUnlock()
 	silentThinkingSnap := enableThinkingSnap ||
-		(strings.EqualFold(providerSnap, "kimi") && kimiAlwaysOnReasoningModel(modelSnap)) ||
 		(c.isProvider("glm") && config.GLMAlwaysOnReasoning(modelSnap))
 
 	// Process stream in goroutine
@@ -1794,7 +1763,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 
 					// Handle the Z.AI/GLM numeric business-code error shape, which carries
 					// a "code" field (e.g. "1305"); the standard Anthropic-compatible
-					// shape used by deepseek/kimi/minimax instead carries "type"
+					// shape used by DeepSeek instead carries "type"
 					// (e.g. "overloaded_error") under event["type"]=="error", handled
 					// by the "case \"error\":" branch in processStreamEvent below,
 					// which preserves errType. Gate on errCode != "" so that path
@@ -1803,7 +1772,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 					// "unknown code" fallback silently dropped errType (e.g.
 					// "overloaded_error" -> "") for every AnthropicClient-backed
 					// provider, defeating IsOverloadError's keyword match on the
-					// resulting error text for deepseek/kimi/minimax.
+					// resulting error text for DeepSeek.
 					if errObj, ok := event["error"].(map[string]any); ok {
 						if errCode := providerErrorCodeFromMap(errObj); errCode != "" {
 							errMsg := stringFromMap(errObj, "message")
@@ -1965,8 +1934,8 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			errType := stringFromMap(errData, "type")
 			errMsg := stringFromMap(errData, "message")
 			logging.Error("API error event", "type", errType, "message", errMsg)
-			if c.isProvider("kimi") {
-				chunk.Error = newKimiProviderError(0, 0, errType, errMsg)
+			if c.isProvider("deepseek") {
+				chunk.Error = newDeepSeekProviderError(0, 0, errType, errMsg)
 			} else {
 				chunk.Error = fmt.Errorf("API error: %s - %s", errType, errMsg)
 			}
@@ -1995,7 +1964,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 			}
 
 			// Handle text delta — also parse <think> tags for models that
-			// embed reasoning in-line (MiniMax, DeepSeek R1, QwQ, etc.)
+			// embed reasoning in-line (DeepSeek R1, QwQ, etc.)
 			if deltaType == "text_delta" || (deltaType == "" && acc.currentBlockType == "text") {
 				if text, ok := delta["text"].(string); ok && text != "" {
 					thinking, regular := acc.thinkTagParser.Process(text)
@@ -2162,7 +2131,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 		}
 		// Include any accumulated tool calls only if not already emitted
 		// by message_delta (stop_reason: "tool_use"). Emitting them twice
-		// causes duplicate tool_use blocks which MiniMax rejects with 400.
+		// causes malformed duplicate tool_use blocks.
 		if len(acc.completedCalls) > 0 && !acc.callsEmitted {
 			chunk.FunctionCalls = acc.completedCalls
 		}
@@ -2566,23 +2535,11 @@ func (c *AnthropicClient) hasSerializableAssistantParts(parts []*genai.Part) boo
 	return false
 }
 
-// kimiAlwaysOnReasoningModel reports whether the Kimi model's reasoning is
-// ALWAYS-ON server-side and must never receive a {"type":"disabled"} thinking
-// marker (K3 family: reasoning_effort supports only "max"; the disabled marker
-// put K3 into a degraded no-thinking mode that re-emitted its narration
-// verbatim before every tool call — v0.100.101 field report).
-func kimiAlwaysOnReasoningModel(model string) bool {
-	m := strings.ToLower(strings.TrimSpace(model))
-	return m == "k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3")
-}
-
 // requiresThinkingReplay reports whether the active provider rejects
 // requests that omit thinking blocks from prior assistant turns when
 // Extended Thinking is enabled. DeepSeek is strict: "The
 // content[].thinking in the thinking mode must be passed back to the
-// API." Anthropic native and Kimi Code treat the same way. Kimi documents
-// `thinking is enabled but reasoning_content is missing` for an assistant
-// tool-call message whose preserved reasoning was not replayed.
+// API." Native Anthropic is also strict about preserved thinking.
 //
 // Used by convertHistoryWithResultsAndSystem / convertHistoryToMessages
 // to refuse to serialise an assistant turn whose thinking parts are
@@ -2599,7 +2556,7 @@ func (c *AnthropicClient) requiresThinkingReplay() bool {
 	if c.config.BaseURL == DefaultAnthropicBaseURL || c.config.BaseURL == "" {
 		return true
 	}
-	return c.isProvider("deepseek") || c.isProvider("kimi")
+	return c.isProvider("deepseek")
 }
 
 // canSerialiseAssistantForProvider tightens hasSerializableAssistantParts
@@ -2633,10 +2590,8 @@ func (c *AnthropicClient) buildAssistantMessage(parts []*genai.Part) map[string]
 	content := make([]map[string]any, 0)
 	toolUseOrdinal := 0
 
-	// First pass: thinking blocks. Anthropic Extended Thinking and Kimi
-	// Coding Plan strictly require thinking blocks (with signature) to
-	// precede tool_use entries in multi-turn assistant messages. Without
-	// this, Kimi rejects the request with "reasoning_content is missing".
+	// First pass: replay thinking (with its signature) before tool_use blocks
+	// so strict gateways can continue the assistant's reasoning.
 	for _, part := range parts {
 		if part == nil || !part.Thought || part.Text == "" {
 			continue
@@ -2827,7 +2782,7 @@ func fallbackToolID(name string, ordinal int) string {
 }
 
 // mergeConsecutiveMessages ensures strict user/assistant role alternation
-// required by Anthropic-compatible APIs (Anthropic, MiniMax, DeepSeek, etc.).
+// required by Anthropic-compatible APIs (Anthropic, GLM, DeepSeek, etc.).
 // Consecutive messages with the same role are merged by combining their content arrays.
 func mergeConsecutiveMessages(messages []map[string]any) []map[string]any {
 	if len(messages) <= 1 {

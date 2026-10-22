@@ -25,7 +25,7 @@ import (
 // It ALSO isolates client provider-health persistence (GOKIN_PROVIDER_HEALTH_FILE):
 // the emergency-failover tests pick a candidate chain ordered partly by provider
 // health, so reading the developer's REAL degraded glm score (e.g. -20 from real
-// 1305/1308 overloads) made the failover pick kimi over glm and the assertion
+// 1305/1308 overloads) made the failover pick deepseek over glm and the assertion
 // "backend == glm" fail locally while CI stayed green. A throwaway file keeps it
 // deterministic and stops the suite writing into the installed gokin's real file.
 func TestMain(m *testing.M) {

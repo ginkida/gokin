@@ -92,7 +92,7 @@ func TestIsRetryableAPIError(t *testing.T) {
 		{"HTTP 529", &HTTPError{StatusCode: 529}, true},
 		{"400", &APIError{StatusCode: 400}, false},
 		{"401", &APIError{StatusCode: 401}, false},
-		{"MiniMax model_not_found 400", &HTTPError{StatusCode: 400, Message: "model_not_found error"}, true},
+		{"GLM model_not_found 400", &HTTPError{StatusCode: 400, Message: "model_not_found error"}, true},
 		{"regular 400", &HTTPError{StatusCode: 400, Message: "bad request"}, false},
 	}
 
@@ -149,7 +149,7 @@ func TestIsContextTooLongError(t *testing.T) {
 		// Real overflow phrasings still caught.
 		{"400 maximum tokens", &HTTPError{StatusCode: 400, Message: "maximum number of tokens exceeded"}, true},
 		{"400 too large", &HTTPError{StatusCode: 400, Message: "request too large"}, true},
-		{"400 Kimi message bytes", &HTTPError{StatusCode: 400, Message: "total message size 5943865 exceeds limit 2097152"}, true},
+		{"400 DeepSeek message bytes", &HTTPError{StatusCode: 400, Message: "total message size 5943865 exceeds limit 2097152"}, true},
 		{"untyped 400 context", fmt.Errorf("api error 400: context length exceeded"), true},
 		{"untyped 400 unrelated", fmt.Errorf("api error 400: invalid parameter foo"), false},
 	}

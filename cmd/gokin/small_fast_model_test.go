@@ -31,8 +31,8 @@ func TestRuntimeHaikuProviderSwitchUsesNewProviderDefault(t *testing.T) {
 	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
 	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "")
 	cfg := config.DefaultConfig()
-	cfg.Model.Provider = "kimi"
-	cfg.Model.Name = "k3"
+	cfg.Model.Provider = "deepseek"
+	cfg.Model.Name = "deepseek-v4-pro"
 	if err := applyRuntimeOverrides(cfg, "glm", "haiku"); err != nil || cfg.Model.Name != config.GLMFlashModel {
 		t.Fatalf("new provider inherited old provider's model: %+v %v", cfg.Model, err)
 	}

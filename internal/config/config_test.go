@@ -110,18 +110,6 @@ func TestHasProvider(t *testing.T) {
 			provider: "nonexistent",
 			want:     false,
 		},
-		{
-			name:     "kimi with key",
-			api:      APIConfig{KimiKey: "kimi-key"},
-			provider: "kimi",
-			want:     true,
-		},
-		{
-			name:     "minimax with key",
-			api:      APIConfig{MiniMaxKey: "mm-key"},
-			provider: "minimax",
-			want:     true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -170,9 +158,9 @@ func TestGetActiveKey(t *testing.T) {
 func TestSetProviderKey(t *testing.T) {
 	api := APIConfig{}
 
-	api.SetProviderKey("kimi", "km-new")
-	if api.KimiKey != "km-new" {
-		t.Errorf("SetProviderKey(kimi) failed: got %q", api.KimiKey)
+	api.SetProviderKey("deepseek", "km-new")
+	if api.DeepSeekKey != "km-new" {
+		t.Errorf("SetProviderKey(deepseek) failed: got %q", api.DeepSeekKey)
 	}
 
 	api.SetProviderKey("glm", "glm-new")

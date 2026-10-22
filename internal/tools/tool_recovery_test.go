@@ -7,8 +7,8 @@ import (
 	"google.golang.org/genai"
 )
 
-func TestBuildKimiToolErrorRecoveryNotification_ReadBeforeEdit(t *testing.T) {
-	got := buildKimiToolErrorRecoveryNotification("kimi-for-coding", []*genai.FunctionResponse{{
+func TestBuildDeepSeekToolErrorRecoveryNotification_ReadBeforeEdit(t *testing.T) {
+	got := buildToolErrorRecoveryNotification("deepseek-v4-pro", []*genai.FunctionResponse{{
 		Name: "edit",
 		Response: map[string]any{
 			"success": false,
@@ -23,8 +23,8 @@ func TestBuildKimiToolErrorRecoveryNotification_ReadBeforeEdit(t *testing.T) {
 	}
 }
 
-func TestBuildKimiToolErrorRecoveryNotification_EditMatchFailure(t *testing.T) {
-	got := buildKimiToolErrorRecoveryNotification("kimi-k2.6", []*genai.FunctionResponse{{
+func TestBuildDeepSeekToolErrorRecoveryNotification_EditMatchFailure(t *testing.T) {
+	got := buildToolErrorRecoveryNotification("deepseek-v4-pro", []*genai.FunctionResponse{{
 		Name: "edit",
 		Response: map[string]any{
 			"success": false,
@@ -39,8 +39,8 @@ func TestBuildKimiToolErrorRecoveryNotification_EditMatchFailure(t *testing.T) {
 	}
 }
 
-func TestBuildKimiToolErrorRecoveryNotification_NonKimiSkips(t *testing.T) {
-	got := buildKimiToolErrorRecoveryNotification("glm-5.1", []*genai.FunctionResponse{{
+func TestBuildDeepSeekToolErrorRecoveryNotification_NonDeepSeekSkips(t *testing.T) {
+	got := buildToolErrorRecoveryNotification("glm-5.1", []*genai.FunctionResponse{{
 		Name: "edit",
 		Response: map[string]any{
 			"success": false,
@@ -48,12 +48,12 @@ func TestBuildKimiToolErrorRecoveryNotification_NonKimiSkips(t *testing.T) {
 		},
 	}})
 	if got != "" {
-		t.Fatalf("non-Kimi notification = %q, want empty", got)
+		t.Fatalf("non-DeepSeek notification = %q, want empty", got)
 	}
 }
 
-func TestBuildKimiToolErrorRecoveryNotification_SuccessSkips(t *testing.T) {
-	got := buildKimiToolErrorRecoveryNotification("kimi-for-coding", []*genai.FunctionResponse{{
+func TestBuildDeepSeekToolErrorRecoveryNotification_SuccessSkips(t *testing.T) {
+	got := buildToolErrorRecoveryNotification("deepseek-v4-pro", []*genai.FunctionResponse{{
 		Name: "edit",
 		Response: map[string]any{
 			"success": true,

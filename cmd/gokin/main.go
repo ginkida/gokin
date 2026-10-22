@@ -81,10 +81,10 @@ const maxHeadlessStdinBytes = 16 << 20
 // rootLongHelp is the first thing a new user reads, and it names the default
 // provider — which is to say it tells them which API key to go and obtain. It
 // is a const rather than an inline literal so a test can hold it against
-// config.DefaultConfig: the claim went stale once already, still naming Kimi
+// config.DefaultConfig: the claim went stale once already, still naming DeepSeek
 // after the default moved to GLM.
 const rootLongHelp = `Gokin is a CLI tool for AI-assisted coding. Supports GLM
-(default), Kimi, DeepSeek, MiniMax, and Ollama. It provides an
+(default), DeepSeek, and Ollama. It provides an
 interactive chat interface with tools for reading, writing, and
 editing files, running commands, and orchestrating multi-agent
 workflows — with zero proxies between you and the provider you
@@ -105,7 +105,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/gokin/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default depends on provider)")
 	rootCmd.PersistentFlags().StringVar(&reasoningEffort, "effort", "", "GLM-5.3 reasoning effort for this run: auto, low, high, or max")
-	rootCmd.PersistentFlags().StringVar(&provider, "provider", "", "provider to use for this run (glm, minimax, kimi, deepseek, ollama)")
+	rootCmd.PersistentFlags().StringVar(&provider, "provider", "", "provider to use for this run (glm, deepseek, ollama)")
 	rootCmd.PersistentFlags().StringVar(&baseURL, "base-url", "", "custom provider API base URL for this run (in-memory only)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
 	rootCmd.PersistentFlags().BoolVarP(&continueLast, "continue", "c", false, "continue the most recent session in this workspace")

@@ -36,7 +36,7 @@ func TestFlushProvider_RemovesOnlyMatchingProvider(t *testing.T) {
 	pool.Put("deepseek", "deepseek-v4-pro", &fakeClient{id: "ds-pro"})
 	pool.Put("deepseek", "deepseek-chat", &fakeClient{id: "ds-chat"})
 	pool.Put("glm", "glm-4-flash", &fakeClient{id: "glm-flash"})
-	pool.Put("kimi", "kimi-latest", &fakeClient{id: "kimi"})
+	pool.Put("ollama", "llama3.2", &fakeClient{id: "deepseek"})
 
 	// Flush only deepseek entries
 	pool.FlushProvider("deepseek")
@@ -53,8 +53,8 @@ func TestFlushProvider_RemovesOnlyMatchingProvider(t *testing.T) {
 	if _, ok := pool.Get("glm", "glm-4-flash"); !ok {
 		t.Error("glm:glm-4-flash should survive FlushProvider")
 	}
-	if _, ok := pool.Get("kimi", "kimi-latest"); !ok {
-		t.Error("kimi:kimi-latest should survive FlushProvider")
+	if _, ok := pool.Get("ollama", "llama3.2"); !ok {
+		t.Error("ollama:llama3.2 should survive FlushProvider")
 	}
 
 	// Closed flag should still be false

@@ -1,12 +1,13 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 )
 
 func TestGetProvider(t *testing.T) {
-	// All 5 providers must be findable
-	for _, name := range []string{"glm", "minimax", "kimi", "deepseek", "ollama"} {
+	// All three providers must be findable
+	for _, name := range []string{"glm", "deepseek", "ollama"} {
 		p := GetProvider(name)
 		if p == nil {
 			t.Errorf("GetProvider(%q) = nil, want non-nil", name)
@@ -24,15 +25,18 @@ func TestGetProvider(t *testing.T) {
 }
 
 func TestProviderCount(t *testing.T) {
-	if len(Providers) != 5 {
-		t.Errorf("len(Providers) = %d, want 5", len(Providers))
+	if len(Providers) != 3 {
+		t.Errorf("len(Providers) = %d, want 3", len(Providers))
 	}
 }
 
 func TestProviderNames(t *testing.T) {
 	names := ProviderNames()
-	if len(names) != 5 {
-		t.Errorf("len(ProviderNames) = %d, want 5", len(names))
+	if !reflect.DeepEqual(names, []string{"glm", "deepseek", "ollama"}) {
+		t.Fatalf("provider order = %v", names)
+	}
+	if len(names) != 3 {
+		t.Errorf("len(ProviderNames) = %d, want 3", len(names))
 	}
 	if names[len(names)-1] != "ollama" {
 		t.Errorf("last provider = %q, want ollama", names[len(names)-1])
@@ -47,9 +51,9 @@ func TestKeyProviderNames(t *testing.T) {
 			t.Errorf("KeyProviderNames should not contain %q", name)
 		}
 	}
-	// 4 key-required providers: glm, minimax, kimi, deepseek.
-	if len(names) != 4 {
-		t.Errorf("len(KeyProviderNames) = %d, want 4", len(names))
+	// Two key-required providers: glm and deepseek.
+	if len(names) != 2 {
+		t.Errorf("len(KeyProviderNames) = %d, want 2", len(names))
 	}
 }
 
@@ -58,8 +62,8 @@ func TestAllProviderNames(t *testing.T) {
 	if names[len(names)-1] != "all" {
 		t.Errorf("AllProviderNames last = %q, want all", names[len(names)-1])
 	}
-	if len(names) != 6 { // 5 providers + "all"
-		t.Errorf("len(AllProviderNames) = %d, want 6", len(names))
+	if len(names) != 4 { // 3 providers + "all"
+		t.Errorf("len(AllProviderNames) = %d, want 4", len(names))
 	}
 }
 
@@ -71,11 +75,10 @@ func TestDetectProviderFromModel(t *testing.T) {
 		// GLM
 		{"glm-5", "glm"},
 		{"glm-4.7", "glm"},
-		// MiniMax
-		{"minimax-m2.5", "minimax"},
-		// Kimi
-		{"kimi-k2.5", "kimi"},
-		{"moonshot-v1", "kimi"}, // moonshot prefix -> kimi
+		// GLM
+
+		// DeepSeek
+
 		// DeepSeek
 		{"deepseek-v4-pro", "deepseek"},
 		{"deepseek-v4-flash", "deepseek"},
@@ -109,7 +112,7 @@ func TestDetectKnownProviderFromModel(t *testing.T) {
 		want  string
 	}{
 		{"deepseek-v4-pro", "deepseek"},
-		{"kimi-k2.5", "kimi"},
+
 		{"some-unknown-model", ""},
 		{"", ""},
 	}
@@ -142,11 +145,6 @@ func TestAnyProviderHasKey(t *testing.T) {
 			api:  APIConfig{APIKey: "legacy"},
 			want: true,
 		},
-		{
-			name: "kimi key",
-			api:  APIConfig{KimiKey: "kimi"},
-			want: true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -161,10 +159,9 @@ func TestAnyProviderHasKey(t *testing.T) {
 
 func TestProviderDefaultModels(t *testing.T) {
 	expected := map[string]string{
-		"glm":     "glm-5.3-flash",
-		"minimax": "MiniMax-M2.7",
-		"kimi":    "k3",
-		"ollama":  "llama3.2",
+		"glm":      "glm-5.3-flash",
+		"deepseek": "deepseek-v4-pro",
+		"ollama":   "llama3.2",
 	}
 
 	for name, wantModel := range expected {

@@ -758,7 +758,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		}
 
 		if err == nil {
-			// Detect empty response from model (common with MiniMax and weak models
+			// Detect empty response from model (possible with weak models
 			// when context is too large — they return 200 OK with empty text instead
 			// of a proper 400 context-too-long error).
 			if !contextTruncated && a.contextManager != nil &&
@@ -894,10 +894,10 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		}
 
 		// Automatic cross-provider failover used to live here — it would
-		// switch from e.g. kimi to glm after 2 retries or a tripped overload
+		// switch from e.g. deepseek to glm after 2 retries or a tripped overload
 		// breaker. Removed intentionally: users reported surprise billing
 		// errors from providers they weren't actively using (e.g. "GLM
-		// insufficient balance" while on kimi). Sticking to the chosen
+		// insufficient balance" while on deepseek). Sticking to the chosen
 		// provider makes failures attributable and predictable. If the
 		// user wants a fallback chain, they can opt in explicitly via
 		// `model.fallback_providers` in config.yaml — that path still

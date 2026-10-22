@@ -30,7 +30,7 @@ type AuditRunner interface {
 // Deliberately NOT a user-scriptable workflow engine: the recipe is fixed Go
 // code, not a script the model writes, because gokin's primary providers
 // (GLM/deepseek Coding-Plan, often quota-capped at a few hours) and weaker
-// models (kimi/minimax/ollama) can't reliably author/execute an open-ended
+// models (deepseek/glm/ollama) can't reliably author/execute an open-ended
 // multi-agent orchestration the way a frontier model can. A fixed recipe
 // with a small, predictable agent budget (auditLenses + up to
 // auditMaxVerifiers agents) is the tradeoff that actually works within those

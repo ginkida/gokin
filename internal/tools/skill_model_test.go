@@ -92,8 +92,8 @@ func TestInlineSkillUserHandoffIgnoresPreviousTurnAndIsOneShot(t *testing.T) {
 
 type inlineOtherProviderClient struct{ *testkit.MockClient }
 
-func (inlineOtherProviderClient) GetProvider() string { return "kimi" }
-func (inlineOtherProviderClient) GetModel() string    { return "k3" }
+func (inlineOtherProviderClient) GetProvider() string { return "deepseek" }
+func (inlineOtherProviderClient) GetModel() string    { return "deepseek-v4-pro" }
 
 func TestInlineSkillInvokingContextRetainsClientSnapshotAfterReplacement(t *testing.T) {
 	executor, _, _ := inlineSkillFixture(t)
@@ -147,7 +147,7 @@ func TestInlineSkillDelegationKeepsSelectedModelWithIndependentChildScope(t *tes
 func TestInlineSkillModelPreflightAndFailedRenderDoNotPublishOverrides(t *testing.T) {
 	for _, tc := range []struct{ name, fields, body string }{
 		{"unknown", "model: nonexistent", "!`touch should-not-exist`"},
-		{"wrong provider", "model: MiniMax-M2.7", "!`touch should-not-exist`"},
+		{"wrong provider", "model: deepseek-v4-pro", "!`touch should-not-exist`"},
 		{"unsupported effort", "model: glm-4.7\neffort: max", "!`touch should-not-exist`"},
 		{"failed rendering", "model: haiku\neffort: high", "${CLAUDE_SESSION_ID}"},
 	} {

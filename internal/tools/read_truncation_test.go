@@ -66,7 +66,7 @@ func TestReadText_NoTruncationHintWhenWholeFileFits(t *testing.T) {
 
 // Edge: file has EXACTLY limit lines — the scanner reads all `limit` lines
 // without ever advancing past them, so hasMoreAfterLimit stays false.
-// Important because an over-eager hint here would train Kimi to always
+// Important because an over-eager hint here would train DeepSeek to always
 // paginate, even on fully-consumed reads.
 func TestReadText_ExactLimitDoesNotShowHint(t *testing.T) {
 	dir := testkit.ResolvedTempDir(t)

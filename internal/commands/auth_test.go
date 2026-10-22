@@ -96,14 +96,14 @@ func TestLogin_NoArgs_ShowsStatus(t *testing.T) {
 }
 
 func TestLogin_ProviderWithoutKey_ShowsUsage(t *testing.T) {
-	// This is the exact path the user hit: typed "/login kimi" expecting
+	// This is the exact path the user hit: typed "/login deepseek" expecting
 	// something to happen, got what should be instant help text.
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
 	done := make(chan string, 1)
 
 	go func() {
-		out, _ := cmd.Execute(context.Background(), []string{"kimi"}, app)
+		out, _ := cmd.Execute(context.Background(), []string{"deepseek"}, app)
 		done <- out
 	}()
 
@@ -112,11 +112,11 @@ func TestLogin_ProviderWithoutKey_ShowsUsage(t *testing.T) {
 		// No key on the line now opens the masked key-entry modal (the app
 		// turns this marker into OpenKeyEntryMsg) instead of printing
 		// instructions — so a key pasted next never goes to the model.
-		if out != LoginKeyMarker+"kimi" {
+		if out != LoginKeyMarker+"deepseek" {
 			t.Errorf("no-key /login should return the key-entry marker, got %q", out)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("/login kimi (no key) hung (>2s) — the regression the user hit")
+		t.Fatal("/login deepseek (no key) hung (>2s) — the regression the user hit")
 	}
 	if app.applyCalls != 0 {
 		t.Errorf("ApplyConfig called with no key: %d times", app.applyCalls)
@@ -133,7 +133,7 @@ func TestLogin_UnknownProvider_ListsSupported(t *testing.T) {
 	if !strings.Contains(out, "Unknown provider") {
 		t.Errorf("output should call out unknown provider: %q", out)
 	}
-	for _, p := range []string{"kimi", "glm", "minimax"} {
+	for _, p := range []string{"deepseek", "glm", "glm"} {
 		if !strings.Contains(out, "/login "+p) {
 			t.Errorf("output should list /login %s: %q", p, out)
 		}
@@ -158,7 +158,7 @@ func TestLogin_Ollama_NoKeyNeeded(t *testing.T) {
 func TestLogin_ShortKey_Rejected(t *testing.T) {
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
-	out, err := cmd.Execute(context.Background(), []string{"kimi", "short"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek", "short"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -174,16 +174,16 @@ func TestLogin_ValidKey_SavesAndActivates(t *testing.T) {
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
 
-	key := "sk-kimi-" + strings.Repeat("x", 40)
+	key := "sk-deepseek-" + strings.Repeat("x", 40)
 	done := make(chan struct{}, 1)
 
 	go func() {
-		out, err := cmd.Execute(context.Background(), []string{"kimi", key}, app)
+		out, err := cmd.Execute(context.Background(), []string{"deepseek", key}, app)
 		if err != nil {
 			t.Errorf("unexpected err: %v", err)
 		}
-		if !strings.Contains(out, "Kimi") {
-			t.Errorf("output should mention Kimi: %q", out)
+		if !strings.Contains(out, "DeepSeek") {
+			t.Errorf("output should mention DeepSeek: %q", out)
 		}
 		done <- struct{}{}
 	}()
@@ -191,7 +191,7 @@ func TestLogin_ValidKey_SavesAndActivates(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("/login kimi <key> hung (>2s) — ApplyConfig should be fast in tests")
+		t.Fatal("/login deepseek <key> hung (>2s) — ApplyConfig should be fast in tests")
 	}
 
 	if app.applyCalls != 1 {
@@ -200,17 +200,17 @@ func TestLogin_ValidKey_SavesAndActivates(t *testing.T) {
 	if app.applied == nil {
 		t.Fatal("applied config is nil")
 	}
-	if app.applied.API.KimiKey != key {
-		t.Errorf("KimiKey = %q, want %q", app.applied.API.KimiKey, key)
+	if app.applied.API.DeepSeekKey != key {
+		t.Errorf("DeepSeekKey = %q, want %q", app.applied.API.DeepSeekKey, key)
 	}
-	if app.applied.API.ActiveProvider != "kimi" {
-		t.Errorf("ActiveProvider = %q, want kimi", app.applied.API.ActiveProvider)
+	if app.applied.API.ActiveProvider != "deepseek" {
+		t.Errorf("ActiveProvider = %q, want deepseek", app.applied.API.ActiveProvider)
 	}
-	if app.applied.Model.Provider != "kimi" {
-		t.Errorf("Model.Provider = %q, want kimi", app.applied.Model.Provider)
+	if app.applied.Model.Provider != "deepseek" {
+		t.Errorf("Model.Provider = %q, want deepseek", app.applied.Model.Provider)
 	}
-	if app.applied.Model.Name != "k3" {
-		t.Errorf("Model.Name = %q, want k3 (Kimi flagship default)", app.applied.Model.Name)
+	if app.applied.Model.Name != "deepseek-v4-pro" {
+		t.Errorf("Model.Name = %q, want deepseek-v4-pro (DeepSeek flagship default)", app.applied.Model.Name)
 	}
 }
 
@@ -221,26 +221,26 @@ func TestLogin_KeyWithSurroundingWhitespace_Trimmed(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{"trailing newline", "sk-kimi-" + strings.Repeat("x", 40) + "\n"},
-		{"leading+trailing space", "   sk-kimi-" + strings.Repeat("x", 40) + "   "},
-		{"double-quoted", `"sk-kimi-` + strings.Repeat("x", 40) + `"`},
-		{"single-quoted", `'sk-kimi-` + strings.Repeat("x", 40) + `'`},
+		{"trailing newline", "sk-deepseek-" + strings.Repeat("x", 40) + "\n"},
+		{"leading+trailing space", "   sk-deepseek-" + strings.Repeat("x", 40) + "   "},
+		{"double-quoted", `"sk-deepseek-` + strings.Repeat("x", 40) + `"`},
+		{"single-quoted", `'sk-deepseek-` + strings.Repeat("x", 40) + `'`},
 	}
-	want := "sk-kimi-" + strings.Repeat("x", 40)
+	want := "sk-deepseek-" + strings.Repeat("x", 40)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newAuthApp(&config.Config{})
 			cmd := &LoginCommand{}
-			_, err := cmd.Execute(context.Background(), []string{"kimi", tc.raw}, app)
+			_, err := cmd.Execute(context.Background(), []string{"deepseek", tc.raw}, app)
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			if app.applied == nil {
 				t.Fatal("applied config is nil")
 			}
-			if app.applied.API.KimiKey != want {
-				t.Errorf("KimiKey = %q, want %q (raw input: %q)", app.applied.API.KimiKey, want, tc.raw)
+			if app.applied.API.DeepSeekKey != want {
+				t.Errorf("DeepSeekKey = %q, want %q (raw input: %q)", app.applied.API.DeepSeekKey, want, tc.raw)
 			}
 		})
 	}
@@ -251,10 +251,10 @@ func TestLogin_ApplyConfigError_ReportedNotHung(t *testing.T) {
 	app.applyErr = errorString("config disk full")
 	cmd := &LoginCommand{}
 
-	key := "sk-kimi-" + strings.Repeat("x", 40)
+	key := "sk-deepseek-" + strings.Repeat("x", 40)
 	done := make(chan string, 1)
 	go func() {
-		out, _ := cmd.Execute(context.Background(), []string{"kimi", key}, app)
+		out, _ := cmd.Execute(context.Background(), []string{"deepseek", key}, app)
 		done <- out
 	}()
 
@@ -277,11 +277,11 @@ func TestLogin_ContextCancellation_ReturnsPromptly(t *testing.T) {
 	cmd := &LoginCommand{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	key := "sk-kimi-" + strings.Repeat("x", 40)
+	key := "sk-deepseek-" + strings.Repeat("x", 40)
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = cmd.Execute(ctx, []string{"kimi", key}, app)
+		_, _ = cmd.Execute(ctx, []string{"deepseek", key}, app)
 		done <- struct{}{}
 	}()
 
@@ -299,7 +299,7 @@ func TestLogin_KeyWithSpaces_Rejected(t *testing.T) {
 	// The command must detect this and warn, not silently save a fragment.
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
-	out, err := cmd.Execute(context.Background(), []string{"kimi", "sk-kimi", "trailing-garbage"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek", "sk-deepseek", "trailing-garbage"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestLogin_URLAsKey_Rejected(t *testing.T) {
 	// Easy mistake: paste the key URL instead of the key itself.
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
-	out, err := cmd.Execute(context.Background(), []string{"kimi", "https://kimi.com/settings/keys"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek", "https://deepseek.com/settings/keys"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -332,8 +332,8 @@ func TestLogin_SuccessMessage_IncludesMaskedKey(t *testing.T) {
 	// over the user's shoulder shouldn't see it.
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
-	key := "sk-kimi-" + strings.Repeat("SECRETSECRET", 4)
-	out, err := cmd.Execute(context.Background(), []string{"kimi", key}, app)
+	key := "sk-deepseek-" + strings.Repeat("SECRETSECRET", 4)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek", key}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestLogin_SuccessMessage_IncludesMaskedKey(t *testing.T) {
 func TestLogin_NoKeyMarker_CarriesProvider(t *testing.T) {
 	app := newAuthApp(&config.Config{})
 	cmd := &LoginCommand{}
-	for _, provider := range []string{"kimi", "deepseek", "glm"} {
+	for _, provider := range []string{"glm", "deepseek", "glm"} {
 		out, _ := cmd.Execute(context.Background(), []string{provider}, app)
 		if out != LoginKeyMarker+provider {
 			t.Errorf("/login %s (no key) = %q, want marker carrying %q", provider, out, provider)
@@ -363,7 +363,7 @@ func TestLogin_NoKeyMarker_CarriesProvider(t *testing.T) {
 
 func TestProvider_NoArgs_ShowsSummary(t *testing.T) {
 	app := newAuthApp(&config.Config{
-		API: config.APIConfig{KimiKey: "set-kimi"},
+		API: config.APIConfig{DeepSeekKey: "set-deepseek"},
 	})
 	cmd := &ProviderCommand{}
 	out, err := cmd.Execute(context.Background(), nil, app)
@@ -376,17 +376,17 @@ func TestProvider_NoArgs_ShowsSummary(t *testing.T) {
 }
 
 func TestProvider_SwitchRequiresKey(t *testing.T) {
-	// Kimi not configured — switching must NOT silently activate a keyless
+	// DeepSeek not configured — switching must NOT silently activate a keyless
 	// provider. v0.100.105: instead of a dead-end "run /login" hint, the
 	// command returns the masked key-entry marker (ONE flow: the modal's
 	// submit re-invokes /login, which saves the key AND completes the switch).
 	app := newAuthApp(&config.Config{})
 	cmd := &ProviderCommand{}
-	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if out != LoginKeyMarker+"kimi" {
+	if out != LoginKeyMarker+"deepseek" {
 		t.Errorf("keyless switch should open the masked key entry, got %q", out)
 	}
 	if app.applyCalls != 0 {
@@ -399,14 +399,14 @@ type errorString string
 func (e errorString) Error() string { return string(e) }
 
 // Regression: switching providers via /login must clear session
-// history. Mid-session swaps between Kimi and DeepSeek otherwise
+// history. Mid-session swaps between GLM and DeepSeek otherwise
 // produced "content[].thinking must be passed back" 400s because
 // the two providers disagree on how thinking signatures are stored
 // in assistant turns.
 func TestLogin_ClearsHistoryOnProviderSwitch(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing-key-ignore-me"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing-key-ignore-me"
 	app := newAuthApp(cfg)
 	cmd := &LoginCommand{}
 
@@ -469,8 +469,8 @@ func TestLogin_DoesNotClearOnFirstSetup(t *testing.T) {
 // /provider switch must also clear.
 func TestProvider_ClearsHistoryOnSwitch(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing"
 	cfg.API.DeepSeekKey = "sk-deepseek-ready-to-use"
 	app := newAuthApp(cfg)
 	cmd := &ProviderCommand{}
@@ -498,13 +498,13 @@ func TestProvider_ClearsHistoryOnSwitch(t *testing.T) {
 // and /provider already handle.
 func TestLogout_ActiveProviderAutoSwitch_ClearsHistory(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing-ignore-me"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing-ignore-me"
 	cfg.API.DeepSeekKey = "sk-deepseek-ready-ignore-me"
 	app := newAuthApp(cfg)
 	cmd := &LogoutCommand{}
 
-	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"glm"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -533,13 +533,13 @@ func TestLogout_ActiveProviderAutoSwitch_ClearsHistory(t *testing.T) {
 
 func TestLogout_ActiveProviderAutoSwitch_DurableSaveFailureIsNotSuccess(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing-ignore-me"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing-ignore-me"
 	cfg.API.DeepSeekKey = "sk-deepseek-ready-ignore-me"
 	app := newAuthApp(cfg)
 	app.persistErr = errors.New("disk full")
 
-	out, err := (&LogoutCommand{}).Execute(context.Background(), []string{"kimi"}, app)
+	out, err := (&LogoutCommand{}).Execute(context.Background(), []string{"glm"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -547,8 +547,8 @@ func TestLogout_ActiveProviderAutoSwitch_DurableSaveFailureIsNotSuccess(t *testi
 		t.Fatalf("clear/apply/persist calls = %d/%d/%d, want 1/1/1",
 			app.clearCalls, app.applyCalls, app.persistCalls)
 	}
-	if app.applied == nil || app.applied.API.KimiKey != "" || app.applied.API.ActiveProvider != "deepseek" {
-		t.Fatalf("live staged config = %+v, want removed Kimi key and DeepSeek fallback", app.applied)
+	if app.applied == nil || app.applied.API.GLMKey != "" || app.applied.API.ActiveProvider != "deepseek" {
+		t.Fatalf("live staged config = %+v, want removed GLM key and DeepSeek fallback", app.applied)
 	}
 	if strings.Contains(out, "✓") || strings.Contains(out, "Auto-switched") {
 		t.Fatalf("durability failure reported success: %q", out)
@@ -560,8 +560,8 @@ func TestLogout_ActiveProviderAutoSwitch_DurableSaveFailureIsNotSuccess(t *testi
 
 func TestProvider_ClearFailurePreventsClientPublication(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing"
 	cfg.API.DeepSeekKey = "sk-deepseek-ready-to-use"
 	app := newAuthApp(cfg)
 	app.clearErr = errors.New("session disk full")
@@ -580,8 +580,8 @@ func TestProvider_ClearFailurePreventsClientPublication(t *testing.T) {
 
 func TestLogin_ClearFailurePreventsCredentialProviderPublication(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing"
 	app := newAuthApp(cfg)
 	app.clearErr = errors.New("session disk full")
 
@@ -600,8 +600,8 @@ func TestLogin_ClearFailurePreventsCredentialProviderPublication(t *testing.T) {
 // active provider).
 func TestLogout_NonActiveProvider_DoesNotClearHistory(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-stays"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-stays"
 	cfg.API.DeepSeekKey = "sk-deepseek-goes-away"
 	app := newAuthApp(cfg)
 	cmd := &LogoutCommand{}
@@ -616,8 +616,8 @@ func TestLogout_NonActiveProvider_DoesNotClearHistory(t *testing.T) {
 	if app.applied == nil || app.applied.API.DeepSeekKey != "" {
 		t.Errorf("DeepSeek key should be cleared")
 	}
-	if app.applied.API.ActiveProvider != "kimi" {
-		t.Errorf("ActiveProvider should stay kimi, got %q", app.applied.API.ActiveProvider)
+	if app.applied.API.ActiveProvider != "glm" {
+		t.Errorf("ActiveProvider should stay glm, got %q", app.applied.API.ActiveProvider)
 	}
 	if app.persistCalls != 1 {
 		t.Errorf("inactive-provider logout persistence confirmations = %d, want 1", app.persistCalls)
@@ -626,8 +626,8 @@ func TestLogout_NonActiveProvider_DoesNotClearHistory(t *testing.T) {
 
 func TestLogout_NonActiveProvider_DurableSaveFailureIsNotSuccess(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing"
+	cfg.API.ActiveProvider = "glm"
+	cfg.API.GLMKey = "sk-glm-existing"
 	cfg.API.DeepSeekKey = "sk-deepseek-remove-me"
 	app := newAuthApp(cfg)
 	app.persistErr = errors.New("read-only config")
@@ -640,7 +640,7 @@ func TestLogout_NonActiveProvider_DurableSaveFailureIsNotSuccess(t *testing.T) {
 		t.Fatalf("clear/apply/persist calls = %d/%d/%d, want 0/1/1",
 			app.clearCalls, app.applyCalls, app.persistCalls)
 	}
-	if app.applied == nil || app.applied.API.DeepSeekKey != "" || app.applied.API.ActiveProvider != "kimi" {
+	if app.applied == nil || app.applied.API.DeepSeekKey != "" || app.applied.API.ActiveProvider != "glm" {
 		t.Fatalf("live staged config = %+v, want only inactive DeepSeek key removed", app.applied)
 	}
 	if strings.Contains(out, "✓") || strings.Contains(out, "API key removed") {
@@ -653,18 +653,18 @@ func TestLogout_NonActiveProvider_DurableSaveFailureIsNotSuccess(t *testing.T) {
 
 // /provider X where X is already the active provider: previously returned
 // a dead-end "Already using X" that confused users trying to recover from
-// a stuck session ("I did /provider kimi and nothing happened"). The new
+// a stuck session ("I did /provider glm and nothing happened"). The new
 // message keeps the same no-op behavior but surfaces the escape hatches
 // (/clear to reset, /provider to inspect, /login to switch).
 func TestProvider_AlreadyOnProvider_SurfacesResetHint(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-existing"
-	cfg.Model.Name = "kimi-for-coding"
+	cfg.API.ActiveProvider = "deepseek"
+	cfg.API.DeepSeekKey = "sk-deepseek-existing"
+	cfg.Model.Name = "deepseek-v4-pro"
 	app := newAuthApp(cfg)
 	cmd := &ProviderCommand{}
 
-	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -679,13 +679,13 @@ func TestProvider_AlreadyOnProvider_SurfacesResetHint(t *testing.T) {
 
 	// Message must teach the user about /clear — the escape hatch most
 	// relevant to the "why didn't /provider do anything?" scenario.
-	if !strings.Contains(out, "Already using kimi") {
+	if !strings.Contains(out, "Already using deepseek") {
 		t.Errorf("output should still confirm no-op: %q", out)
 	}
 	if !strings.Contains(out, "/clear") {
 		t.Errorf("output should suggest /clear as a recovery path: %q", out)
 	}
-	if !strings.Contains(out, "kimi-for-coding") {
+	if !strings.Contains(out, "deepseek-v4-pro") {
 		t.Errorf("output should show the current model so user knows what they're on: %q", out)
 	}
 }
@@ -695,12 +695,12 @@ func TestProvider_AlreadyOnProvider_SurfacesResetHint(t *testing.T) {
 // spurious history clear (the next /login will clear if provider differs).
 func TestLogout_OnlyProvider_NoAutoswitchNoClear(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.KimiKey = "sk-kimi-only"
+	cfg.API.ActiveProvider = "deepseek"
+	cfg.API.DeepSeekKey = "sk-deepseek-only"
 	app := newAuthApp(cfg)
 	cmd := &LogoutCommand{}
 
-	out, err := cmd.Execute(context.Background(), []string{"kimi"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"deepseek"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}

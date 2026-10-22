@@ -13,32 +13,17 @@ import (
 // Default base URLs for API providers.
 // DefaultAnthropicBaseURL is the fallback endpoint inside AnthropicClient when
 // a provider doesn't set its own BaseURL. The anthropic provider itself has
-// been removed from Providers/factory in v0.65.0, but GLM/Kimi/MiniMax still
+// been removed from Providers/factory in v0.65.0, but GLM/DeepSeek still
 // route through AnthropicClient in compat mode with explicit BaseURL values
 // that override this constant, so keeping it here avoids accidental requests
 // against api.anthropic.com.
 const (
 	DefaultAnthropicBaseURL = "https://api.anthropic.com"
 	DefaultGLMBaseURL       = "https://api.z.ai/api/anthropic"
-	DefaultMiniMaxBaseURL   = "https://api.minimax.io/anthropic"
-	// DefaultKimiBaseURL points at Kimi Coding Plan's Anthropic-compatible
-	// endpoint — the subscription tier required for K3/K2.7 coding-
-	// optimized inference. Keys for this endpoint are `sk-kimi-...` (distinct
-	// from the Moonshot Developer Platform keys). Users who explicitly want
-	// the Moonshot Developer API can override via `model.custom_base_url:
-	// https://api.moonshot.ai/anthropic` with their Moonshot key.
-	DefaultKimiBaseURL = "https://api.kimi.com/coding"
-	// DefaultMoonshotBaseURL is the alternative non-subscription endpoint
-	// (Developer Platform). Retained for reference and for users who opt in
-	// via custom_base_url.
-	DefaultMoonshotBaseURL = "https://api.moonshot.ai/anthropic"
 	// DefaultDeepSeekBaseURL points at DeepSeek's Anthropic-compatible
 	// endpoint. The root https://api.deepseek.com serves the OpenAI-compat
 	// API (chat/completions); `/anthropic` returns /v1/messages with the
-	// Claude wire format our AnthropicClient understands. DeepSeek V4
-	// (flash + pro) is served here alongside the legacy deepseek-chat
-	// and deepseek-reasoner endpoints — the latter two deprecate
-	// 2026-07-24 but remain callable until then.
+	// Claude wire format our AnthropicClient understands for Flash and V4 Pro.
 	DefaultDeepSeekBaseURL = "https://api.deepseek.com/anthropic"
 )
 
@@ -47,7 +32,7 @@ type ModelInfo struct {
 	ID          string // Model identifier (e.g., "glm-5.2", "deepseek-v4-pro")
 	Name        string // Human-readable name
 	Description string // Short description
-	Provider    string // Provider: "glm", "kimi", "minimax", "deepseek", or "ollama"
+	Provider    string // Provider: "glm", "deepseek", or "ollama"
 	BaseURL     string // Custom base URL for Anthropic-compatible APIs
 }
 
@@ -122,67 +107,14 @@ var AvailableModels = []ModelInfo{
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},
-	// MiniMax models (via Anthropic-compatible API)
 	{
-		ID:          "MiniMax-M2.7",
-		Name:        "MiniMax M2.7",
-		Description: "Recursive self-improvement, top real-world engineering",
-		Provider:    "minimax",
-		BaseURL:     DefaultMiniMaxBaseURL,
+		ID:          "deepseek-flash",
+		Name:        "DeepSeek Flash",
+		Description: "1M context, thinking and tool use",
+		Provider:    "deepseek",
+		BaseURL:     DefaultDeepSeekBaseURL,
 	},
-	{
-		ID:          "MiniMax-M2.7-highspeed",
-		Name:        "MiniMax M2.7 Highspeed",
-		Description: "Same as M2.7, faster inference, low latency",
-		Provider:    "minimax",
-		BaseURL:     DefaultMiniMaxBaseURL,
-	},
-	{
-		ID:          "MiniMax-M2.5",
-		Name:        "MiniMax M2.5",
-		Description: "Peak performance, 200K context (~60 tps)",
-		Provider:    "minimax",
-		BaseURL:     DefaultMiniMaxBaseURL,
-	},
-	{
-		ID:          "MiniMax-M2.5-highspeed",
-		Name:        "MiniMax M2.5 Highspeed",
-		Description: "Same performance, faster (~100 tps)",
-		Provider:    "minimax",
-		BaseURL:     DefaultMiniMaxBaseURL,
-	},
-	// Kimi Coding Plan (api.kimi.com/coding). Live /v1/models (2026-07):
-	// `k3` (Kimi K3 flagship, 1M context), `kimi-for-coding` (K2.7, 256K)
-	// and `kimi-for-coding-highspeed` (K2.7 faster output). All emit SIGNED
-	// thinking on the Anthropic-compat endpoint (signature_delta), so no
-	// GLM-style unsigned preservation is needed. K3 requires a Moderato+
-	// Kimi subscription (Allegretto+ for the full 1M window); lower tiers
-	// switch to kimi-for-coding with /model.
-	{
-		ID:          "k3",
-		Name:        "Kimi K3 (Coding Plan)",
-		Description: "Flagship — 1M context, always-on reasoning + vision + video, coding-tuned",
-		Provider:    "kimi",
-		BaseURL:     DefaultKimiBaseURL,
-	},
-	{
-		ID:          "kimi-for-coding",
-		Name:        "Kimi K2.7 (Coding Plan)",
-		Description: "256K context, reasoning + vision + video, coding-tuned",
-		Provider:    "kimi",
-		BaseURL:     DefaultKimiBaseURL,
-	},
-	{
-		ID:          "kimi-for-coding-highspeed",
-		Name:        "Kimi K2.7 Highspeed (Coding Plan)",
-		Description: "Same K2.7, faster output — for latency-sensitive coding loops",
-		Provider:    "kimi",
-		BaseURL:     DefaultKimiBaseURL,
-	},
-	// DeepSeek — V4 generation. flash = latency/cost-optimised, pro =
-	// top-tier reasoning. deepseek-chat and deepseek-reasoner are kept
-	// for users on pre-deprecation plans (retire 2026-07-24) but are
-	// not the default.
+	// DeepSeek Pro and the still-accepted V4 Flash alias.
 	{
 		ID:          "deepseek-v4-pro",
 		Name:        "DeepSeek V4 Pro",
@@ -194,20 +126,6 @@ var AvailableModels = []ModelInfo{
 		ID:          "deepseek-v4-flash",
 		Name:        "DeepSeek V4 Flash",
 		Description: "Fast & cheap V4 variant — lower latency, same wire format",
-		Provider:    "deepseek",
-		BaseURL:     DefaultDeepSeekBaseURL,
-	},
-	{
-		ID:          "deepseek-chat",
-		Name:        "DeepSeek Chat",
-		Description: "Legacy chat model — deprecates 2026-07-24",
-		Provider:    "deepseek",
-		BaseURL:     DefaultDeepSeekBaseURL,
-	},
-	{
-		ID:          "deepseek-reasoner",
-		Name:        "DeepSeek Reasoner",
-		Description: "Legacy reasoning model — deprecates 2026-07-24",
 		Provider:    "deepseek",
 		BaseURL:     DefaultDeepSeekBaseURL,
 	},
@@ -533,10 +451,10 @@ type ResponseChunk struct {
 	// OutputTokens from API usage metadata (if available).
 	OutputTokens int
 
-	// CacheCreationInputTokens from prompt caching (Anthropic/MiniMax).
+	// CacheCreationInputTokens reported by the provider.
 	CacheCreationInputTokens int
 
-	// CacheReadInputTokens from prompt caching (Anthropic/MiniMax).
+	// CacheReadInputTokens reported by the provider.
 	CacheReadInputTokens int
 
 	// RateLimit from provider (if available).
@@ -568,10 +486,10 @@ type Response struct {
 	// OutputTokens from API usage metadata (completion tokens, if available).
 	OutputTokens int
 
-	// CacheCreationInputTokens from prompt caching (Anthropic/MiniMax).
+	// CacheCreationInputTokens reported by the provider.
 	CacheCreationInputTokens int
 
-	// CacheReadInputTokens from prompt caching (Anthropic/MiniMax).
+	// CacheReadInputTokens reported by the provider.
 	CacheReadInputTokens int
 
 	// RateLimit from provider (if available).
@@ -624,7 +542,7 @@ func (sr *StreamingResponse) Collect() (*Response, error) {
 
 		// Back-fill Parts from FunctionCalls that weren't already emitted
 		// as structured parts. Anthropic-compatible providers (GLM,
-		// MiniMax, Kimi) stream tool calls as FunctionCall-only, without
+		// DeepSeek) stream tool calls as FunctionCall-only, without
 		// Part wrappers; this keeps Response.Parts usable for history
 		// reconstruction in SendFunctionResponse.
 		for _, fc := range chunk.FunctionCalls {

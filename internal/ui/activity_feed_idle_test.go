@@ -86,7 +86,7 @@ func TestActivityFeedPanel_NoIdleMarkerWhenActive(t *testing.T) {
 }
 
 // TestSubAgentIdleThreshold_Reasonable pins the threshold to a window long
-// enough to ignore normal LLM thinking+generate pauses (Kimi thinking can
+// enough to ignore normal LLM thinking+generate pauses (DeepSeek thinking can
 // run 30-60s) and short enough to catch stalls before the 10-min hard
 // timeout fires. Prevents future tweaks from drifting it into either
 // "too noisy" or "too late" territory.

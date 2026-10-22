@@ -125,7 +125,7 @@ func (t *ToolsListTool) Execute(ctx context.Context, args map[string]any) (ToolR
 	// demoted to ToolSetAgent in v0.70.2 because its dependency isn't
 	// wired outside the sub-agent path). Only advertise it when the
 	// current toolkit actually includes it — otherwise the hint tells
-	// Kimi to call a tool it doesn't have, which is exactly the
+	// the model to call a tool it doesn't have, which is exactly the
 	// silent-failure pattern we're trying to eliminate.
 	if t.hasRequestTool(ctx) {
 		output.WriteString("\nIf you need a tool that is not in your current toolkit, use 'request_tool' to request it.")

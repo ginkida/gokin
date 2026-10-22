@@ -133,7 +133,7 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 			}
 			if handler.OnTokenUpdate != nil && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
 				// Report the FULL prompt-side context, not the billed remainder:
-				// caching providers (glm/deepseek/kimi/anthropic) report
+				// caching providers (glm/deepseek/anthropic) report
 				// input_tokens EXCLUSIVE of cache_read/cache_creation — on a warm
 				// prefix cache input_tokens collapses to the uncached tail (the
 				// documented glm probe: 2848 → 32 with cache_read=2816), so

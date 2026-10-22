@@ -114,7 +114,7 @@ func TestValidateWithProviderConfig_Ok200(t *testing.T) {
 }
 
 func TestValidateWithProviderConfig_Ok404InAllowlist(t *testing.T) {
-	// Mirrors MiniMax's real-world behaviour where /v1/models returns 404
+	// Mirrors GLM's real-world behaviour where /v1/models returns 404
 	// on an Anthropic-compat gateway even with a good key.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -227,7 +227,7 @@ mcp:
 		t.Fatalf("seed write: %v", err)
 	}
 
-	savedPath, err := saveProviderConfig("kimi", "sk-kimi-newnewnewnewnewnewnewnew", "")
+	savedPath, err := saveProviderConfig("deepseek", "sk-deepseek-newnewnewnewnewnewnewnew", "")
 	if err != nil {
 		t.Fatalf("saveProviderConfig: %v", err)
 	}
@@ -248,16 +248,16 @@ mcp:
 	if api == nil {
 		t.Fatal("api section missing after save")
 	}
-	if api["kimi_key"] != "sk-kimi-newnewnewnewnewnewnewnew" {
-		t.Errorf("kimi_key not saved: got %v", api["kimi_key"])
+	if api["deepseek_key"] != "sk-deepseek-newnewnewnewnewnewnewnew" {
+		t.Errorf("deepseek_key not saved: got %v", api["deepseek_key"])
 	}
 	if api["glm_key"] != "existing-glm-key-xxxxxxxxxxxxxxxxxx" {
 		t.Errorf("glm_key was clobbered! this is the exact regression we're guarding: got %v", api["glm_key"])
 	}
-	if api["active_provider"] != "kimi" {
+	if api["active_provider"] != "deepseek" {
 		t.Errorf("active_provider not updated: got %v", api["active_provider"])
 	}
-	if api["backend"] != "kimi" {
+	if api["backend"] != "deepseek" {
 		t.Errorf("backend not updated: got %v", api["backend"])
 	}
 
@@ -265,11 +265,11 @@ mcp:
 	if model == nil {
 		t.Fatal("model section missing after save")
 	}
-	if model["provider"] != "kimi" {
+	if model["provider"] != "deepseek" {
 		t.Errorf("model.provider not updated: got %v", model["provider"])
 	}
-	if model["name"] != "k3" {
-		t.Errorf("model.name not set to kimi default (k3): got %v", model["name"])
+	if model["name"] != "deepseek-v4-pro" {
+		t.Errorf("model.name not set to deepseek default (deepseek-v4-pro): got %v", model["name"])
 	}
 	if model["temperature"] != 0.42 {
 		t.Errorf("model.temperature was clobbered: got %v", model["temperature"])
@@ -305,7 +305,7 @@ func TestSaveProviderConfig_FreshInstall(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
-	savedPath, err := saveProviderConfig("kimi", "sk-kimi-fresh-install-12345", "kimi-for-coding")
+	savedPath, err := saveProviderConfig("deepseek", "sk-deepseek-fresh-install-12345", "deepseek-v4-pro")
 	if err != nil {
 		t.Fatalf("saveProviderConfig: %v", err)
 	}
@@ -319,8 +319,8 @@ func TestSaveProviderConfig_FreshInstall(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	api, _ := root["api"].(map[string]any)
-	if api["kimi_key"] != "sk-kimi-fresh-install-12345" {
-		t.Errorf("kimi_key not saved on fresh install: got %v", api["kimi_key"])
+	if api["deepseek_key"] != "sk-deepseek-fresh-install-12345" {
+		t.Errorf("deepseek_key not saved on fresh install: got %v", api["deepseek_key"])
 	}
 }
 
@@ -333,7 +333,7 @@ func TestSaveProviderConfig_UnknownProviderFails(t *testing.T) {
 
 // Regression: before this fix, setupOllamaLocal wrote config.yaml with a
 // hand-built YAML literal and raw os.WriteFile, which silently clobbered
-// every non-Ollama section the user already had configured (GLM/Kimi/
+// every non-Ollama section the user already had configured (GLM/DeepSeek/
 // DeepSeek keys, MCP servers, custom aliases). saveOllamaConfig must
 // round-trip unrelated fields.
 func TestSaveOllamaConfig_Local_PreservesExistingConfig(t *testing.T) {
@@ -347,12 +347,11 @@ func TestSaveOllamaConfig_Local_PreservesExistingConfig(t *testing.T) {
 
 	existing := `api:
   glm_key: keep-this-glm-key-1234567890
-  kimi_key: keep-this-kimi-key-1234567890
   deepseek_key: keep-this-deepseek-key-1234567890
-  active_provider: kimi
+  active_provider: deepseek
 model:
-  name: kimi-for-coding
-  provider: kimi
+  name: deepseek-v4-pro
+  provider: deepseek
   temperature: 0.42
 tools:
   allowed_dirs:
@@ -391,8 +390,8 @@ mcp:
 	if api["glm_key"] != "keep-this-glm-key-1234567890" {
 		t.Errorf("glm_key was clobbered by Ollama setup: got %v", api["glm_key"])
 	}
-	if api["kimi_key"] != "keep-this-kimi-key-1234567890" {
-		t.Errorf("kimi_key was clobbered: got %v", api["kimi_key"])
+	if api["deepseek_key"] != "keep-this-deepseek-key-1234567890" {
+		t.Errorf("deepseek_key was clobbered: got %v", api["deepseek_key"])
 	}
 	if api["deepseek_key"] != "keep-this-deepseek-key-1234567890" {
 		t.Errorf("deepseek_key was clobbered: got %v", api["deepseek_key"])

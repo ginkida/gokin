@@ -121,7 +121,7 @@ func TestIsGLMTerminalCode_AndTheOverloadTrap(t *testing.T) {
 	}
 }
 
-// A standard Anthropic-compatible 429 body (deepseek/kimi/minimax) carries a
+// A standard Anthropic-compatible 429 body (DeepSeek) carries a
 // "type", not a numeric "code" — so it must NOT be classified as a GLM terminal
 // error, preserving those providers' transient rate-limit retry behavior.
 func TestParseProviderErrorBody_StandardShapeIsNotTerminal(t *testing.T) {
@@ -145,7 +145,7 @@ func TestParseProviderErrorBody_StandardShapeIsNotTerminal(t *testing.T) {
 	// Standard Anthropic shape (deepseek) → no numeric code → not terminal.
 	code, _ = parseProviderErrorBody([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
 	if code != "" {
-		t.Errorf("standard shape yielded code %q, want empty (must fall through to retryable/overload for deepseek/kimi/minimax)", code)
+		t.Errorf("standard shape yielded code %q, want empty (must fall through to retryable/overload for DeepSeek)", code)
 	}
 	if isGLMTerminalCode(code) {
 		t.Error("standard-shape empty code must not be terminal")

@@ -13,7 +13,7 @@ import (
 // or disabled and lets users tune its token budget at runtime — this changes
 // model behavior/cost, not merely whether reasoning text is displayed.
 //
-// Background: Kimi Coding Plan (K3/K2.7) and GLM 4.7+ both emit `thinking_delta`
+// Background: DeepSeek and GLM 4.7+ emit `thinking_delta`
 // SSE events that the TUI renders as dim italic content. Whether they fire is
 // controlled by `cfg.Model.EnableThinking` + `cfg.Model.ThinkingBudget`; the
 // factory auto-enables thinking for supported models, but users may want to
@@ -70,7 +70,7 @@ func applyThinkingMode(cfg *config.Config, mode string, budget int32) {
 	}
 }
 
-// thinkingDefaultBudget matches the factory defaults for GLM/Kimi. Kept here
+// thinkingDefaultBudget matches the factory defaults for GLM/DeepSeek. Kept here
 // as a local constant so /thinking on doesn't need to know which provider
 // the user is on — any provider that implements Extended Thinking honours a
 // non-zero budget.
@@ -246,23 +246,18 @@ func clampThinkingBudget(budget int32) int32 {
 // can give an accurate status without importing the client package (which
 // would create a circular dep: commands → client → commands).
 //
-// Mirrors: factory.go supportsKimiThinking / supportsGLMThinking /
-// supportsDeepSeekThinking. When adding a new thinking-capable model there,
+// Mirrors factory.go supportsGLMThinking and supportsDeepSeekThinking. When adding a new thinking-capable model there,
 // update this table too.
 func modelSupportsThinking(modelID string) bool {
 	m := strings.ToLower(modelID)
 	switch {
-	case m == "k3", strings.HasPrefix(m, "k3-"), strings.HasPrefix(m, "kimi-k3"),
-		strings.HasPrefix(m, "kimi-for-coding"),
-		strings.HasPrefix(m, "kimi-k2"):
-		return true
 	case strings.HasPrefix(m, "glm-5"),
 		strings.HasPrefix(m, "glm-4.7"):
 		return true
-	case strings.HasPrefix(m, "deepseek-"):
+	case m == "deepseek-flash", m == "deepseek", strings.HasPrefix(m, "deepseek-v4"), strings.HasPrefix(m, "deepseek-reasoner"):
 		// All DeepSeek family models EXCEPT deepseek-chat support thinking.
 		// Matches supportsDeepSeekThinking in client/factory.go.
-		return m != "deepseek-chat"
+		return true
 	}
 	return false
 }

@@ -46,7 +46,7 @@ type SubAgentState struct {
 
 // SubAgentIdleThreshold is the quiet window after which a running sub-agent
 // is considered "idle" — no tool calls observed in that window. Tuned long
-// enough to ignore normal thinking pauses (Kimi thinking + generate can be
+// enough to ignore normal thinking pauses (the model thinking + generate can be
 // 30-60s) and short enough to flag genuine stalls before the full timeout.
 const SubAgentIdleThreshold = 2 * time.Minute
 

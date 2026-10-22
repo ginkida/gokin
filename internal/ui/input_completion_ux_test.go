@@ -525,7 +525,7 @@ func TestArgumentSuggestions_WideTerminalNavigationKeepsDropdown(t *testing.T) {
 	}
 	// And Enter still selects the highlighted provider.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if got := m.Value(); got != "/provider kimi" {
-		t.Fatalf("Enter after navigation inserted %q, want /provider kimi", got)
+	if got := m.Value(); got != "/provider ollama" {
+		t.Fatalf("Enter after navigation inserted %q, want /provider ollama", got)
 	}
 }

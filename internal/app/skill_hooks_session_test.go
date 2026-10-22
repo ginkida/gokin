@@ -117,7 +117,7 @@ func TestSwitchSessionSkillHooksClearOnlyAfterSuccessfulPublication(t *testing.T
 		t.Fatal(err)
 	}
 	registration.Commit()
-	foreign := saveSessionLeaseFixture(t, "hooks-foreign", "kimi", root, "foreign history")
+	foreign := saveSessionLeaseFixture(t, "hooks-foreign", "deepseek", root, "foreign history")
 	if _, err := application.SwitchSession(t.Context(), foreign, false); err == nil || len(tools.SkillHooks(registry)) != 1 {
 		t.Fatalf("rejected switch removed hooks: err=%v hooks=%d", err, len(tools.SkillHooks(registry)))
 	}

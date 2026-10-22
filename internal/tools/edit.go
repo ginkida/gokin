@@ -41,7 +41,7 @@ type EditTool struct {
 
 	// readTracker + requireReadBeforeEdit implement the "Read before Edit"
 	// safety invariant. When both are set, Execute refuses to edit a file
-	// that has no active read record in the session — a classic Kimi
+	// that has no active read record in the session — a classic the model
 	// failure mode: grep shows 3 lines of context, model edits blindly.
 	// Disabled by default in tests / minimal harnesses; enabled via config
 	// in the real app.
@@ -466,7 +466,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		}
 
 		if count > 1 && !replaceAll {
-			// Multi-match ambiguity. Kimi typically retries blindly here;
+			// Multi-match ambiguity. the model typically retries blindly here;
 			// give it enough structured info to pick precisely on the
 			// next attempt: line numbers + a few chars of surrounding
 			// context per match, plus an explicit reminder that line_start/

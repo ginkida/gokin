@@ -28,8 +28,8 @@ func TestAuxiliaryOverrideIsIsolatedAndKeepsFallbackTransports(t *testing.T) {
 	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.7")
 	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "")
 	primary, _ := NewAnthropicClient(AnthropicConfig{APIKey: "synthetic-key", BaseURL: "https://glm.example.test", Provider: "glm", Model: config.DefaultGLMModel})
-	secondary, _ := NewAnthropicClient(AnthropicConfig{APIKey: "synthetic-key", BaseURL: "https://kimi.example.test", Provider: "kimi", Model: "k3"})
-	fallback, err := NewFallbackClient([]Client{primary, secondary}, []string{"glm", "kimi"})
+	secondary, _ := NewAnthropicClient(AnthropicConfig{APIKey: "synthetic-key", BaseURL: "https://deepseek.example.test", Provider: "deepseek", Model: "deepseek-v4-pro"})
+	fallback, err := NewFallbackClient([]Client{primary, secondary}, []string{"glm", "deepseek"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestAuxiliaryOverrideIsIsolatedAndKeepsFallbackTransports(t *testing.T) {
 		t.Fatalf("wrong auxiliary choice: %T %v", clone, ok)
 	}
 	aux := clone.(*FallbackClient)
-	if aux.clients[1].GetModel() != "k3" || primary.GetModel() != config.DefaultGLMModel || secondary.GetModel() != "k3" {
+	if aux.clients[1].GetModel() != "deepseek-v4-pro" || primary.GetModel() != config.DefaultGLMModel || secondary.GetModel() != "deepseek-v4-pro" {
 		t.Fatal("override changed a foreground or fallback model")
 	}
 	if aux.clients[0].(*AnthropicClient).config.BaseURL != primary.config.BaseURL {

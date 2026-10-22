@@ -60,95 +60,21 @@ func newModelApp(active string, currentModel string) *fakeAppForModel {
 	}
 }
 
-// TestModelCommand_KimiExampleIsCurrent guards against regression: an
-// older iteration of the /model command advertised `k2.5` and
-// `k2-thinking-turbo` — models retired in v0.69 when Kimi Coding Plan
-// dropped to a single model (kimi-for-coding, K2.6). Users ran the
-// examples, got "unknown model" errors, and bounced. The current hint
-// must reference the live model.
-func TestModelCommand_KimiExampleIsCurrent(t *testing.T) {
-	app := newModelApp("kimi", "kimi-for-coding")
-	cmd := &ModelCommand{}
-	// Bare /model opens the interactive selector (marker); the textual list
-	// this test audits moved to `/model list` (v0.100.106).
-	if marker, err := cmd.Execute(context.Background(), nil, app); err != nil || marker != ModelSelectorMarker {
-		t.Fatalf("bare /model = (%q, %v), want the selector marker", marker, err)
-	}
-	out, err := cmd.Execute(context.Background(), []string{"list"}, app)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-
-	// Must mention the current model.
-	if !strings.Contains(out, "kimi-for-coding") {
-		t.Errorf("expected current Kimi model in output:\n%s", out)
-	}
-
-	// Must NOT advertise retired models.
-	for _, retired := range []string{"k2.5", "k2-thinking-turbo", "k2-turbo-preview"} {
-		if strings.Contains(out, retired) {
-			t.Errorf("retired Kimi model %q still advertised:\n%s", retired, out)
-		}
-	}
-
-	// Sanity: the output must reflect what client.AvailableModels
-	// actually registers for Kimi — otherwise we'd just lie to the user.
-	available := client.GetModelsForProvider("kimi")
-	if len(available) == 0 {
-		t.Fatal("no Kimi models registered in client package")
-	}
-	for _, m := range available {
-		if !strings.Contains(out, m.ID) {
-			t.Errorf("registered Kimi model %q missing from /model output:\n%s", m.ID, out)
-		}
-	}
-}
-
-// TestModelCommand_KimiRetiredAliasRejected: if someone types the old
-// alias, the command must say "unknown" rather than pretending to accept
-// it. Regression guard on the ambiguous-match / exact-match flow.
-func TestModelCommand_KimiRetiredAliasRejected(t *testing.T) {
-	app := newModelApp("kimi", "kimi-for-coding")
-	cmd := &ModelCommand{}
-	out, _ := cmd.Execute(context.Background(), []string{"k2.5"}, app)
-	if !strings.Contains(strings.ToLower(out), "unknown") {
-		t.Errorf("retired alias should be rejected as unknown:\n%s", out)
-	}
-	// Active model must not have been mutated.
-	if app.setter.model != "kimi-for-coding" {
-		t.Errorf("model was switched despite unknown alias: got %q", app.setter.model)
-	}
-}
-
 func TestModelCommand_ModelMatchingIsCaseInsensitive(t *testing.T) {
-	app := newModelApp("minimax", "MiniMax-M2.5")
+	app := newModelApp("deepseek", "deepseek-v4-flash")
 	cmd := &ModelCommand{}
-	out, err := cmd.Execute(context.Background(), []string{"m2.7"}, app)
+	out, err := cmd.Execute(context.Background(), []string{"DeepSeek-V4-Pro"}, app)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if !strings.Contains(out, "MiniMax-M2.7") {
-		t.Fatalf("expected switch output for MiniMax-M2.7, got:\n%s", out)
+	if !strings.Contains(out, "deepseek-v4-pro") {
+		t.Fatalf("expected switch output for deepseek-v4-pro, got:\n%s", out)
 	}
-	if app.setter.model != "MiniMax-M2.7" {
-		t.Fatalf("model = %q, want MiniMax-M2.7", app.setter.model)
+	if app.setter.model != "deepseek-v4-pro" {
+		t.Fatalf("model = %q, want deepseek-v4-pro", app.setter.model)
 	}
 	if app.clearCalls != 0 {
 		t.Fatalf("same-provider model switch cleared conversation")
-	}
-}
-
-func TestModelCommand_KimiSwitchWarnsAboutModelSpecificCache(t *testing.T) {
-	app := newModelApp("kimi", "kimi-for-coding")
-	out, err := (&ModelCommand{}).Execute(context.Background(), []string{"k3"}, app)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if !strings.Contains(out, "invalidates the prompt cache") || !strings.Contains(out, "/clear") {
-		t.Fatalf("Kimi switch did not explain the cache boundary:\n%s", out)
-	}
-	if app.clearCalls != 0 {
-		t.Fatalf("same-provider Kimi switch cleared conversation without consent")
 	}
 }
 
@@ -288,7 +214,7 @@ func TestMatchModelAcrossProviders_NoMatch(t *testing.T) {
 // appears in the rendered hint. Catches drift where a provider adds
 // models but the hint still points at retired IDs.
 func TestModelCommand_AllProviderHintsReferRealModels(t *testing.T) {
-	providers := []string{"kimi", "glm", "minimax"}
+	providers := []string{"deepseek", "glm", "glm"}
 	for _, p := range providers {
 		t.Run(p, func(t *testing.T) {
 			app := newModelApp(p, "")

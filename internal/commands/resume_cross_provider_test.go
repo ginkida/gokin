@@ -75,7 +75,7 @@ func saveFixtureSession(t *testing.T, id, provider, workDir string) *chat.Histor
 // history rules).
 func TestResumeCommand_RefusesCrossProviderRestore(t *testing.T) {
 	workDir := t.TempDir()
-	hm := saveFixtureSession(t, "old-session", "kimi", workDir)
+	hm := saveFixtureSession(t, "old-session", "glm", workDir)
 
 	currentSession := chat.NewSession()
 	currentSession.WorkDir = workDir
@@ -92,7 +92,7 @@ func TestResumeCommand_RefusesCrossProviderRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if !strings.Contains(msg, "kimi") || !strings.Contains(msg, "deepseek") {
+	if !strings.Contains(msg, "glm") || !strings.Contains(msg, "deepseek") {
 		t.Fatalf("message = %q, want it to name both providers", msg)
 	}
 	if !strings.Contains(msg, "--force") {
@@ -110,7 +110,7 @@ func TestResumeCommand_RefusesCrossProviderRestore(t *testing.T) {
 // workdir-mismatch --force escape hatch — a conscious override must still work.
 func TestResumeCommand_ForceBypassesCrossProviderGuard(t *testing.T) {
 	workDir := t.TempDir()
-	hm := saveFixtureSession(t, "old-session", "kimi", workDir)
+	hm := saveFixtureSession(t, "old-session", "glm", workDir)
 
 	currentSession := chat.NewSession()
 	currentSession.WorkDir = workDir

@@ -273,37 +273,3 @@ func TestSelectThinkingBudget_ExecutorLow(t *testing.T) {
 		t.Errorf("Executor score=3 = %d, want 4096", b)
 	}
 }
-
-// --- isStrongKimiCodingModel (88.9% → 100%) ---
-
-func TestIsStrongKimiCodingModel(t *testing.T) {
-	strong := []string{
-		"k3",
-		"k3-1m",
-		"kimi-k3",
-		"kimi-for-coding",
-		"kimi-for-coding-v2",
-		"kimi-k2.6",
-		"kimi-k2.7",
-		"kimi-k2.10",
-	}
-	for _, m := range strong {
-		if !isStrongKimiCodingModel(m) {
-			t.Errorf("isStrongKimiCodingModel(%q) = false, want true", m)
-		}
-	}
-	weak := []string{
-		"kimi-vision",
-		"gpt-4",
-		"claude-3",
-		"kimi-k2.5",    // minor < 6
-		"kimi-k2",      // no minor
-		"kimi-k2-0711", // dash not dot
-		"moonshot-v1-128k",
-	}
-	for _, m := range weak {
-		if isStrongKimiCodingModel(m) {
-			t.Errorf("isStrongKimiCodingModel(%q) = true, want false", m)
-		}
-	}
-}

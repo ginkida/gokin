@@ -8,7 +8,7 @@ import (
 func TestSmallFastModelOverridePriorityAndProvider(t *testing.T) {
 	for _, test := range []struct{ name, provider, current, gokin, haiku, legacy, want, problem string }{
 		{name: "glm-default", provider: "glm", current: DefaultGLMModel, want: GLMFlashModel},
-		{name: "other-provider", provider: "kimi", current: "k3", want: "k3"},
+		{name: "other-provider", provider: "deepseek", current: "deepseek-v4-pro", want: "deepseek-v4-pro"},
 		{name: "native-priority", provider: "glm", current: DefaultGLMModel, gokin: "glm-4.7", haiku: GLMFlashModel, legacy: "glm-5.2", want: "glm-4.7"},
 		{name: "compatibility-priority", provider: "glm", current: DefaultGLMModel, haiku: "glm-4.7", legacy: "glm-5.2", want: "glm-4.7"},
 		{name: "legacy", provider: "glm", current: DefaultGLMModel, legacy: "glm-5.2", want: "glm-5.2"},
@@ -48,5 +48,14 @@ func TestNormalizeHaikuUsesActiveProvider(t *testing.T) {
 	cfg.Model.Provider = "glm"
 	if err := NormalizeConfig(cfg); err != nil || cfg.Model.Name != "gateway-fast" || cfg.Model.Provider != "glm" {
 		t.Fatalf("alias was not normalized in memory: %+v %v", cfg.Model, err)
+	}
+}
+
+func TestRetiredDeepSeekModelsResolveToCurrentFlash(t *testing.T) {
+	for _, old := range []string{"deepseek-chat", "deepseek-reasoner"} {
+		model, err := ResolveModelAlias("deepseek", old, old)
+		if err != nil || model != "deepseek-flash" {
+			t.Fatalf("%s: model=%q err=%v", old, model, err)
+		}
 	}
 }

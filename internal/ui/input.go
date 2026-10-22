@@ -336,7 +336,7 @@ func DefaultCommands() []CommandInfo {
 			// Tab-complete options reflect the v0.65+ supported set —
 			// gemini/claude/gpt entries pre-v0.78.30 were stale references
 			// to providers removed during the v0.65 trim.
-			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"list", "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "k3", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
+			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"list", "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash", "ollama"}}},
 			Usage: "/model [name]"},
 		{Name: "clear", Description: "Clear conversation history", Category: "Session",
 			Args: []ArgInfo{{Name: "force", Required: false, Type: "option", Options: []string{"--force"}}}, Usage: "/clear [--force]"},

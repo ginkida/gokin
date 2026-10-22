@@ -31,7 +31,7 @@ func TestSupportsGLMThinking(t *testing.T) {
 		{"glm-4.7", true},
 		{"glm-4.6", false},
 		{"glm-4.5", false},
-		{"kimi-for-coding", false},
+		{"deepseek-v4-pro", false},
 		{"", false},
 	}
 	for _, tt := range tests {

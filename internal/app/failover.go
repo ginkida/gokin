@@ -24,7 +24,7 @@ var newClientForFailover = func(ctx context.Context, cfg *config.Config, modelID
 // NOTE: As of v0.69.4, this is no longer called automatically from the
 // message-processor retry loop. Auto-failover would quietly switch users
 // away from their chosen provider and surface errors from unrelated
-// providers ("GLM insufficient balance" while on kimi), which was more
+// providers ("GLM insufficient balance" while on deepseek), which was more
 // confusing than helpful. The function is retained for tests and for
 // potential future explicit triggers (e.g. a `/failover` slash command).
 // User-configured `model.fallback_providers` in config.yaml still works —

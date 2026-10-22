@@ -7,7 +7,7 @@ import (
 )
 
 // TestShortActiveProviderName pins the mapping from provider key to the
-// inline display label used in toast messages ("Kimi rate limit — resumes
+// inline display label used in toast messages ("DeepSeek rate limit — resumes
 // in 30s"). Raw keys like "glm" look wrong as sentence-starters, the full
 // DisplayName ("GLM (BigModel / Z.AI)") is too long for a status-bar
 // toast — we want the first word of DisplayName.
@@ -17,9 +17,9 @@ func TestShortActiveProviderName(t *testing.T) {
 		active string
 		want   string
 	}{
-		{"kimi_full_provider", "kimi", "Kimi"},
+		{"deepseek_full_provider", "deepseek", "DeepSeek"},
 		{"glm_abbrev_provider", "glm", "GLM"},
-		{"minimax_single_word", "minimax", "MiniMax"},
+		{"glm_single_word", "glm", "GLM"},
 		{"ollama_strips_parens", "ollama", "Ollama"},
 		// Empty ActiveProvider+Backend → GetActiveProvider defaults to
 		// "glm", so the label reflects that. This documents the chain

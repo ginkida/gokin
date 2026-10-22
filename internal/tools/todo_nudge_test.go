@@ -27,8 +27,8 @@ func TestShouldInjectTodoNudge_OnlyNudgeEligibleFamilies(t *testing.T) {
 	if shouldInjectTodoNudge("glm-5.1", []string{"read", "edit"}) {
 		t.Error("GLM should not get runtime todo nudge")
 	}
-	if !shouldInjectTodoNudge("kimi-for-coding", []string{"read", "edit"}) {
-		t.Error("Kimi should get todo nudge after multi-tool mutation without todo")
+	if !shouldInjectTodoNudge("deepseek-v4-pro", []string{"read", "edit"}) {
+		t.Error("DeepSeek should get todo nudge after multi-tool mutation without todo")
 	}
 }
 

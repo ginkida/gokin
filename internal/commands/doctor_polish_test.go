@@ -80,16 +80,16 @@ func TestDoctorCommandWarnsWhenExplicitPlanDeadlineClipsModelRound(t *testing.T)
 
 func TestDoctorCommandShowsWinningProviderTimeoutOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.API.ActiveProvider = "kimi"
-	cfg.API.Backend = "kimi"
+	cfg.API.ActiveProvider = "deepseek"
+	cfg.API.Backend = "deepseek"
 	cfg.API.Retry.HTTPTimeout = 90 * time.Second
 	cfg.API.Retry.StreamIdleTimeout = 45 * time.Second
 	cfg.API.Retry.Providers = map[string]config.ProviderRetryConfig{
-		"kimi": {HTTPTimeout: 7 * time.Minute, StreamIdleTimeout: 3 * time.Minute},
+		"deepseek": {HTTPTimeout: 7 * time.Minute, StreamIdleTimeout: 3 * time.Minute},
 	}
 
 	out := RenderDoctor(DoctorOptions{Config: cfg, WorkDir: t.TempDir()})
-	if !strings.Contains(out, "Provider watchdogs (kimi): first headers 7m0s · stream idle 3m0s") {
+	if !strings.Contains(out, "Provider watchdogs (deepseek): first headers 7m0s · stream idle 3m0s") {
 		t.Fatalf("doctor did not show winning provider override:\n%s", out)
 	}
 }
@@ -256,7 +256,7 @@ func TestDoctorCommandChecksActiveProviderAuthentication(t *testing.T) {
 		API: config.APIConfig{
 			ActiveProvider: "glm",
 			Backend:        "glm",
-			KimiKey:        "configured-for-a-different-provider",
+			DeepSeekKey:    "configured-for-a-different-provider",
 		},
 	}}
 	out, err = (&DoctorCommand{}).Execute(context.Background(), nil, wrongProviderKey)

@@ -8,7 +8,7 @@ import (
 
 // sanitizeToolPairs removes orphaned FunctionCall/FunctionResponse parts from history.
 // A FunctionCall without a matching FunctionResponse (or vice versa) causes API errors
-// such as MiniMax 400 "tool result's tool id not found". This is a last-defense sanitizer
+// such as a 400 "tool result's tool id not found". This is a last-defense sanitizer
 // called before history conversion in the Anthropic client.
 func sanitizeToolPairs(history []*genai.Content) []*genai.Content {
 	return sanitizeToolPairsWithPendingResults(history, nil)

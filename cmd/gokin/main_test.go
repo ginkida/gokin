@@ -47,7 +47,7 @@ func TestFlashDefaultPreservesModelSelection(t *testing.T) {
 		{"provider-only", "model: {provider: glm}", "", "glm-5.3-flash"},
 		{"saved-flagship", "model: {provider: glm, name: glm-5.3, max_output_tokens: 131072}", "", "glm-5.3"},
 		{"runtime-flagship", "{}", "glm-5.3", "glm-5.3"},
-		{"saved-other-provider", "api: {active_provider: kimi}\nmodel: {provider: kimi, name: k3}", "", "k3"},
+		{"saved-other-provider", "api: {active_provider: deepseek}\nmodel: {provider: deepseek, name: deepseek-v4-pro}", "", "deepseek-v4-pro"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -373,15 +373,15 @@ func TestApplyRuntimeOverrides_ProviderAndModelUsesExplicitModel(t *testing.T) {
 func TestApplyRuntimeOverrides_ModelOnlyDetectsProvider(t *testing.T) {
 	cfg := config.DefaultConfig()
 
-	if err := applyRuntimeOverrides(cfg, "", "MiniMax-M2.7"); err != nil {
+	if err := applyRuntimeOverrides(cfg, "", "deepseek-v4-pro"); err != nil {
 		t.Fatalf("applyRuntimeOverrides() error = %v", err)
 	}
 
-	if cfg.API.ActiveProvider != "minimax" || cfg.API.Backend != "minimax" || cfg.Model.Provider != "minimax" {
+	if cfg.API.ActiveProvider != "deepseek" || cfg.API.Backend != "deepseek" || cfg.Model.Provider != "deepseek" {
 		t.Fatalf("provider not detected from model: api=%q backend=%q model.provider=%q", cfg.API.ActiveProvider, cfg.API.Backend, cfg.Model.Provider)
 	}
-	if cfg.Model.Name != "MiniMax-M2.7" {
-		t.Fatalf("model name = %q, want MiniMax-M2.7", cfg.Model.Name)
+	if cfg.Model.Name != "deepseek-v4-pro" {
+		t.Fatalf("model name = %q, want deepseek-v4-pro", cfg.Model.Name)
 	}
 }
 

@@ -123,7 +123,7 @@ func TestExecutorExecuteLoop_EmptyResponseAfterToolResultsIsRetryableError(t *te
 	}
 
 	cl := &scriptedExecutorClient{
-		model: "kimi-for-coding",
+		model: "deepseek-v4-pro",
 		responses: []*client.StreamingResponse{
 			buildExecutorTestReadStream("r0"),
 			buildExecutorTestEmptyStream(),
@@ -146,7 +146,7 @@ func TestExecutorExecuteLoop_EmptyResponseAfterToolResultsIsRetryableError(t *te
 	}
 }
 
-func TestExecutorExecuteLoop_KimiRepeatedReadUsesRecoveryHint(t *testing.T) {
+func TestExecutorExecuteLoop_DeepSeekRepeatedReadUsesRecoveryHint(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -154,7 +154,7 @@ func TestExecutorExecuteLoop_KimiRepeatedReadUsesRecoveryHint(t *testing.T) {
 	}
 
 	cl := &scriptedExecutorClient{
-		model: "kimi-for-coding",
+		model: "deepseek-v4-pro",
 		responses: []*client.StreamingResponse{
 			buildExecutorTestReadStream("r0"),
 			buildExecutorTestReadStream("r1"),
@@ -196,10 +196,10 @@ func TestExecutorExecuteLoop_KimiRepeatedReadUsesRecoveryHint(t *testing.T) {
 	}
 }
 
-// Read-loop recovery is model-agnostic (v0.86.7): a non-Kimi model that re-reads
-// the same range gets the same loop-break hint Kimi already got, instead of the
+// Read-loop recovery is model-agnostic (v0.86.7): a non-DeepSeek model that re-reads
+// the same range gets the same loop-break hint DeepSeek already got, instead of the
 // turn-killing hard abort that used to fire for every other provider.
-func TestExecutorExecuteLoop_NonKimiRepeatedReadRecovers(t *testing.T) {
+func TestExecutorExecuteLoop_NonDeepSeekRepeatedReadRecovers(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}
 	if err := registry.Register(readTool); err != nil {
@@ -223,7 +223,7 @@ func TestExecutorExecuteLoop_NonKimiRepeatedReadRecovers(t *testing.T) {
 
 	_, finalText, err := exec.Execute(context.Background(), nil, "inspect project.go")
 	if err != nil {
-		t.Fatalf("Execute() error = %v, want graceful recovery (no abort) for non-Kimi read loop", err)
+		t.Fatalf("Execute() error = %v, want graceful recovery (no abort) for non-DeepSeek read loop", err)
 	}
 	if finalText != "Recovered after loop guard." {
 		t.Fatalf("finalText = %q, want %q", finalText, "Recovered after loop guard.")
@@ -289,7 +289,7 @@ func TestExecutorExecuteLoop_RepeatedReadGracefulStopAfterRecoveryBudget(t *test
 	}
 }
 
-func TestExecutorExecuteLoop_KimiRepeatedSearchUsesRecoveryHint(t *testing.T) {
+func TestExecutorExecuteLoop_DeepSeekRepeatedSearchUsesRecoveryHint(t *testing.T) {
 	tests := []struct {
 		name         string
 		toolName     string
@@ -322,7 +322,7 @@ func TestExecutorExecuteLoop_KimiRepeatedSearchUsesRecoveryHint(t *testing.T) {
 			}
 
 			cl := &scriptedExecutorClient{
-				model: "kimi-for-coding",
+				model: "deepseek-v4-pro",
 				responses: []*client.StreamingResponse{
 					tt.stream("r0"),
 					tt.stream("r1"),
@@ -362,7 +362,7 @@ func TestExecutorExecuteLoop_KimiRepeatedSearchUsesRecoveryHint(t *testing.T) {
 	}
 }
 
-func TestExecutorExecuteLoop_KimiInjectsWorkingMemoryAfterExploration(t *testing.T) {
+func TestExecutorExecuteLoop_DeepSeekInjectsWorkingMemoryAfterExploration(t *testing.T) {
 	registry := NewRegistry()
 	tool := &scriptedStaticTool{
 		name:    "grep",
@@ -373,7 +373,7 @@ func TestExecutorExecuteLoop_KimiInjectsWorkingMemoryAfterExploration(t *testing
 	}
 
 	cl := &scriptedExecutorClient{
-		model: "kimi-for-coding",
+		model: "deepseek-v4-pro",
 		responses: []*client.StreamingResponse{
 			buildExecutorTestGrepStream("g0"),
 			buildExecutorTestTextStream("Summarized the findings."),
@@ -398,8 +398,8 @@ func TestExecutorExecuteLoop_KimiInjectsWorkingMemoryAfterExploration(t *testing
 		t.Fatalf("function results = %+v, want one result batch", cl.functionResults)
 	}
 	resultContent, _ := cl.functionResults[0][0].Response["content"].(string)
-	if !strings.Contains(resultContent, "[Kimi working memory]") {
-		t.Fatalf("result content = %q, want Kimi working memory scaffold", resultContent)
+	if !strings.Contains(resultContent, "[Working memory]") {
+		t.Fatalf("result content = %q, want DeepSeek working memory scaffold", resultContent)
 	}
 	if !strings.Contains(resultContent, `grep "loop guard" in internal/tools ->`) {
 		t.Fatalf("result content = %q, want summarized grep target", resultContent)
@@ -409,12 +409,12 @@ func TestExecutorExecuteLoop_KimiInjectsWorkingMemoryAfterExploration(t *testing
 	}
 
 	historyText := strings.Join(cl.functionHistory[0], "\n")
-	if strings.Contains(historyText, "[Kimi working memory]") {
+	if strings.Contains(historyText, "[Working memory]") {
 		t.Fatalf("history = %q, notification must not be inserted before tool results", historyText)
 	}
 }
 
-func TestExecutorExecuteLoop_NonKimiSkipsWorkingMemoryScaffold(t *testing.T) {
+func TestExecutorExecuteLoop_NonDeepSeekSkipsWorkingMemoryScaffold(t *testing.T) {
 	registry := NewRegistry()
 	tool := &scriptedStaticTool{
 		name:    "grep",
@@ -444,8 +444,8 @@ func TestExecutorExecuteLoop_NonKimiSkipsWorkingMemoryScaffold(t *testing.T) {
 	}
 
 	historyText := strings.Join(cl.functionHistory[0], "\n")
-	if strings.Contains(historyText, "[Kimi working memory]") {
-		t.Fatalf("history = %q, want no Kimi scaffold for non-Kimi model", historyText)
+	if strings.Contains(historyText, "[Working memory]") {
+		t.Fatalf("history = %q, want no DeepSeek scaffold for non-DeepSeek model", historyText)
 	}
 }
 

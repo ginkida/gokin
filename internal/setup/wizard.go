@@ -35,7 +35,7 @@ const (
 %s╔══════════════════════════════════════════════════════════════════════════╗
 ║                                                                          ║
 ║                            %sWelcome to Gokin!%s                             ║
-║         AI assistant: GLM, MiniMax, Kimi, DeepSeek & Ollama              ║
+║         AI assistant: GLM, DeepSeek & Ollama                           ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝%s
 
@@ -66,7 +66,7 @@ func buildSetupChoices() []setupChoice {
 	// then the other cloud providers, then Ollama. Registry order stays untouched
 	// for programmatic callers; the wizard is UI-only.
 	ordered := make([]config.ProviderDef, 0, len(config.Providers))
-	priority := []string{"glm", "kimi", "deepseek", "minimax", "ollama"}
+	priority := []string{"glm", "deepseek", "ollama"}
 	seen := map[string]bool{}
 	for _, name := range priority {
 		if p := config.GetProvider(name); p != nil {
@@ -107,26 +107,6 @@ func buildSetupChoices() []setupChoice {
 		// `case "anthropic"` removed in v0.84.7. Anthropic native was deleted
 		// from the provider registry in v0.65; the case here never fired
 		// because `ordered` only iterates over real registry entries.
-		case "minimax":
-			choices = append(choices, setupChoice{
-				Action: "api:" + p.Name,
-				Title:  "MiniMax (Cloud)",
-				Lines: []string{
-					"MiniMax M2.7: 200K context, M2.7-highspeed available",
-					"Anthropic-compatible API",
-					"Get key at: " + p.SetupKeyURL,
-				},
-			})
-		case "kimi":
-			choices = append(choices, setupChoice{
-				Action: "api:" + p.Name,
-				Title:  "Kimi Coding Plan",
-				Lines: []string{
-					"K2.6 model, 262K context, extended thinking",
-					"Anthropic-compatible via api.kimi.com/coding",
-					"Get key at: " + p.SetupKeyURL,
-				},
-			})
 		case "ollama":
 			choices = append(choices, setupChoice{
 				Action: "ollama",
@@ -352,8 +332,6 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 	switch backend {
 	case "glm":
 		fmt.Printf("  %sEndpoint:%s Z.ai Coding Plan\n", colorYellow, colorReset)
-	case "kimi":
-		fmt.Printf("  %sEndpoint:%s Kimi Coding Plan (api.kimi.com/coding)\n", colorYellow, colorReset)
 	case "deepseek":
 		fmt.Printf("  %sEndpoint:%s DeepSeek (api.deepseek.com/anthropic)\n", colorYellow, colorReset)
 	}
@@ -372,9 +350,9 @@ func setupAPIKey(reader *bufio.Reader, backend string) error {
 // sections, and write atomically. If no config file exists yet, we start
 // from an empty tree.
 //
-// The key is written to the provider-specific field (glm_key, kimi_key, …).
-// We deliberately do NOT touch the legacy api.api_key field so that users
-// with a custom api_key keep it for other purposes.
+// The key is written to the provider-specific field (glm_key, deepseek_key, …).
+// The legacy api.api_key field is preserved unless the saved configuration
+// belongs to a removed provider.
 func saveProviderConfig(backend, apiKey, modelName string) (string, error) {
 	p := config.GetProvider(backend)
 	if p == nil {
@@ -391,13 +369,14 @@ func saveProviderConfig(backend, apiKey, modelName string) (string, error) {
 
 	if err := updateRawConfig(configPath, func(root map[string]any) {
 		api := ensureMap(root, "api")
-		// Write to the provider-specific key field (glm_key / kimi_key / minimax_key).
+		model := ensureMap(root, "model")
+		config.DiscardRemovedProviderSettings(api, model)
+		// Write to the provider-specific key field (glm_key / deepseek_key).
 		keyField := backend + "_key"
 		api[keyField] = apiKey
 		api["active_provider"] = backend
 		api["backend"] = backend // keep legacy alias in sync for older readers
 
-		model := ensureMap(root, "model")
 		model["provider"] = backend
 		model["name"] = modelName
 	}); err != nil {
@@ -409,7 +388,7 @@ func saveProviderConfig(backend, apiKey, modelName string) (string, error) {
 // saveOllamaConfig persists an Ollama setup (local or cloud) while preserving
 // every other field already in config.yaml. Earlier wizard code used raw
 // os.WriteFile with a hand-built YAML literal, which silently wiped every
-// non-Ollama key (GLM/Kimi/MiniMax/DeepSeek keys, MCP servers, aliases, …)
+// non-Ollama key (GLM/DeepSeek keys, MCP servers, aliases, …)
 // the user had configured before running `gokin --setup` and picking Ollama.
 //
 // apiKey is optional — only the Cloud variant collects one, Local mode leaves
@@ -428,6 +407,8 @@ func saveOllamaConfig(apiKey, modelName, serverURL string) (string, error) {
 
 	if err := updateRawConfig(configPath, func(root map[string]any) {
 		api := ensureMap(root, "api")
+		model := ensureMap(root, "model")
+		config.DiscardRemovedProviderSettings(api, model)
 		api["active_provider"] = "ollama"
 		api["backend"] = "ollama"
 		// Reset ollama-specific fields before applying the current mode. Without
@@ -443,7 +424,6 @@ func saveOllamaConfig(apiKey, modelName, serverURL string) (string, error) {
 			api["ollama_base_url"] = serverURL
 		}
 
-		model := ensureMap(root, "model")
 		model["provider"] = "ollama"
 		model["name"] = modelName
 	}); err != nil {

@@ -16,8 +16,7 @@ func TestGetModelProfile_ExactMatch(t *testing.T) {
 		{"glm-5.2", "glm", 1000000, true}, // 1M context (Z.AI, Jun 2026)
 		{"glm-5.1", "glm", 200000, true},
 		{"glm-5", "glm", 200000, true},
-		{"kimi-for-coding", "kimi", 262144, true},
-		{"minimax-m2.5", "minimax", 204800, true},
+
 		{"deepseek-v4-pro", "deepseek", 1000000, true},
 		{"deepseek-v4-flash", "deepseek", 1000000, true},
 		{"deepseek-chat", "deepseek", 1000000, true},
@@ -117,9 +116,7 @@ func TestGetModelProfile_Unknown(t *testing.T) {
 func TestGetModelProfile_IsCoding(t *testing.T) {
 	codingModels := []string{
 		"qwen2.5-coder", "codellama", "starcoder2",
-		"glm-5", "glm-4.7", "kimi-for-coding", "kimi-k2.6",
-		"minimax-m2.7", "minimax-m2.5",
-		"deepseek-v4-pro", "deepseek-v4-flash", "deepseek-reasoner",
+		"glm-5", "glm-4.7", "deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-reasoner",
 	}
 	for _, m := range codingModels {
 		p := GetModelProfile(m)

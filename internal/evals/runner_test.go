@@ -187,7 +187,7 @@ func TestRun_ProviderMatrixExpandsScenarios(t *testing.T) {
 		ManifestPath: manifestPath,
 		FixturesRoot: fixturesRoot,
 		WorkRoot:     filepath.Join(root, "work"),
-		Providers:    []string{"kimi", "glm"},
+		Providers:    []string{"deepseek", "glm"},
 		DryRun:       true,
 	})
 	if err != nil {
@@ -196,16 +196,16 @@ func TestRun_ProviderMatrixExpandsScenarios(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("results = %d, want 2", len(results))
 	}
-	if results[0].Provider != "kimi" || results[1].Provider != "glm" {
-		t.Fatalf("providers = %q, %q; want kimi, glm", results[0].Provider, results[1].Provider)
+	if results[0].Provider != "deepseek" || results[1].Provider != "glm" {
+		t.Fatalf("providers = %q, %q; want deepseek, glm", results[0].Provider, results[1].Provider)
 	}
-	if results[0].Metadata["provider"] != "kimi" || results[1].Metadata["provider"] != "glm" {
+	if results[0].Metadata["provider"] != "deepseek" || results[1].Metadata["provider"] != "glm" {
 		t.Fatalf("metadata providers = %+v, %+v", results[0].Metadata, results[1].Metadata)
 	}
 	if results[0].EngineMode != "auto" || results[0].Metadata["engine_mode"] != "auto" {
 		t.Fatalf("default engine provenance = result %q metadata %+v", results[0].EngineMode, results[0].Metadata)
 	}
-	if !strings.HasSuffix(filepath.ToSlash(results[0].Workspace), "/sample/kimi-engine-auto") {
+	if !strings.HasSuffix(filepath.ToSlash(results[0].Workspace), "/sample/deepseek-engine-auto") {
 		t.Fatalf("workspace = %q, want provider-specific suffix", results[0].Workspace)
 	}
 }

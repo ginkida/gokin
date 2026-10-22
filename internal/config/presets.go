@@ -31,9 +31,9 @@ var ModelPresets = map[string]ModelPreset{
 		MaxOutputTokens: 65536,
 	},
 	"creative": {
-		Provider:        "minimax",
-		Name:            "MiniMax-M2.7",
-		Temperature:     0.7,
+		Provider:        "glm",
+		Name:            DefaultGLMModel,
+		Temperature:     1.0,
 		MaxOutputTokens: 16384,
 	},
 	"glm": {
@@ -41,18 +41,6 @@ var ModelPresets = map[string]ModelPreset{
 		Name:            DefaultGLMModel,
 		Temperature:     1.0,
 		MaxOutputTokens: 131072,
-	},
-	"kimi": {
-		Provider:        "kimi",
-		Name:            "k3",
-		Temperature:     0.6,
-		MaxOutputTokens: 65536,
-	},
-	"minimax": {
-		Provider:        "minimax",
-		Name:            "MiniMax-M2.7",
-		Temperature:     0.7,
-		MaxOutputTokens: 16384,
 	},
 	"deepseek": {
 		Provider:        "deepseek",
@@ -104,7 +92,7 @@ func ListPresets() []string {
 // provider-appropriate output cap and model name.
 func providerDefaultPreset(provider string) string {
 	switch provider {
-	case "glm", "kimi", "minimax", "deepseek", "ollama":
+	case "glm", "deepseek", "ollama":
 		return provider
 	}
 	return ""
@@ -118,7 +106,7 @@ func looksLikeDefaultModelConfig(m *ModelConfig) bool {
 	if m == nil {
 		return false
 	}
-	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "glm-5.2" || m.Name == DefaultGLMModel || m.Name == "kimi-for-coding" || m.Name == "k3"
+	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "glm-5.2" || m.Name == DefaultGLMModel
 	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 131072
 	return defaultName && defaultMax
 }

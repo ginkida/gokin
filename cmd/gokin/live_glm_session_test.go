@@ -66,7 +66,7 @@ mcp: {enabled: false}
 	}
 	environment := append(os.Environ(),
 		"GOKIN_GLM_KEY="+credential.Value,
-		"GOKIN_API_KEY=", "GLM_API_KEY=", "GOKIN_KIMI_KEY=", "GOKIN_DEEPSEEK_KEY=",
+		"GOKIN_API_KEY=", "GLM_API_KEY=", "GOKIN_DEEPSEEK_KEY=", "GOKIN_DEEPSEEK_KEY=",
 		"GOKIN_MODEL=", "GOKIN_BACKEND=", "GOKIN_ENGINE_MODE=tools",
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"),
 		"XDG_DATA_HOME="+filepath.Join(root, "data"),

@@ -86,7 +86,7 @@ func TestExecutorExecuteLoop_IdenticalMemoryLoopGracefulStop(t *testing.T) {
 			FinishReason:  genai.FinishReasonStop,
 		}))
 	}
-	cl := &scriptedExecutorClient{model: "k3", responses: responses}
+	cl := &scriptedExecutorClient{model: "deepseek-v4-pro", responses: responses}
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false
@@ -133,7 +133,7 @@ func TestExecutorExecuteLoop_IdenticalWriteLoopStillHardAborts(t *testing.T) {
 			FinishReason:  genai.FinishReasonStop,
 		}))
 	}
-	cl := &scriptedExecutorClient{model: "k3", responses: responses}
+	cl := &scriptedExecutorClient{model: "deepseek-v4-pro", responses: responses}
 
 	exec := NewExecutor(registry, cl, time.Second)
 	exec.preFlightChecks = false

@@ -17,11 +17,11 @@ func TestNormalizeConfigRejectsUnknownFallbackProvider(t *testing.T) {
 
 func TestNormalizeConfigNormalizesAndDeduplicatesFallbackProviders(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Model.FallbackProviders = []string{" KIMI ", "kimi", "MiniMax", ""}
+	cfg.Model.FallbackProviders = []string{" DEEPSEEK ", "deepseek", "GLM", ""}
 	if err := NormalizeConfig(cfg); err != nil {
 		t.Fatalf("NormalizeConfig: %v", err)
 	}
-	want := []string{"kimi", "minimax"}
+	want := []string{"deepseek", "glm"}
 	if !reflect.DeepEqual(cfg.Model.FallbackProviders, want) {
 		t.Fatalf("fallback providers = %v, want %v", cfg.Model.FallbackProviders, want)
 	}

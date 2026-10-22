@@ -11,7 +11,7 @@ func TestHandleTaskStarted_RendersTimelineHeader(t *testing.T) {
 
 	m.handleTaskStarted(TaskStartedEvent{
 		TaskID:   "task-1",
-		Message:  "Inspect retry behavior around Kimi idle phases",
+		Message:  "Inspect retry behavior around DeepSeek idle phases",
 		PlanType: "explorer",
 	})
 
@@ -19,7 +19,7 @@ func TestHandleTaskStarted_RendersTimelineHeader(t *testing.T) {
 	for _, want := range []string{
 		"Subtask 1",
 		"Explorer",
-		"Inspect retry behavior around Kimi idle phases",
+		"Inspect retry behavior around DeepSeek idle phases",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("timeline header missing %q:\n%s", want, rendered)

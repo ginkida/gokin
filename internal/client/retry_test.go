@@ -35,8 +35,8 @@ func TestAnthropicZeroLocalRetryBudgetReturnsHonestRootFailure(t *testing.T) {
 	transport := &retryableFailureRoundTripper{}
 	c := &AnthropicClient{
 		config: AnthropicConfig{
-			Model: "k3", BaseURL: "https://api.kimi.invalid", APIKey: "test",
-			Provider: "kimi", MaxRetries: 0, HTTPTimeout: 5 * time.Minute,
+			Model: "deepseek-v4-pro", BaseURL: "https://api.deepseek.invalid", APIKey: "test",
+			Provider: "deepseek", MaxRetries: 0, HTTPTimeout: 5 * time.Minute,
 		},
 		httpClient: &http.Client{Transport: transport},
 	}
@@ -119,24 +119,8 @@ func TestAdaptiveStreamRetryPolicyUnhealthy(t *testing.T) {
 	}
 }
 
-func TestAdaptiveStreamRetryPolicyKimiDefaults(t *testing.T) {
-	policy := AdaptiveStreamRetryPolicy("kimi")
-	if policy.MaxRetries < 3 {
-		t.Errorf("kimi MaxRetries = %d, want >= 3", policy.MaxRetries)
-	}
-	if policy.MaxPartialRetries < 2 {
-		t.Errorf("kimi MaxPartialRetries = %d, want >= 2", policy.MaxPartialRetries)
-	}
-	if policy.BaseDelay < 3*time.Second {
-		t.Errorf("kimi BaseDelay = %v, want >= 3s", policy.BaseDelay)
-	}
-	if policy.MaxDelay < 45*time.Second {
-		t.Errorf("kimi MaxDelay = %v, want >= 45s", policy.MaxDelay)
-	}
-}
-
 // TestAdaptiveStreamRetryPolicyGLMDefaults pins that GLM — the default provider,
-// which stalls mid-stream the same way kimi does ("stream idle after partial
+// which stalls mid-stream the same way deepseek does ("stream idle after partial
 // response") — gets the same extra cold + partial retry budget.
 func TestAdaptiveStreamRetryPolicyGLMDefaults(t *testing.T) {
 	policy := AdaptiveStreamRetryPolicy("glm")
@@ -144,7 +128,7 @@ func TestAdaptiveStreamRetryPolicyGLMDefaults(t *testing.T) {
 		t.Errorf("glm MaxRetries = %d, want >= 3", policy.MaxRetries)
 	}
 	if policy.MaxPartialRetries < 2 {
-		t.Errorf("glm MaxPartialRetries = %d, want >= 2 (GLM stalls mid-stream like kimi)", policy.MaxPartialRetries)
+		t.Errorf("glm MaxPartialRetries = %d, want >= 2 (GLM stalls mid-stream like deepseek)", policy.MaxPartialRetries)
 	}
 }
 

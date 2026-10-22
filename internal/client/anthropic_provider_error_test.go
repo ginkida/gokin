@@ -13,8 +13,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// A standard Anthropic-compatible SSE error event (used by deepseek/kimi/
-// minimax, not just GLM) must NOT be routed through classifyGLMErrorCode —
+// A standard Anthropic-compatible SSE error event (used by DeepSeek, not just GLM) must NOT be routed through classifyGLMErrorCode —
 // that function only understands GLM's numeric "code" field and silently
 // drops the standard "type" field (e.g. "overloaded_error") into its
 // "unknown code" fallback, discarding the very keyword IsOverloadError and

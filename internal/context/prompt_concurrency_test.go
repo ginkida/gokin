@@ -33,7 +33,7 @@ func TestPromptBuilderConcurrentBuildAndInvalidation(t *testing.T) {
 		b.SetLastMessage("fix the race")
 	})
 	run(func(i int) {
-		b.SetProvider([]string{"glm", "kimi"}[i%2])
+		b.SetProvider([]string{"glm", "deepseek"}[i%2])
 		b.SetPrefixCachingEnabled(i%2 == 0)
 		b.SetPlanMode(i%2 == 0)
 	})

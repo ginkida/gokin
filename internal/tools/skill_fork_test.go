@@ -160,7 +160,7 @@ func TestForkSkillInheritUsesInvokingClientInsteadOfRunnerDefault(t *testing.T) 
 }
 
 func TestForkSkillUnsupportedModelSettingsNeverExecuteDynamicContext(t *testing.T) {
-	for _, fields := range []string{"model: nonexistent", "model: MiniMax-M2.7", "model: glm-4.7\neffort: high"} {
+	for _, fields := range []string{"model: nonexistent", "model: deepseek-v4-pro", "model: glm-4.7\neffort: high"} {
 		t.Run(strings.ReplaceAll(fields, "\n", " "), func(t *testing.T) {
 			executor, skill, _, runner, root := forkSkillExecutor(t, "background: false\n"+fields+"\nallowed-tools: Bash", "!`printf x > should-not-exist`\nReview code.")
 			result, err := executor.InvokeTool(t.Context(), "skill", map[string]any{"name": "review"})

@@ -30,7 +30,7 @@ func TestHandlerParse(t *testing.T) {
 			true,
 			[]string{"reviewer", "code reviewer", "--tools", "read, grep", "--prompt", "be careful"},
 		},
-		{`/login kimi "sk-kimi-with spaces"`, "login", true, []string{"kimi", "sk-kimi-with spaces"}},
+		{`/login deepseek "sk-deepseek-with spaces"`, "login", true, []string{"deepseek", "sk-deepseek-with spaces"}},
 		{`/help "unterminated topic`, "help", true, []string{"unterminated topic"}},
 		{`/help ""`, "help", true, []string{""}},
 		{`/help "say \"hello\""`, "help", true, []string{`say "hello"`}},

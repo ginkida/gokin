@@ -52,6 +52,15 @@ func SmallFastModel(provider, current string) (string, error) {
 }
 
 func ResolveModelAlias(provider, current, selection string) (string, error) {
+	if removedModel(selection, provider) {
+		return "", fmt.Errorf("model %q belongs to a removed provider (supported: %s)", selection, strings.Join(ProviderNames(), ", "))
+	}
+	if provider == "deepseek" {
+		switch strings.ToLower(strings.TrimSpace(selection)) {
+		case "deepseek-chat", "deepseek-reasoner":
+			return "deepseek-flash", nil
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(selection), "haiku") {
 		return SmallFastModel(provider, current)
 	}

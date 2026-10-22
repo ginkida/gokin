@@ -30,8 +30,6 @@ func TestGetModelLimits_ExactMatch(t *testing.T) {
 		{"glm-5", 200000, 131072},
 		{"glm-4.7", 128000, 131072},
 		{"glm-4.5-air", 128000, 32768},
-		{"minimax", 204800, 16384},
-		{"kimi", 262144, 32768},
 	}
 
 	for _, tt := range tests {
@@ -108,8 +106,6 @@ func TestGetPricing_KnownModels(t *testing.T) {
 		{"glm-5.2", 1.40, 4.40},
 		{"glm-5.1", 1.40, 4.40},
 		{"glm-5", 1.00, 3.20},
-		{"kimi-for-coding", 0.95, 4.00},
-		{"MiniMax-M2.7", 0.30, 1.20},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -133,20 +129,18 @@ func TestGetPricing_KnownModels(t *testing.T) {
 // KnownModels only checks raw map entries, never the function). The highspeed
 // variants are the load-bearing case: case-insensitive matching must let them
 // hit their specific entry rather than silently falling back to the cheaper
-// bare "minimax" price, which would understate /cost.
+// bare "glm" price, which would understate /cost.
 func TestGetPricing_Resolution(t *testing.T) {
 	cases := []struct {
 		model      string
 		wantInput  float64
 		wantOutput float64
 	}{
-		{"MiniMax-M2.7-highspeed", 0.60, 2.40}, // specific, NOT the 0.30 "minimax" fallback
-		{"minimax-m2.7-highspeed", 0.60, 2.40}, // case-insensitive resolves the same
-		{"MiniMax-M2.7", 0.30, 1.20},           // base variant
-		{"deepseek-v4-pro-2026", 0.435, 0.87},  // suffix variant → longest key, not bare "deepseek"
-		{"GLM-5.1", 1.40, 4.40},                // case-insensitive exact
-		{"glm-5-turbo", 0.70, 2.80},            // not the shorter "glm-5"
-		{"totally-unknown-model", 0.14, 0.28},  // flash default, NOT zero (silent under-report)
+
+		{"deepseek-v4-pro-2026", 1.32, 3.96},  // suffix variant → longest key, not bare "deepseek"
+		{"GLM-5.1", 1.40, 4.40},               // case-insensitive exact
+		{"glm-5-turbo", 0.70, 2.80},           // not the shorter "glm-5"
+		{"totally-unknown-model", 0.30, 1.20}, // flash default, NOT zero (silent under-report)
 	}
 	for _, c := range cases {
 		t.Run(c.model, func(t *testing.T) {
@@ -175,9 +169,9 @@ func TestDefaultPricingCount(t *testing.T) {
 //  1. Short-key wins: map iteration order caused "deepseek" (fallback) to
 //     match before "deepseek-v4-pro", returning wrong price. Fix: longest
 //     matching key wins.
-//  2. Case mismatch: keys like "MiniMax-M2.7" were compared without
+//  2. Case mismatch: keys like "deepseek-v4-pro" were compared without
 //     lowercasing, so the specific entry was never reached and the generic
-//     "minimax" fallback was returned instead. Fix: case-insensitive compare.
+//     "glm" fallback was returned instead. Fix: case-insensitive compare.
 func TestGetPricingFunction(t *testing.T) {
 	cases := []struct {
 		model      string
@@ -186,14 +180,14 @@ func TestGetPricingFunction(t *testing.T) {
 		desc       string
 	}{
 		// Specific DeepSeek models must not match the shorter "deepseek" fallback.
-		{"deepseek-v4-pro", 0.435, 0.87, "deepseek-v4-pro beats deepseek fallback"},
-		{"deepseek-v4-flash", 0.14, 0.28, "deepseek-v4-flash beats deepseek fallback"},
-		// MiniMax mixed-case key must match case-insensitively.
-		{"MiniMax-M2.7", 0.30, 1.20, "MiniMax-M2.7 case-insensitive match"},
+		{"deepseek-v4-pro", 1.32, 3.96, "deepseek-v4-pro beats deepseek fallback"},
+		{"deepseek-v4-flash", 0.30, 1.20, "deepseek-v4-flash beats deepseek fallback"},
+		// Mixed-case model ID must match case-insensitively.
+
 		// "glm-5.1" must not match "glm-5" (a shorter substring).
 		{"glm-5.1", 1.40, 4.40, "glm-5.1 beats shorter glm-5 key"},
 		// Generic fallback should match for unknown model.
-		{"unknown-model-xyz", 0.14, 0.28, "unknown model gets flash-tier fallback"},
+		{"unknown-model-xyz", 0.30, 1.20, "unknown model gets flash-tier fallback"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -500,7 +494,7 @@ func TestHasKnownPricingDistinguishesFallbackEstimate(t *testing.T) {
 	}{
 		{model: "glm-5.2", want: true},
 		{model: "vendor/glm-5.2-latest", want: true},
-		{model: "MiniMax-M2.7-highspeed", want: true},
+
 		{model: "totally-unknown-model", want: false},
 		{model: "", want: false},
 	}
@@ -508,15 +502,6 @@ func TestHasKnownPricingDistinguishesFallbackEstimate(t *testing.T) {
 		if got := HasKnownPricing(tt.model); got != tt.want {
 			t.Errorf("HasKnownPricing(%q) = %v, want %v", tt.model, got, tt.want)
 		}
-	}
-}
-
-func TestCalculateCostWithCache_KimiUsesPublishedCacheRate(t *testing.T) {
-	tc := NewTokenCounter(nil, "kimi-for-coding", nil)
-	withoutCache := tc.CalculateCostWithCache(1_000_000, 0, 0)
-	withCache := tc.CalculateCostWithCache(1_000_000, 0, 1_000_000)
-	if withoutCache != 0.95 || withCache != 0.19 {
-		t.Fatalf("Kimi cost = cached %v / normal %v, want 0.19 / 0.95", withCache, withoutCache)
 	}
 }
 
@@ -579,7 +564,7 @@ func TestTokenCounter_SetClientPreservesConfiguredLimit(t *testing.T) {
 	})
 
 	second := testkit.NewMockClient()
-	second.SetModel("kimi-k2.6")
+	second.SetModel("deepseek-v4-pro")
 	tc.SetClient(second)
 	limits := tc.GetLimits()
 	if limits.MaxInputTokens != 50_000 {
@@ -759,7 +744,7 @@ func TestTokenCounter_ReadersRaceWithSetClient(t *testing.T) {
 		}
 	}()
 
-	models := []string{"glm-5.2", "deepseek-v4-pro", "kimi-k2.6", "MiniMax-M2.7"}
+	models := []string{"glm-5.2", "deepseek-v4-pro", "deepseek-v4-pro", "deepseek-v4-pro"}
 	for i := 0; i < 2000; i++ {
 		swap := testkit.NewMockClient()
 		swap.SetModel(models[i%len(models)])

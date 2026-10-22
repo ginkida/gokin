@@ -8,7 +8,7 @@ func TestGLMAlwaysOnReasoningModelBoundary(t *testing.T) {
 			t.Errorf("%q should require reasoning", model)
 		}
 	}
-	for _, model := range []string{"glm-5.2", "glm-5.30", "glm-5", "glm-4.7", "k3", ""} {
+	for _, model := range []string{"glm-5.2", "glm-5.30", "glm-5", "glm-4.7", "deepseek-v4-pro", ""} {
 		if GLMAlwaysOnReasoning(model) {
 			t.Errorf("%q must not inherit GLM-5.3 policy", model)
 		}

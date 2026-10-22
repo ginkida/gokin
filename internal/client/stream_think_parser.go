@@ -4,7 +4,7 @@ import "strings"
 
 // ThinkTagParser detects <think>...</think> tags in streaming text
 // and separates thinking content from regular text.
-// Many models (MiniMax, DeepSeek R1, QwQ, Qwen) embed chain-of-thought
+// Some models (DeepSeek R1, QwQ, Qwen) embed chain-of-thought
 // reasoning inside these tags within the normal text stream.
 type ThinkTagParser struct {
 	inThinkBlock bool

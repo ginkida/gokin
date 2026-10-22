@@ -192,8 +192,8 @@ func (p *ClientPool) GetOrCreate(
 //
 // This remains useful for explicitly evicting every cached variant after a
 // provider-level transition. Concretely:
-// `/login kimi <new-key>` persists the new key to config but, without this
-// method, ApplyConfig's call to client.NewClient finds the old Kimi client
+// `/login deepseek <new-key>` persists the new key to config but, without this
+// method, ApplyConfig's call to client.NewClient finds the old DeepSeek client
 // in the pool and returns it unchanged — requests then go out with the
 // stale key and 401. ApplyConfig calls this before NewClient to force a
 // fresh build.

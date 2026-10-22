@@ -40,7 +40,7 @@ type Session struct {
 	WorkDir   string
 	History   []*genai.Content
 	// Provider is the provider identifier the session was built against
-	// (e.g. "kimi", "deepseek", "glm"). Loaded from disk on resume and
+	// (e.g. "deepseek", "deepseek", "glm"). Loaded from disk on resume and
 	// compared against the active provider — if they differ, the session
 	// is dropped because thinking-block signatures and tool_use ID
 	// formats don't round-trip across providers. Empty for legacy
@@ -673,7 +673,7 @@ func (s *Session) GetWorkDir() string {
 
 // SetProvider records the provider identifier the session was built
 // against. Used by the auto-resume path to detect cross-provider
-// contamination — replaying a Kimi session's history to DeepSeek, for
+// contamination — replaying a GLM session's history to DeepSeek, for
 // instance, 400s because the thinking-block signature formats differ.
 func (s *Session) SetProvider(provider string) {
 	s.mu.Lock()

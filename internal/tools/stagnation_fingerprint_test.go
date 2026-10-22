@@ -18,7 +18,7 @@ func TestStagnationFingerprint_DistinguishesFilesForWriteEditDelete(t *testing.T
 }
 
 // TestStagnationFingerprint_ReadIncludesOffsetLimit pins the fix for the
-// false-positive that Kimi users hit: paging through a ~3000-line file in
+// false-positive that DeepSeek users hit: paging through a ~3000-line file in
 // 2000-line chunks produced the same fingerprint every time and tripped the
 // 5-repeat stagnation abort. The fix encodes offset+limit into the
 // fingerprint so forward progress through a file is visible.

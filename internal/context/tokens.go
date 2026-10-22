@@ -70,28 +70,7 @@ var DefaultModelLimits = map[string]TokenLimits{
 		MaxInputTokens:  128000,
 		MaxOutputTokens: 32768,
 	},
-	// MiniMax
-	"minimax": {
-		MaxInputTokens:  204800,
-		MaxOutputTokens: 16384,
-	},
-	// Kimi Coding Plan. K3 flagship = 1M window; K2.7 (kimi-for-coding*) =
-	// 256K. Per-model entries win over the "kimi" family fallback.
-	"k3": {
-		MaxInputTokens:  1048576,
-		MaxOutputTokens: 131072,
-	},
-	"kimi-for-coding": {
-		MaxInputTokens:  262144,
-		MaxOutputTokens: 32768,
-	},
-	"kimi": {
-		MaxInputTokens:  262144,
-		MaxOutputTokens: 32768,
-	},
-	// DeepSeek V4 — 1M input context, up to 384K output. Legacy
-	// deepseek-chat / deepseek-reasoner currently route to V4 Flash
-	// until their 2026-07-24 retirement.
+	// DeepSeek — 1M input context, up to 384K output.
 	"deepseek": {
 		MaxInputTokens:  1000000,
 		MaxOutputTokens: 384000,
@@ -128,29 +107,15 @@ var DefaultPricing = map[string]ModelPricing{
 	"glm-4.5-air":    {InputCostPer1M: 0.20, CachedInputCostPer1M: 0.03, OutputCostPer1M: 1.10},
 	"glm-4":          {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 
-	// MiniMax Pay-as-you-go pricing (USD / 1M tokens).
-	"MiniMax-M2.7":           {InputCostPer1M: 0.30, OutputCostPer1M: 1.20},
-	"MiniMax-M2.7-highspeed": {InputCostPer1M: 0.60, OutputCostPer1M: 2.40},
-	"MiniMax-M2.5":           {InputCostPer1M: 0.30, OutputCostPer1M: 1.20},
-	"MiniMax-M2.5-highspeed": {InputCostPer1M: 0.60, OutputCostPer1M: 2.40},
-	"minimax":                {InputCostPer1M: 0.30, OutputCostPer1M: 1.20}, // fallback
-
-	// Kimi public API pricing (USD / 1M tokens). Coding Plan users may be
-	// subscription-billed, but this keeps /cost close for paygo and custom
-	// Moonshot endpoint usage. K3: $3 input / $0.30 cache-read / $15 output.
-	"k3":                        {InputCostPer1M: 3.00, CachedInputCostPer1M: 0.30, OutputCostPer1M: 15.00},
-	"kimi-for-coding-highspeed": {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00},
-	"kimi-for-coding":           {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00},
-	"kimi-k2.6":                 {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00},
-	"kimi":                      {InputCostPer1M: 0.95, CachedInputCostPer1M: 0.19, OutputCostPer1M: 4.00}, // fallback
-
-	// DeepSeek V4 — public pricing as of May 2026 (USD / 1M tokens).
-	// Legacy chat/reasoner retained until 2026-07-24.
-	"deepseek-v4-flash": {InputCostPer1M: 0.14, OutputCostPer1M: 0.28},
-	"deepseek-v4-pro":   {InputCostPer1M: 0.435, OutputCostPer1M: 0.87},
-	"deepseek-chat":     {InputCostPer1M: 0.14, OutputCostPer1M: 0.28},
-	"deepseek-reasoner": {InputCostPer1M: 0.14, OutputCostPer1M: 0.28},
-	"deepseek":          {InputCostPer1M: 0.14, OutputCostPer1M: 0.28}, // fallback
+	// Official peak USD rates, verified 2026-10-22. Off-peak rates are half;
+	// use the peak ceiling for cost/budget estimates without a billing clock.
+	// https://api-docs.deepseek.com/quick_start/pricing/
+	"deepseek-flash":    {InputCostPer1M: 0.30, CachedInputCostPer1M: 0.006, OutputCostPer1M: 1.20},
+	"deepseek-v4-flash": {InputCostPer1M: 0.30, CachedInputCostPer1M: 0.006, OutputCostPer1M: 1.20},
+	"deepseek-v4-pro":   {InputCostPer1M: 1.32, CachedInputCostPer1M: 0.044, OutputCostPer1M: 3.96},
+	"deepseek-chat":     {InputCostPer1M: 0.30, CachedInputCostPer1M: 0.006, OutputCostPer1M: 1.20},
+	"deepseek-reasoner": {InputCostPer1M: 0.30, CachedInputCostPer1M: 0.006, OutputCostPer1M: 1.20},
+	"deepseek":          {InputCostPer1M: 0.30, CachedInputCostPer1M: 0.006, OutputCostPer1M: 1.20},
 }
 
 // TokenLimits defines token limits for a model.
@@ -479,7 +444,7 @@ func (t *TokenCounter) CalculateCostWithCache(inputTokens, outputTokens, cacheRe
 // getPricing returns pricing for a model, with fallback defaults.
 // Exact match wins; then longest-key substring match (so "deepseek-v4-pro"
 // beats the "deepseek" fallback). All comparisons are case-insensitive so
-// "MiniMax-M2.7" keys match the lowercased model name from the API.
+// mixed-case IDs match the lowercased model name from the API.
 func getPricing(model string) ModelPricing {
 	modelLower := strings.ToLower(model)
 

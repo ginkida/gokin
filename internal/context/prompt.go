@@ -374,7 +374,7 @@ type PromptBuilder struct {
 	// prefixCachingEnabled — the active provider honours prompt caching;
 	// disables question-only trimming so the prefix stays byte-stable.
 	prefixCachingEnabled bool
-	provider             string // Active provider family ("kimi", "glm", ...) for addenda
+	provider             string // Active provider family ("deepseek", "glm", ...) for addenda
 	pinnedContent        string // User-pinned focus block, injected near the end of the prompt
 	planMode             bool   // Claude Code-style plan mode: read-only phase until plan approved
 	bareMode             bool   // Minimal prompt; skips project/provider/memory auto-discovery.
@@ -581,9 +581,7 @@ func (b *PromptBuilder) SetLastMessage(msg string) {
 // is the same implicit-caching shape. Ollama has no prompt caching → excluded.
 var providerSupportsPrefixCaching = map[string]bool{
 	"anthropic": true,
-	"kimi":      true,
 	"deepseek":  true,
-	"minimax":   true,
 	"glm":       true, // implicit prefix caching (verified); trim would bust it
 }
 
@@ -609,8 +607,7 @@ func (b *PromptBuilder) SetPrefixCachingEnabled(enabled bool) {
 	}
 }
 
-// SetProvider records the active provider family ("kimi", "glm", "minimax",
-// "deepseek", "ollama"). Used to inject a provider-specific addendum with
+// SetProvider records the active provider family ("glm", "deepseek", "ollama"). Used to inject a provider-specific addendum with
 // behavioural guidance in Build(). Empty string means no addendum.
 func (b *PromptBuilder) SetProvider(provider string) {
 	provider = strings.TrimSpace(strings.ToLower(provider))
@@ -858,7 +855,7 @@ func (b *PromptBuilder) Build() string {
 // system prompt. Empty for providers we haven't characterised. Keep each
 // block under ~1K chars — any longer and the prompt cache churns.
 //
-// Kimi-for-coding is a strong coding model, but it benefits from explicit
+// Coding models benefit from explicit
 // guardrails around bounded exploration, evidence tracking, and verification.
 // The addendum encodes the constraints already enforced by code
 // (read-before-edit invariant, tool budget, delta-check) so the model sees
@@ -867,18 +864,14 @@ func providerAddendum(provider string) string {
 	switch provider {
 	case "glm":
 		return glmOperatingRules
-	case "kimi":
-		return kimiOperatingRules
 	case "deepseek":
 		return deepseekOperatingRules
-	case "minimax":
-		return minimaxOperatingRules
 	}
 	return ""
 }
 
 // glmOperatingRules adds GLM-specific guardrails. GLM-5.3 and Flash are strong
-// coding models that benefit from the same "plan-before-tools" discipline as Kimi,
+// coding models that benefit from the same "plan-before-tools" discipline as DeepSeek,
 // plus explicit guidance on the architecture-first workflow for new features.
 const glmOperatingRules = `## Operating rules (GLM-specific)
 
@@ -908,49 +901,8 @@ Verification discipline:
 
 Interruption handling: if the previous turn was cut short or the user provides new direction, state explicitly what you are changing from the previous approach, then continue.`
 
-const kimiOperatingRules = `## Operating rules (Kimi-specific)
-
-Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns (e.g. a single read).
-
-Project-map discipline:
-- For code changes, build a small evidence ledger before editing: target files, relevant symbols, caller/test touchpoints, and the expected behavior change.
-- Do not infer APIs from names alone. Confirm signatures, data shapes, config keys, and error contracts from source before writing code.
-- In large repositories, search for the exact symbol/path first, then read the few files that own the behavior. Avoid scanning the whole tree unless the search result is ambiguous.
-- If the repository has explicit instructions (GOKIN.md, CLAUDE.md, .gokin/rules, package scripts), treat them as higher-priority local law.
-
-Read discipline:
-- You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
-- Do not Re-read a file already loaded this session unless you changed it. If unsure, consult Working Memory.
-- Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
-- Prefer: grep → targeted Read (with offset/limit). Avoid: glob → bulk Read of whole directory.
-- Batch independent Reads in parallel in one turn. Never serialise Reads that don't depend on each other.
-
-Edit discipline:
-- In old_string, quote 3-5 lines of exact surrounding text to make the match unambiguous. Short 1-line old_string regularly produces wrong-location matches.
-- After each Edit, the next tool response may contain delta-check errors (go build / typecheck output). If it does, fix those errors BEFORE any further Edit. Do not stack new edits on a broken tree.
-- Mutations (Edit/Write/Delete) are sequential; never batch them in parallel.
-- After the final mutation, inspect the diff before finalising. If the diff shows unrelated churn, correct it or explicitly flag why it is necessary.
-
-Verification discipline:
-- Run the narrowest meaningful verification for changed code: targeted tests, typecheck/build, lint, or the project-specific command surfaced in the prompt.
-- If verification fails, fix the first actionable failure and rerun the same check before broadening scope.
-- Do not claim success from intent. Only say "verified" when a command/tool actually ran and passed.
-
-Answer discipline:
-- After 3+ tool calls in a turn, pause and write ~3 lines of "Established / Unknown / Next" before deciding to continue or finalise.
-- Keep the final answer concise: ≤4 short paragraphs. Cite changed files by path and mention verification. Don't paste full diffs — the runtime appends an evidence footer automatically.
-- Tool budget is capped per turn. When you see "Tool budget guard" in a tool response, STOP calling tools and write the final answer from what you already know.`
-
-// deepseekOperatingRules mirrors the Kimi addendum for DeepSeek V4.
-// DeepSeek V4 reasoning is excellent on analytical tasks but shares two
-// Kimi-class behaviours worth guarding against:
-//   - Eagerness to re-read files it already loaded (wastes tool budget)
-//   - Skipping the verification step after a code edit (delta-check then
-//     resolves the gap in the NEXT turn — slows convergence)
-//
-// The rules are intentionally parallel to kimiOperatingRules so a user
-// switching providers sees consistent behaviour. Only the intro line
-// and thinking-budget note differ.
+// deepseekOperatingRules keeps exploration bounded and requires verification
+// after edits, with runtime nudges reinforcing the same guidance.
 const deepseekOperatingRules = `## Operating rules (DeepSeek-specific)
 
 Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns (e.g. a single read).
@@ -987,34 +939,6 @@ Reasoning discipline:
 Answer discipline:
 - Keep the final answer concise: ≤4 short paragraphs. Cite changed files by path and mention verification. Don't paste full diffs — the runtime appends an evidence footer automatically.
 - Tool budget is capped per turn. When you see "Tool budget guard" in a tool response, STOP calling tools and write the final answer from what you already know.`
-
-// minimaxOperatingRules — MiniMax-M2.7 was the only Medium-tier provider with
-// NO addendum (glm/kimi/deepseek all have one), so it ran on the bare base
-// prompt. Rules are a compact subset of the Kimi set: MiniMax's observed
-// failure modes are the same class (editing from grep snippets, verify-read
-// loops after edits, stacking edits on a broken tree), and a shorter addendum
-// fits its smaller effective attention better than the full Kimi text.
-const minimaxOperatingRules = `## Operating rules (MiniMax-specific)
-
-Plan-then-act: before the first tool call of a turn, write a single-line plan. Format: "Plan: <3-7 word objective>". Skip for trivial one-tool turns.
-
-Read discipline:
-- Read a file before editing it — never edit from grep snippets alone.
-- Do not re-read a file already loaded this session unless a tool reported changing it.
-- Edit results include the updated region of the file — never call read just to verify an edit. Verify by building/testing instead.
-- Batch independent reads (grep/read/glob) in parallel in one turn.
-
-Edit discipline:
-- In old_string, quote 3-5 lines of exact surrounding text so the match is unambiguous.
-- After each edit, check the tool response for build/typecheck errors and fix them BEFORE the next edit. Do not stack edits on a broken tree.
-- Mutations (edit/write/delete) are sequential — never batch them in parallel.
-
-Verification discipline:
-- After code changes, run the narrowest check (targeted build/test) before claiming done. Only say "verified" when a command actually ran this turn.
-
-Answer discipline:
-- Keep the final answer concise: ≤4 short paragraphs, cite changed files by path.
-- When a tool response says a budget or guard was hit, STOP calling tools and answer from what you already know.`
 
 // buildProjectSection builds the project-specific section.
 func (b *PromptBuilder) buildProjectSection() string {

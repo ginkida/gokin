@@ -1428,9 +1428,7 @@ func (a *Agent) IsPlanningMode() bool {
 	return a.planningMode
 }
 
-// mapModelName maps user-friendly shorthands to actual GLM/MiniMax/Kimi model
-// names. Was previously a Gemini shorthand map; post-v0.65.0 only GLM/Kimi/
-// MiniMax/Ollama providers exist, so the shorthands are adjusted accordingly.
+// mapModelName maps user-friendly shorthands to the configured GLM models.
 func mapModelName(name string) string {
 	switch strings.ToLower(name) {
 	case "flash", "fast":
@@ -1899,7 +1897,7 @@ var broadLoopExplorationTools = toolNameSet(
 	"check_impact", "history_search",
 	// Semantic + review inspection tools (v0.87.0) — also side-effect-free,
 	// no external cost, and called many times over distinct symbols/files in
-	// one understand/refactor task. Missing here, a reasoning-heavy Kimi K3
+	// one understand/refactor task. Missing here, a reasoning-heavy model
 	// sub-agent navigating a codebase hit the low base ceiling (v0.100.95).
 	"go_search", "go_to_definition", "find_references", "lsp",
 	"review_changes",

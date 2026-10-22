@@ -24,7 +24,7 @@ type SessionState struct {
 	LastActive time.Time `json:"last_active"`
 	WorkDir    string    `json:"work_dir,omitempty"`
 	// Provider tags the session with the provider identifier it was
-	// built against (kimi, deepseek, glm, minimax, ollama). Added in
+	// built against (glm, deepseek, ollama). Added in
 	// v0.71.4 — legacy sessions without this field are treated as
 	// compatible on first load and re-tagged on next save. See
 	// Session.Provider docstring for the cross-provider history

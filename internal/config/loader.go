@@ -31,7 +31,7 @@ const (
 	legacyDefaultModelRoundTimeout = 5 * time.Minute
 	// Old generated full configs serialized the generic Anthropic constructor
 	// defaults here, unintentionally overriding the newer provider-specific
-	// watchdogs forever (GLM/Kimi/DeepSeek/MiniMax need more patient values).
+	// watchdogs forever (GLM/DeepSeek need more patient values).
 	// Treat only the exact historical pair as generated legacy state; either
 	// value customized independently remains an explicit user choice.
 	legacyDefaultHTTPTimeout       = 120 * time.Second
@@ -68,11 +68,7 @@ func Load() (*Config, error) {
 	// Merge per-project config if it exists
 	loadProjectConfig(cfg)
 
-	// Migrate legacy Kimi model names (pre-v0.69 users had kimi-k2.5 /
-	// kimi-k2-thinking-turbo / kimi-k2-turbo-preview pointing at Moonshot
-	// Developer API). Coding Plan endpoint only serves kimi-for-coding;
-	// rewrite silently so existing YAML configs don't error out.
-	migrateLegacyKimiModelName(cfg)
+	migrateRemovedProviders(cfg)
 
 	return cfg, nil
 }
@@ -101,7 +97,7 @@ func LoadFrom(path string) (*Config, error) {
 	migrateLegacyPlanningTimeout(cfg)
 	loadFromEnv(cfg)
 	loadProjectConfig(cfg)
-	migrateLegacyKimiModelName(cfg)
+	migrateRemovedProviders(cfg)
 	return cfg, nil
 }
 
@@ -148,31 +144,6 @@ func migrateLegacyPlanningTimeout(cfg *Config) {
 		"from", legacyDefaultPlanningTimeout)
 }
 
-// migrateLegacyKimiModelName rewrites retired Kimi model IDs to the
-// Coding Plan canonical name. Called on every Load so both global and
-// project configs benefit; idempotent.
-//
-// Skipped when CustomBaseURL is set — users with an explicit Moonshot
-// Developer API endpoint may still use legacy model IDs there, and we
-// don't want to silently rewrite their model into one their endpoint
-// doesn't serve.
-func migrateLegacyKimiModelName(cfg *Config) {
-	if cfg == nil {
-		return
-	}
-	if strings.TrimSpace(cfg.Model.CustomBaseURL) != "" {
-		return
-	}
-	legacy := map[string]bool{
-		"kimi-k2.5":              true,
-		"kimi-k2-thinking-turbo": true,
-		"kimi-k2-turbo-preview":  true,
-	}
-	if legacy[cfg.Model.Name] {
-		cfg.Model.Name = "kimi-for-coding"
-	}
-}
-
 // LoadWithProjectDir loads configuration with a specific project directory.
 func LoadWithProjectDir(projectDir string) (*Config, error) {
 	cfg, err := Load()
@@ -195,6 +166,7 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 	}
 	cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
 
+	migrateRemovedProviders(cfg)
 	return cfg, nil
 }
 

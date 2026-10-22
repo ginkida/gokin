@@ -449,9 +449,9 @@ func TestPromptBuilder_SetProvider(t *testing.T) {
 
 func TestPromptBuilder_SetProvider_Idempotent(t *testing.T) {
 	b := NewPromptBuilder("/tmp", nil)
-	b.SetProvider("kimi")
+	b.SetProvider("deepseek")
 	b.Build()
-	b.SetProvider("Kimi") // same after lowercasing
+	b.SetProvider("DeepSeek") // same after lowercasing
 	if b.promptDirty {
 		t.Error("SetProvider with same value should NOT mark dirty")
 	}

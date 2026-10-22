@@ -7,7 +7,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// Field report (v0.100.95): a Kimi K3 turn that narrates and updates its
+// Field report (v0.100.95): a reasoning-heavy model turn that narrates and updates its
 // checklist frequently hit `executor stagnation: tool pattern "todo:"
 // repeated 5 times consecutively` — the whole turn killed with no recovery.
 // Two defects: (1) todo had an EMPTY default fingerprint, so DISTINCT list

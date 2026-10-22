@@ -13,7 +13,7 @@ func TestBuildReport_AggregatesScoresAndMetrics(t *testing.T) {
 		{
 			ScenarioID: "a",
 			Status:     "passed",
-			Provider:   "kimi",
+			Provider:   "deepseek",
 			Metrics: map[string]bool{
 				"task_completed":      true,
 				"verification_passed": true,
