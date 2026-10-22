@@ -30,6 +30,48 @@ type scopedHook struct {
 	onceObserver      func(int)
 }
 
+// A published Hook is immutable; provenance refresh swaps the pointer under
+// the entry owner's lock so an in-flight invocation keeps its own snapshot.
+func (entry *scopedHook) snapshotHook() *Hook {
+	entry.owner.mu.Lock()
+	defer entry.owner.mu.Unlock()
+	return entry.hook
+}
+
+// RefreshPluginProvenance updates live authority after the caller resolves the
+// current catalog. Definitions, claims, observers and render reservations stay
+// with their existing owner. Validate every group before publishing any change.
+func (s *Scope) RefreshPluginProvenance(definitions map[string][]ClaudeCommand) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for source, current := range definitions {
+		entries := s.groups[source]
+		previous := make([]ClaudeCommand, len(entries))
+		for i, entry := range entries {
+			if entry.owner != s {
+				return fmt.Errorf("cannot refresh skill hook provenance from a non-owning scope")
+			}
+			previous[i] = *entry.hook.Claude
+		}
+		if CommandFingerprint(previous) != CommandFingerprint(current) {
+			return fmt.Errorf("cannot refresh skill hook provenance: definitions changed")
+		}
+	}
+	for source, current := range definitions {
+		for i, entry := range s.groups[source] {
+			runtime := current[i].plugin
+			if runtime == nil || pluginRuntimeFingerprint(entry.hook.claudePlugin) == pluginRuntimeFingerprint(runtime) {
+				continue
+			}
+			hook, definition := *entry.hook, *entry.hook.Claude
+			hook.claudePlugin, definition.plugin = runtime, runtime
+			hook.Claude = &definition
+			entry.hook = &hook
+		}
+	}
+	return nil
+}
+
 type scopeKey struct{}
 
 func ContextWithScope(ctx context.Context, scope *Scope) context.Context {
@@ -236,14 +278,19 @@ func (s *Scope) run(ctx context.Context, manager *Manager, kind Type, hctx *Cont
 	if override := RuntimeInfoFromContext(ctx).ToolNameOverride; override != "" {
 		toolName = override
 	}
-	var entries []*scopedHook
+	type invocation struct {
+		entry *scopedHook
+		hook  *Hook
+	}
+	var entries []invocation
 	seenSettings := make(map[string]bool)
 	info := RuntimeInfoFromContext(ctx)
 	for _, entry := range s.snapshotEntries() {
-		if AgentHookActive(ctx) && entry.hook.Claude.Handler == "agent" {
+		hook := entry.snapshotHook()
+		if AgentHookActive(ctx) && hook.Claude.Handler == "agent" {
 			continue
 		}
-		if !manager.HookEnabled(entry.hook) {
+		if !manager.HookEnabled(hook) {
 			continue
 		}
 		entry.owner.mu.Lock()
@@ -251,20 +298,20 @@ func (s *Scope) run(ctx context.Context, manager *Manager, kind Type, hctx *Cont
 		if kind == SubagentStart {
 			matchName = ClaudeAgentType(info.AgentType)
 		}
-		if entry.hook.claudeSettings && kind == Stop {
+		if hook.claudeSettings && kind == Stop {
 			matchName = ClaudeAgentType(info.AgentType)
 		}
-		if entry.consumed || entry.claimed || !entry.hook.Matches(kind, matchName) ||
-			entry.hook.claudeSettings && kind == Stop && ((entry.hook.Claude.Event == "SubagentStop") != (info.AgentID != "")) {
+		if entry.consumed || entry.claimed || !hook.Matches(kind, matchName) ||
+			hook.claudeSettings && kind == Stop && ((hook.Claude.Event == "SubagentStop") != (info.AgentID != "")) {
 			entry.owner.mu.Unlock()
 			continue
 		}
-		if entry.hook.claudeSettings {
-			definition := *entry.hook.Claude
+		if hook.claudeSettings {
+			definition := *hook.Claude
 			definition.Matcher = ""
 			fingerprint := CommandFingerprint([]ClaudeCommand{definition})
-			if entry.hook.claudePlugin != nil {
-				data, _ := json.Marshal(entry.hook.claudePlugin)
+			if hook.claudePlugin != nil {
+				data, _ := json.Marshal(hook.claudePlugin)
 				fingerprint += string(data)
 			}
 			if seenSettings[fingerprint] {
@@ -273,10 +320,10 @@ func (s *Scope) run(ctx context.Context, manager *Manager, kind Type, hctx *Cont
 			}
 			seenSettings[fingerprint] = true
 		}
-		if entry.hook.Claude.Once {
+		if hook.Claude.Once {
 			entry.claimed = true
 		}
-		entries = append(entries, entry)
+		entries = append(entries, invocation{entry, hook})
 		entry.owner.mu.Unlock()
 	}
 	if kind != Stop {
@@ -284,10 +331,11 @@ func (s *Scope) run(ctx context.Context, manager *Manager, kind Type, hctx *Cont
 		parent := s.inherited
 		s.mu.Unlock()
 		for _, entry := range inheritedEntries(parent) {
-			if AgentHookActive(ctx) && entry.hook.Claude.Handler == "agent" {
+			hook := entry.snapshotHook()
+			if AgentHookActive(ctx) && hook.Claude.Handler == "agent" {
 				continue
 			}
-			if !manager.HookEnabled(entry.hook) {
+			if !manager.HookEnabled(hook) {
 				continue
 			}
 			entry.owner.mu.Lock()
@@ -295,23 +343,24 @@ func (s *Scope) run(ctx context.Context, manager *Manager, kind Type, hctx *Cont
 			if kind == SubagentStart {
 				matchName = ClaudeAgentType(info.AgentType)
 			}
-			if !entry.consumed && !entry.claimed && entry.hook.Matches(kind, matchName) {
-				if entry.hook.Claude.Once {
+			if !entry.consumed && !entry.claimed && hook.Matches(kind, matchName) {
+				if hook.Claude.Once {
 					entry.claimed = true
 				}
-				entries = append(entries, entry)
+				entries = append(entries, invocation{entry, hook})
 			}
 			entry.owner.mu.Unlock()
 		}
 	}
 	results := make([]Result, len(entries))
 	var work sync.WaitGroup
-	for i, entry := range entries {
+	for i, call := range entries {
+		entry, hook := call.entry, call.hook
 		work.Add(1)
 		go func() {
 			defer work.Done()
-			result := executeScopedHook(ctx, manager, entry.hook, hctx)
-			if entry.hook.Claude.Once && result.asyncJob != nil {
+			result := executeScopedHook(ctx, manager, hook, hctx)
+			if hook.Claude.Once && result.asyncJob != nil {
 				result.asyncJob.observe(func(completed Result) {
 					entry.owner.mu.Lock()
 					entry.claimed = false
@@ -327,7 +376,7 @@ func (s *Scope) run(ctx context.Context, manager *Manager, kind Type, hctx *Cont
 			}
 			entry.owner.mu.Lock()
 			entry.claimed = false
-			entry.consumed = entry.hook.Claude.Once && result.Error == nil && !result.skipped
+			entry.consumed = hook.Claude.Once && result.Error == nil && !result.skipped
 			observer, consumed, index := entry.onceObserver, entry.consumed, entry.index
 			entry.owner.mu.Unlock()
 			if consumed && observer != nil {
@@ -516,8 +565,9 @@ func (s *Scope) PolicyError(manager *Manager) error {
 	}
 	var definitions []ClaudeCommand
 	for _, entry := range inheritedEntries(s) {
-		if entry.hook.Claude != nil {
-			definitions = append(definitions, *entry.hook.Claude)
+		hook := entry.snapshotHook()
+		if hook.Claude != nil {
+			definitions = append(definitions, *hook.Claude)
 		}
 	}
 	return manager.CommandsPolicyError(definitions)

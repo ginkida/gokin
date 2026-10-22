@@ -1,9 +1,40 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
+
+	"gokin/internal/mcp"
+	"gokin/internal/ui"
 )
+
+// Runtime managers can gain servers after creation, so monitoring starts even
+// when the manager is empty. The caller supplies the app lifetime and config
+// snapshot to keep this usable while EnableMCP holds a.mu.
+func (a *App) wireMCPManagerHealth(manager *mcp.Manager, ctx context.Context, interval time.Duration) {
+	healthToasts := newHealthToastLimiter()
+	manager.SetHealthChangeCallback(func(name string, healthy bool) {
+		if !healthToasts.ShouldEmit(name, time.Now()) {
+			return
+		}
+		if healthy {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusStreamResume,
+				Message: fmt.Sprintf("MCP server %q reconnected", name),
+			})
+		} else {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusRecoverableError,
+				Message: fmt.Sprintf("MCP server %q disconnected", name),
+			})
+		}
+	})
+	if interval > 0 {
+		manager.StartHealthCheck(ctx, interval)
+	}
+}
 
 // healthToastCooldown is how long the per-server rate limiter waits before
 // emitting another UI toast for the same MCP server. A flapping server

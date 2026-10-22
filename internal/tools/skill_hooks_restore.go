@@ -111,6 +111,15 @@ func (t *SkillTool) synchronizeHooks(manager *hooks.Manager) error {
 	if t.hookLedger == ledger && t.hookEpoch == epoch {
 		// A policy toggle changes authority, not the owner or definitions.
 		// Preserve active once claims and in-progress render reservations.
+		current := make(map[string][]hooks.ClaudeCommand, len(activations))
+		for i, activation := range activations {
+			current[activation.Path] = definitions[i].Hooks
+		}
+		if err := scope.RefreshPluginProvenance(current); err != nil {
+			t.hookSyncError = err
+			scope.SetRestoreError(err)
+			return err
+		}
 		scope.SetRestoreError(nil)
 		t.hookTrusted, t.hookEnabled, t.hookSyncError = trusted, enabled, nil
 		t.hookPolicyRevision = policyRevision
@@ -147,6 +156,14 @@ func (t *SkillTool) synchronizeHooks(manager *hooks.Manager) error {
 
 func observeHookConsumption(registration *hooks.Registration, ledger *skills.InvocationLedger, activation skills.HookActivation, epoch uint64) {
 	registration.ObserveOnce(func(index int) { ledger.ConsumeHook(activation.Path, activation.Generation, epoch, index) })
+	// Async render hooks can finish after the activation snapshot but before
+	// the observer is installed. Replay those completions; consumption is
+	// idempotent and still guarded by the activation generation/owner epoch.
+	for index, consumed := range registration.Consumed() {
+		if consumed {
+			ledger.ConsumeHook(activation.Path, activation.Generation, epoch, index)
+		}
+	}
 }
 
 func RestoreSkillHooks(registry ToolRegistry, manager *hooks.Manager) error {

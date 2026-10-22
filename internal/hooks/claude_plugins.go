@@ -19,13 +19,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
 
-const maxClaudePlugins = 64
+const maxClaudePlugins = pluginpolicy.MaxEnabledPlugins
 
 type claudePluginRuntime struct {
 	ID, Root, Data string
@@ -132,73 +130,11 @@ func pluginJSON(data []byte, target any) error {
 	return json.Unmarshal(data, target)
 }
 
-// Values merge per key within the managed tier; null removes an earlier key.
-func mergePluginEnable(target map[string]bool, node *yaml.Node, aliasMaps ...pluginpolicy.PluginAliases) error {
-	if node == nil {
-		return nil
-	}
-	if node.Tag == "!!null" {
-		clear(target)
-		return nil
-	}
-	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("enabledPlugins must be an object")
-	}
-	indices := make([]int, 0, len(node.Content)/2)
-	for i := 0; i < len(node.Content); i += 2 {
-		indices = append(indices, i)
-	}
-	aliases := pluginpolicy.PluginAliases{}
-	if len(aliasMaps) > 0 {
-		aliases = aliasMaps[0]
-	}
-	sort.SliceStable(indices, func(i, j int) bool {
-		_, left, _ := aliases.Resolve(node.Content[indices[i]].Value)
-		_, right, _ := aliases.Resolve(node.Content[indices[j]].Value)
-		if left != right {
-			return left && !right
-		}
-		return aliases.Depth(node.Content[indices[i]].Value) > aliases.Depth(node.Content[indices[j]].Value)
-	})
-	for _, i := range indices {
-		id, value := node.Content[i].Value, node.Content[i+1]
-		if len(id) > 256 || !validPluginID(id) {
-			return fmt.Errorf("invalid plugin identifier in enabledPlugins")
-		}
-		resolved, _, err := aliases.Resolve(id)
-		if err != nil {
-			return err
-		}
-		if resolved == "" {
-			continue
-		}
-		id = resolved
-		if value.Tag == "!!null" {
-			delete(target, id)
-			continue
-		}
-		if value.Tag != "!!bool" {
-			return fmt.Errorf("enabledPlugins[%q] must be a boolean", id)
-		}
-		target[id] = value.Value == "true"
-	}
-	if len(target) > maxClaudePlugins {
-		return fmt.Errorf("enabledPlugins exceed %d entries", maxClaudePlugins)
-	}
-	return nil
+func mergePluginEnable(target map[string]bool, node *yaml.Node, aliases ...pluginpolicy.PluginAliases) error {
+	return pluginpolicy.MergePluginEnable(target, node, aliases...)
 }
 
-func validPluginName(name string) bool {
-	if name == "" || len(name) > 128 || !utf8.ValidString(name) || strings.ContainsAny(name, "@:/\\") {
-		return false
-	}
-	for _, c := range name {
-		if unicode.IsSpace(c) || unicode.IsControl(c) || c == 0x061c || c == 0x200e || c == 0x200f || c >= 0x202a && c <= 0x202e || c >= 0x2066 && c <= 0x2069 {
-			return false
-		}
-	}
-	return true
-}
+func validPluginName(name string) bool { return pluginpolicy.ValidPluginName(name) }
 
 // A misspelled schema control must not silently change how an option reaches a
 // hook process, particularly the sensitive and multiple controls.
@@ -237,8 +173,7 @@ func (option *claudePluginOption) UnmarshalJSON(data []byte) error {
 }
 
 func validPluginID(id string) bool {
-	parts := strings.Split(id, "@")
-	return len(parts) == 2 && validPluginName(parts[0]) && validPluginName(parts[1])
+	return pluginpolicy.ValidPluginID(id)
 }
 
 // Public checks keep lifecycle tooling aligned with discovery's accepted
@@ -774,6 +709,9 @@ func (m *Manager) refreshPluginSources(sources []claudeSettingsSource, enabled, 
 		valid := (*selected)[:0]
 		for _, plugin := range *selected {
 			if issue := issues[plugin.ID()]; issue != "" {
+				if plugin.runtime.Forced {
+					return nil, fmt.Errorf("managed plugin %s: %s", plugin.ID(), issue)
+				}
 				m.claudeDependencyWarnings = append(m.claudeDependencyWarnings, plugin.ID()+": "+issue)
 			} else {
 				valid = append(valid, plugin)

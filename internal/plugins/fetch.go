@@ -614,6 +614,16 @@ func fetchNPM(ctx context.Context, s Source, stage string) (string, error) {
 }
 
 func acceptedCommand(command string, accept []string) error {
+	// Validate before showing or accepting remote helper text. An exact hash
+	// cannot make terminal controls safe to review or execute.
+	if command == "" || len(command) > 500 {
+		return fmt.Errorf("reviewed command must contain 1..500 printable ASCII characters")
+	}
+	for _, c := range command {
+		if c < 32 || c > 126 {
+			return fmt.Errorf("reviewed command must be printable ASCII")
+		}
+	}
 	sum := sha256.Sum256([]byte(command))
 	digest := hex.EncodeToString(sum[:])
 	for _, hash := range accept {

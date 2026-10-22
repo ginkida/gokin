@@ -304,11 +304,17 @@ func (m *Manager) addMarketplace(ctx context.Context, source Source, accept []st
 				return Result{}, fmt.Errorf("extraKnownMarketplaces must be an object")
 			}
 		}
+		if declarations == nil {
+			declarations = map[string]json.RawMessage{}
+		}
 		declaration := map[string]json.RawMessage{}
 		if raw, exists := declarations[catalog.Name]; exists {
 			if json.Unmarshal(raw, &declaration) != nil {
 				return Result{}, fmt.Errorf("invalid marketplace declaration")
 			}
+		}
+		if declaration == nil {
+			declaration = map[string]json.RawMessage{}
 		}
 		declaration["source"], _ = json.Marshal(source)
 		declarations[catalog.Name], _ = json.Marshal(declaration)

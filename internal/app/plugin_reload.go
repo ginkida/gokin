@@ -51,6 +51,10 @@ func (a *App) reloadClaudePluginsLocked(ctx context.Context, force, automatic bo
 	a.mu.Lock()
 	bare := a.config != nil && a.config.Bare
 	allowDefault := a.config != nil && a.config.MCP.Enabled
+	var healthInterval time.Duration
+	if a.config != nil {
+		healthInterval = a.config.MCP.HealthCheckInterval
+	}
 	manager, authority, workDir, lifetimeCtx := a.mcpManager, a.hooksManager, a.workDir, a.ctx
 	a.mu.Unlock()
 	if bare {
@@ -155,6 +159,7 @@ func (a *App) reloadClaudePluginsLocked(ctx context.Context, force, automatic bo
 		}
 		manager = mcp.NewManager(nil)
 		manager.SetToolsChangedCallback(a.SyncMCPToolsForServer)
+		a.wireMCPManagerHealth(manager, lifetimeCtx, healthInterval)
 		a.mu.Lock()
 		a.mcpManager = manager
 		a.mu.Unlock()

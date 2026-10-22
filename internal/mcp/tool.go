@@ -228,7 +228,10 @@ func (t *MCPTool) GetOriginalToolName() string {
 func (t *MCPTool) ClaudeToolName() string { return t.claudeName }
 
 func pluginMCPFunctionName(name, identity string) string {
-	valid := len(name) > 0 && len(name) <= 64
+	server, _, _ := strings.Cut(identity, "\x00")
+	// Underscores in either namespace component make the readable prefix
+	// ambiguous (a_b:c and a:b_c). Bind those aliases to the full identity.
+	valid := len(name) > 0 && len(name) <= 64 && !strings.Contains(server, "_")
 	for _, c := range name {
 		valid = valid && (c == '_' || c == '-' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9')
 	}
