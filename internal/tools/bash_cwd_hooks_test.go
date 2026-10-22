@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -50,6 +51,9 @@ func TestBashCwdNotificationsUseCommittedState(t *testing.T) {
 						ctx = ContextWithProgressCallback(ctx, func(float64, string) {})
 					}
 					result, err := tool.Execute(ctx, map[string]any{"command": test.command})
+					if sandbox && runtime.GOOS == "linux" && strings.Contains(result.Error, "operation not permitted") {
+						t.Skip("host cannot create sandbox namespaces")
+					}
 					if err != nil || result.Success != test.success || (count == 1) != test.changed || count > 1 {
 						t.Fatalf("bad cwd/status for %q: result=%+v error=%v callbacks=%d", test.command, result, err, count)
 					}
