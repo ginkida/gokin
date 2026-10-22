@@ -166,6 +166,9 @@ func newDirectPlanUsageHarness(
 		planManager: manager,
 		ctx:         context.Background(),
 	}
+	// Match production plan execution so verification callbacks record proof.
+	manager.SetExecutionMode(true)
+	executor.SetHandler(a.buildExecutionHandler(nil))
 	return a, approvedPlan, step
 }
 

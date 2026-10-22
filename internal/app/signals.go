@@ -300,12 +300,7 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 			logging.Warn("failed to shut down managed Go intelligence", "error", err)
 		}
 	}
-	a.mu.Lock()
-	languageServers := a.lspManager
-	a.mu.Unlock()
-	if languageServers != nil {
-		_ = languageServers.Close()
-	}
+	a.CloseLanguageServers()
 
 	// 5c. Stop the session-scoped Python kernel. Close is idempotent and kills
 	// the whole worker process group, so no cell can survive application exit.

@@ -3102,6 +3102,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	ctx = hooks.ContextWithRuntimeInfo(ctx, info)
 	var preResults []hooks.Result
 	hookDecision := ""
+	originalCall := call
 	if e.hooks != nil {
 		preResults = e.hooks.RunPreTool(ctx, call.Name, call.Args)
 		if stopped, ok := HookStopResult(preResults); ok {
@@ -3893,12 +3894,12 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		"duration", duration,
 		"safety_level", execInfo.SafetyLevel)
 
-	// Record side effects for retry deduplication.
-	e.recordSideEffect(call, result)
+	// Key retry outcomes by the provider input retained in conversation history.
+	e.recordSideEffect(originalCall, result)
 
 	// Record in checkpoint journal for API failure recovery (write operations only).
 	if e.checkpoint != nil && isWriteOperation(call.Name) {
-		e.checkpoint.Record(call, result)
+		e.checkpoint.Record(originalCall, result)
 	}
 
 	return result

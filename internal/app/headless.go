@@ -400,6 +400,9 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 			a.recordHeadlessTerminalOutcome(kind, goalErr.Error())
 		} else if (goalCommand || localCommand) && work == "" {
 			a.recordHeadlessFinalResult(commandResult)
+			if format == HeadlessOutputText && !goalTextMode {
+				sp.StreamText(commandResult)
+			}
 			// Status/clear commands are read-only with respect to the model. A
 			// schema mismatch must not turn their output into a new worker turn.
 			if opts.JSONSchema != nil {

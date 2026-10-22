@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gokin/internal/logging"
@@ -889,6 +890,7 @@ func (s pathState) description() string {
 
 type pathStateView struct {
 	states map[string]pathState
+	moves  [][2]string // simulated directory renames, in execution order
 }
 
 func newPathStateView() *pathStateView {
@@ -899,7 +901,23 @@ func (v *pathStateView) get(path string) (pathState, error) {
 	if state, ok := v.states[path]; ok {
 		return state, nil
 	}
-	state, err := readPathState(path)
+	// Resolve uncached descendants against the directory's original disk
+	// location. A vacated source has no children in the simulated tree.
+	diskPath := path
+	for i := len(v.moves) - 1; i >= 0; i-- {
+		move := v.moves[i]
+		if strings.HasPrefix(diskPath, move[1]+string(filepath.Separator)) {
+			diskPath = move[0] + strings.TrimPrefix(diskPath, move[1])
+		} else if strings.HasPrefix(diskPath, move[0]+string(filepath.Separator)) {
+			return missingPathState(), nil
+		}
+	}
+	if diskPath != path {
+		if err := validateRestorePath(diskPath); err != nil {
+			return pathState{}, err
+		}
+	}
+	state, err := readPathState(diskPath)
 	if err != nil {
 		return pathState{}, err
 	}
@@ -909,6 +927,26 @@ func (v *pathStateView) get(path string) (pathState, error) {
 
 func (v *pathStateView) set(path string, state pathState) {
 	v.states[path] = state
+}
+
+func (v *pathStateView) move(source, destination string, state pathState) {
+	if state.kind == pathStateDirectory {
+		children := make(map[string]pathState)
+		for path, child := range v.states {
+			if strings.HasPrefix(path, source+string(filepath.Separator)) {
+				children[destination+strings.TrimPrefix(path, source)] = child
+				v.states[path] = missingPathState()
+			} else if strings.HasPrefix(path, destination+string(filepath.Separator)) {
+				delete(v.states, path)
+			}
+		}
+		for path, child := range children {
+			v.states[path] = child
+		}
+		v.moves = append(v.moves, [2]string{source, destination})
+	}
+	v.set(source, missingPathState())
+	v.set(destination, state)
 }
 
 func readPathState(path string) (pathState, error) {
@@ -970,8 +1008,7 @@ func simulateUndo(change *FileChange, view *pathStateView) error {
 		if err != nil {
 			return err
 		}
-		view.set(source, destination)
-		view.set(change.FilePath, missingPathState())
+		view.move(change.FilePath, source, destination)
 		return nil
 
 	case "delete", "batch_delete":
@@ -1015,8 +1052,7 @@ func simulateRedo(change *FileChange, view *pathStateView) error {
 		if err := requirePathState(view, change.FilePath, missingPathState(), "redo"); err != nil {
 			return err
 		}
-		view.set(source, missingPathState())
-		view.set(change.FilePath, sourceState)
+		view.move(source, change.FilePath, sourceState)
 		return nil
 
 	case "delete", "batch_delete":

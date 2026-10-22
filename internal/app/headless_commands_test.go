@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -64,5 +65,30 @@ func TestHeadlessWorkflowSubmissionHookRunsBeforeDynamicRendering(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(root, "dynamic-render-leaked")); !os.IsNotExist(err) {
 		t.Fatal("blocked workflow rendered dynamic shell context", err)
+	}
+}
+
+func TestHeadlessLocalCommandTextIsPrintedOnce(t *testing.T) {
+	for _, prompt := range []string{"/help", "/clear", "/goal"} {
+		t.Run(prompt, func(t *testing.T) {
+			worker := testkit.NewMockClient()
+			a := newGoalTestApp(t, worker, testkit.NewMockClient())
+			a.commandHandler = commands.NewHandler()
+			var stdout bytes.Buffer
+			result, err := a.RunHeadlessWithOptions(t.Context(), prompt, HeadlessOptions{OutputFormat: HeadlessOutputText, Stdout: &stdout, Stderr: io.Discard})
+			if err != nil || result.Status != "success" || result.Result == "" {
+				t.Fatalf("command failed: %+v %v", result, err)
+			}
+			want := result.Result
+			if !strings.HasSuffix(want, "\n") {
+				want += "\n"
+			}
+			if got := stdout.String(); got != want {
+				t.Fatalf("stdout differs from command result: got %d bytes, want %d", len(got), len(want))
+			}
+			if len(worker.Calls()) != 0 {
+				t.Fatal("local command invoked model")
+			}
+		})
 	}
 }

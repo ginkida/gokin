@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -113,6 +114,7 @@ func TestRewindSummaryGuidanceAndNumberShortcut(t *testing.T) {
 				t.Fatal("guidance not rendered")
 			}
 			if shortcut {
+				m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyHome})
 				m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
 				if submitted != "/rewind "+id+" summarize-from" {
 					t.Fatal("number shortcut retained guidance", submitted)
@@ -191,5 +193,34 @@ func TestRewindPreviousRowDoesNotRenumberPromptActions(t *testing.T) {
 	m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyEscape})
 	if m.state != StateInput {
 		t.Fatal("previous entry cannot be cancelled")
+	}
+}
+
+func TestRewindSummaryDigitsStayInGuidance(t *testing.T) {
+	for _, hasCode := range []bool{false, true} {
+		for _, action := range []string{"summarize-from", "summarize-before"} {
+			t.Run(fmt.Sprintf("code=%t/%s", hasCode, action), func(t *testing.T) {
+				m := NewModel()
+				m.width, m.height = 100, 30
+				submitted := ""
+				m.onSubmit = func(value string) { submitted = value }
+				id := strings.Repeat("a", 32)
+				m.handleMessageTypes(OpenRewindMenuMsg{Choices: []RewindChoice{{ID: id, Prompt: "point", HasCode: hasCode}}})
+				m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyEnter})
+				for m.rewindActions()[m.rewindAction] != action {
+					m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyDown})
+				}
+				for _, r := range "preserve v1234567890" {
+					m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+					if submitted != "" {
+						t.Fatalf("typing guidance submitted %q", submitted)
+					}
+				}
+				m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyEnter})
+				if want := `/rewind ` + id + ` ` + action + ` -- "preserve v1234567890"`; submitted != want {
+					t.Fatalf("submitted %q, want %q", submitted, want)
+				}
+			})
+		}
 	}
 }

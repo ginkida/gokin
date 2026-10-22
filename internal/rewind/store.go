@@ -273,6 +273,10 @@ func (s *Store) Points() []Point {
 // rewind; otherwise it publishes conversation state and returns a rollback.
 // The caller must own the foreground slot and prevent background file edits.
 func (s *Store) Restore(id string, code, conversation bool, apply func(*Snapshot) (func() error, error)) (int, error) {
+	return s.restore(id, code, conversation, apply, undo.ApplyOperations)
+}
+
+func (s *Store) restore(id string, code, conversation bool, apply func(*Snapshot) (func() error, error), applyOperations func([]undo.Operation) error) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	at := -1
@@ -321,7 +325,10 @@ func (s *Store) Restore(id string, code, conversation bool, apply func(*Snapshot
 		}
 	}
 	inverse := undo.ReverseOperations(events)
-	if err := undo.ApplyOperations(inverse); err != nil {
+	if err := applyOperations(inverse); err != nil {
+		if errors.Is(err, fileutil.ErrAtomicWriteCommitUncertain) {
+			s.failure = err
+		}
 		return 0, err
 	}
 	var rollback func() error
@@ -335,8 +342,12 @@ func (s *Store) Restore(id string, code, conversation bool, apply func(*Snapshot
 				return 0, fmt.Errorf("%w; conversation rollback failed: %v", err, e)
 			}
 		}
-		if e := undo.ApplyOperations(events); e != nil {
-			return 0, fmt.Errorf("%w; code rollback failed: %v", err, e)
+		if e := applyOperations(events); e != nil {
+			failure := fmt.Errorf("%w; code rollback failed: %w", err, e)
+			if errors.Is(e, fileutil.ErrAtomicWriteCommitUncertain) {
+				s.failure = failure
+			}
+			return 0, failure
 		}
 		return 0, err
 	}

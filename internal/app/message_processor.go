@@ -2267,7 +2267,12 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 
 		// Direct mode shares a single session, so run sequentially for reliability.
 		for _, step := range readySteps {
-			a.executeDirectStep(ctx, step, approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations)
+			if err := a.executeDirectStep(ctx, step, approvedPlan, totalSteps, sharedMem, maxRetries, backoffDurations); err != nil {
+				if progress := goalPlanProgressFromContext(ctx); progress != nil {
+					progress.err = err
+				}
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -2358,7 +2363,7 @@ func (a *App) getStepTimeout(step *plan.Step) time.Duration {
 }
 
 // executeDirectStep executes a single step in the direct (same-session) mode.
-func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPlan *plan.Plan, totalSteps int, sharedMem *agent.SharedMemory, maxRetries int, backoffDurations []time.Duration) {
+func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPlan *plan.Plan, totalSteps int, sharedMem *agent.SharedMemory, maxRetries int, backoffDurations []time.Duration) (stopErr error) {
 	select {
 	case <-ctx.Done():
 		return
@@ -2663,7 +2668,14 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		output = string(runes[:planStepOutputMaxChars]) + "..."
 	}
 
-	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
+	verificationSummary, verificationOutput, verificationOK, verificationReason, verificationErr := a.runStepVerificationCommands(ctx, approvedPlan, step)
+	if verificationErr != nil {
+		a.planManager.PauseStep(step.ID, verificationErr.Error())
+		a.planManager.PausePlan()
+		// A hook stop preserves completed work; it is not a failed check to undo.
+		a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
+		return verificationErr
+	}
 	if !verificationOK {
 		a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, verificationReason)
 		return
@@ -2743,6 +2755,7 @@ func (a *App) executeDirectStep(ctx context.Context, step *plan.Step, approvedPl
 		}
 	}
 	a.enforceSessionMemoryGovernance("plan_step_completed")
+	return nil
 }
 
 // buildDirectStepMessage creates a focused prompt for executing a single step
@@ -2976,7 +2989,12 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			if ctx.Err() != nil {
 				return
 			}
-			a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, contextSnapshot)
+			if err := a.executeDelegatedStep(ctx, step, approvedPlan, totalSteps, sharedMem, contextSnapshot); err != nil {
+				if progress := goalPlanProgressFromContext(ctx); progress != nil {
+					progress.err = err
+				}
+				return
+			}
 		}
 	}
 
@@ -3036,7 +3054,7 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 }
 
 // executeDelegatedStep executes a single step via sub-agent delegation.
-func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approvedPlan *plan.Plan, totalSteps int, sharedMem *agent.SharedMemory, contextSnapshot string) {
+func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approvedPlan *plan.Plan, totalSteps int, sharedMem *agent.SharedMemory, contextSnapshot string) (stopErr error) {
 	select {
 	case <-ctx.Done():
 		return
@@ -3386,7 +3404,14 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 	}
 	approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
 
-	verificationSummary, verificationOutput, verificationOK, verificationReason := a.runStepVerificationCommands(ctx, approvedPlan, step)
+	verificationSummary, verificationOutput, verificationOK, verificationReason, verificationErr := a.runStepVerificationCommands(ctx, approvedPlan, step)
+	if verificationErr != nil {
+		a.planManager.PauseStep(step.ID, verificationErr.Error())
+		a.planManager.PausePlan()
+		// A hook stop preserves completed work; it is not a failed check to undo.
+		a.commitStepRollbackSnapshot(approvedPlan.ID, step.ID)
+		return verificationErr
+	}
 	if !verificationOK {
 		a.pauseStepWithRollback(ctx, approvedPlan, step, totalSteps, verificationReason)
 		return
@@ -3488,6 +3513,7 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 		}
 	}
 	a.enforceSessionMemoryGovernance("plan_step_completed")
+	return nil
 }
 
 // isOverloadError detects provider-side overload signals that should feed the
@@ -3996,25 +4022,25 @@ func (a *App) pauseStepWithRollback(ctx context.Context, approvedPlan *plan.Plan
 	})
 }
 
-func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *plan.Plan, step *plan.Step) (string, string, bool, string) {
+func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *plan.Plan, step *plan.Step) (string, string, bool, string, error) {
 	if step == nil {
-		return "", "", false, "missing step context for verification"
+		return "", "", false, "missing step context for verification", nil
 	}
 
 	required := normalizeVerifyCommands(step.VerifyCommands)
 	if len(required) == 0 {
-		return "", "", false, fmt.Sprintf("step %d is missing verify_commands contract", step.ID)
+		return "", "", false, fmt.Sprintf("step %d is missing verify_commands contract", step.ID), nil
 	}
 	// Native verification is still part of the invocation. Plan approval cannot
 	// grant a shell capability that the caller explicitly excluded.
 	if ceiling, restricted := tools.ToolCapabilityCeilingFromContext(ctx); restricted &&
 		len(intersectCapabilityNames(ceiling, []string{"bash"})) == 0 {
-		return "", "", false, "verify command blocked: bash is outside this invocation's capability ceiling"
+		return "", "", false, "verify command blocked: bash is outside this invocation's capability ceiling", nil
 	}
 
-	bashTool, ok := a.registry.Get("bash")
+	_, ok := a.registry.Get("bash")
 	if !ok {
-		return "", "", false, "cannot run verify_commands: bash tool is unavailable"
+		return "", "", false, "cannot run verify_commands: bash tool is unavailable", nil
 	}
 
 	verifyCtx, cancel := context.WithTimeout(ctx, planStepVerifyTimeout)
@@ -4024,7 +4050,7 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 	lines := make([]string, 0, len(required))
 	for i, cmd := range required {
 		if safe, safetyReason := a.validateVerifyCommandSafety(verifyCtx, cmd, projectProfile); !safe {
-			return "", "", false, fmt.Sprintf("unsafe verify command blocked: %s (%s)", cmd, safetyReason)
+			return "", "", false, fmt.Sprintf("unsafe verify command blocked: %s (%s)", cmd, safetyReason), nil
 		}
 
 		wrapped := cmd
@@ -4037,38 +4063,17 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 			"description": fmt.Sprintf("plan step %d verify %d/%d", step.ID, i+1, len(required)),
 		}
 
-		if a.permManager != nil && a.permManager.IsEnabled() {
-			resp, err := a.permManager.Check(verifyCtx, "bash", args)
-			if err != nil {
-				return "", "", false, fmt.Sprintf("verify command blocked: %v", err)
-			}
-			if resp != nil && !resp.Allowed {
-				reason := strings.TrimSpace(resp.Reason)
-				if reason == "" {
-					reason = "permission denied"
-				}
-				return "", "", false, fmt.Sprintf("verify command blocked: %s", reason)
-			}
-		}
-
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("  ↳ verify %d/%d: %s\n", i+1, len(required), cmd)))
 
-		if approvedPlan != nil {
-			approvedPlan.RecordStepEffect(step.ID, "bash", map[string]any{"command": wrapped})
-			if a.planManager != nil {
-				_ = a.saveCurrentPlanWithVisibility("step verification command")
-			}
+		// Executor callbacks record the command and plan effects using the
+		// hook-authorized input, and only once actual execution starts.
+		result, err := a.executor.InvokeTool(verifyCtx, "bash", args)
+		if result.HookStopReason != "" {
+			return "", "", false, "", tools.HookStoppedError(result)
 		}
-
-		result, err := bashTool.Execute(verifyCtx, args)
-		a.mu.Lock()
-		a.responseToolsUsed = append(a.responseToolsUsed, "bash")
-		a.mu.Unlock()
-		a.recordResponseCommand("bash", args, result)
-		a.recordResponseEvidence("bash", args, result)
 		if err != nil {
-			return "", "", false, fmt.Sprintf("verify command failed: %s (%v)", cmd, err)
+			return "", "", false, fmt.Sprintf("verify command failed: %s (%v)", cmd, err), nil
 		}
 
 		detail := strings.TrimSpace(result.Content)
@@ -4083,7 +4088,7 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 			if failure == "" {
 				failure = "command returned non-success status"
 			}
-			return "", "", false, fmt.Sprintf("verify command failed: %s (%s)", cmd, failure)
+			return "", "", false, fmt.Sprintf("verify command failed: %s (%s)", cmd, failure), nil
 		}
 
 		if detail == "" {
@@ -4094,7 +4099,7 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 	}
 
 	summary := fmt.Sprintf("verify_commands_passed=%d/%d", len(required), len(required))
-	return summary, "Verification results:\n- " + strings.Join(lines, "\n- "), true, ""
+	return summary, "Verification results:\n- " + strings.Join(lines, "\n- "), true, "", nil
 }
 
 func (a *App) buildStepCompletionEvidence(p *plan.Plan, step *plan.Step, output string) ([]string, string, bool, string) {

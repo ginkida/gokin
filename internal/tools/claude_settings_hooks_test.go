@@ -195,3 +195,47 @@ func TestClaudeSettingsInvalidStateBlocksExecutorBeforeProviderWithoutSkillTool(
 		t.Fatalf("invalid settings reached provider: %v calls=%d", err, len(mock.Calls()))
 	}
 }
+
+func TestHookRewrittenWriteCheckpointUsesProviderInput(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retained=%t", retained), func(t *testing.T) {
+			executor, _, root, _ := settingsExecutorFixture(t, `printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"file_path":"TEST_ROOT/actual.txt","content":"actual"}}}'`)
+			call := &genai.FunctionCall{ID: "original", Name: "write", Args: map[string]any{"file_path": filepath.Join(root, "original.txt"), "content": "original"}}
+			result := executor.executeTool(t.Context(), call)
+			if !result.Success {
+				t.Fatalf("initial write failed: %+v", result)
+			}
+			if data, err := os.ReadFile(filepath.Join(root, "actual.txt")); err != nil || string(data) != "actual" {
+				t.Fatalf("rewrite=%q %v", data, err)
+			}
+			if call.Args["content"] != "original" {
+				t.Fatal("provider input mutated")
+			}
+			if retained {
+				executor.AcknowledgeToolResults([]*genai.Content{
+					{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: call}}},
+					{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}}}},
+				})
+				if n := executor.GetCheckpointJournal().Len(); n != 0 {
+					t.Fatalf("acknowledged rewritten write left %d checkpoints", n)
+				}
+			} else {
+				// A retry must replay by the original signature, even with a new ID,
+				// without rerunning hooks or changing an externally edited target.
+				if err := os.WriteFile(filepath.Join(root, "actual.txt"), []byte("external"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				executor.SetSideEffectDedup(true)
+				replay := *call
+				replay.ID = "retry"
+				got := executor.executeTool(t.Context(), &replay)
+				if !got.Success || got.Content != result.Content {
+					t.Fatalf("original call could not replay: %+v", got)
+				}
+				if data, err := os.ReadFile(filepath.Join(root, "actual.txt")); err != nil || string(data) != "external" {
+					t.Fatalf("retry repeated write: %q %v", data, err)
+				}
+			}
+		})
+	}
+}

@@ -277,6 +277,10 @@ func (a *App) finishGoalTurn(ctx context.Context, response string, worker *turnU
 	a.sessionLeaseMu.Unlock()
 	a.journalEvent("goal_verdict", map[string]any{"goal_id": goal.ID, "verdict": verdict.Verdict, "reason": verdict.Reason})
 	a.safeSendToProgram(ui.StreamTextMsg("\n" + a.GoalStatus() + "\n"))
+	if goal.Status != goals.Active || goal.Suspended {
+		// The worker already sent ResponseDone before the verdict's text.
+		a.safeSendToProgram(ui.ResponseDoneMsg{})
+	}
 }
 
 // User input always wins. Replace an older automatic assessment rather than
@@ -337,9 +341,9 @@ func (a *App) suspendGoal(ctx context.Context, id, reason string) {
 	// Cancellation prevents additional work, but saving a local pause must not
 	// inherit an expired model deadline. No external action is performed here.
 	a.sessionLeaseMu.Lock()
-	defer a.sessionLeaseMu.Unlock()
 	state := a.session.GoalState()
 	if state.Current == nil || state.Current.ID != id || state.Current.Status != goals.Active {
+		a.sessionLeaseMu.Unlock()
 		return
 	}
 	state.Current.Suspended, state.Current.Reason = true, truncateRunesApp(reason, 4000)
@@ -348,6 +352,7 @@ func (a *App) suspendGoal(ctx context.Context, id, reason string) {
 	if err := a.saveGoalState(state); err != nil {
 		a.recordHeadlessTerminalOutcome("persistence_failed", err.Error())
 	}
+	a.sessionLeaseMu.Unlock()
 	a.safeSendToProgram(ui.StatusUpdateMsg{Type: ui.StatusWarning, Message: "Goal paused: " + reason})
 }
 

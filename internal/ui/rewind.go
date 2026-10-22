@@ -51,18 +51,6 @@ func (m *Model) handleRewindKeys(msg tea.KeyMsg) tea.Cmd {
 		limit = len(m.rewindActions())
 		selected = &m.rewindAction
 	}
-	if m.rewindChoosingAction && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
-		action := int(msg.Runes[0] - '1')
-		if action < limit {
-			start, end := m.rewindVisibleRange(limit, m.rewindAction)
-			m.rewindAction = action
-			if action < start || action >= end {
-				return keyConsumed
-			}
-			m.rewindSummaryGuidance = ""
-			return m.handleRewindKeys(tea.KeyMsg{Type: tea.KeyEnter})
-		}
-	}
 	if m.rewindChoosingAction && m.rewindAction >= 0 && m.rewindAction < limit {
 		action := m.rewindActions()[m.rewindAction]
 		if action == "summarize-from" || action == "summarize-before" {
@@ -90,6 +78,18 @@ func (m *Model) handleRewindKeys(msg tea.KeyMsg) tea.Cmd {
 				}
 				return keyConsumed
 			}
+		}
+	}
+	if m.rewindChoosingAction && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
+		action := int(msg.Runes[0] - '1')
+		if action < limit {
+			start, end := m.rewindVisibleRange(limit, m.rewindAction)
+			m.rewindAction = action
+			if action < start || action >= end {
+				return keyConsumed
+			}
+			m.rewindSummaryGuidance = ""
+			return m.handleRewindKeys(tea.KeyMsg{Type: tea.KeyEnter})
 		}
 	}
 	switch msg.Type {

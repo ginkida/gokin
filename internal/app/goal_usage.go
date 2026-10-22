@@ -27,19 +27,23 @@ func (a *App) withGoalUsageContext(ctx context.Context, account *goalUsageAccoun
 	ctx = client.ContextWithTokenUsageCounter(ctx, &account.counter)
 	return client.ContextWithTokenUsageCheckpoint(ctx, func() {
 		a.sessionLeaseMu.Lock()
-		defer a.sessionLeaseMu.Unlock()
 		if a.session == nil || a.goalUsage != account {
+			a.sessionLeaseMu.Unlock()
 			return
 		}
 		state := a.session.GoalState()
 		if !account.matches(a.session.GetID(), state.Current) {
+			a.sessionLeaseMu.Unlock()
 			return
 		}
 		input, output := account.counter.Snapshot()
 		if input == account.input && output == account.output {
+			a.sessionLeaseMu.Unlock()
 			return
 		}
-		if err := a.saveGoalState(state); err != nil {
+		err := a.saveGoalState(state)
+		a.sessionLeaseMu.Unlock()
+		if err != nil {
 			a.recordHeadlessTerminalOutcome("persistence_failed", err.Error())
 			a.safeSendToProgram(ui.ErrorMsg(err))
 		}

@@ -1,9 +1,12 @@
 package undo
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"gokin/internal/fileutil"
 )
 
 // Operation is a committed file edit or an explicit undo of that edit.
@@ -59,18 +62,24 @@ func ReverseOperations(operations []Operation) []Operation {
 // rolls back successful writes if a later operation fails. The caller must
 // exclude concurrent tools while restoring the conversation and journal.
 func ApplyOperations(operations []Operation) error {
+	return applyOperations(operations, NewManager().applyOperation)
+}
+
+func applyOperations(operations []Operation, apply func(Operation) error) error {
 	if err := preflightOperations(operations); err != nil {
 		return err
 	}
-	m := NewManager()
 	for i, operation := range operations {
-		if err := m.applyOperation(operation); err != nil {
+		if err := apply(operation); err != nil {
+			if errors.Is(err, fileutil.ErrAtomicWriteCommitUncertain) {
+				return fmt.Errorf("restore failed after a visible write; not rolled back: %w", err)
+			}
 			rollback := ReverseOperations(operations[:i])
 			if rollbackErr := preflightOperations(rollback); rollbackErr != nil {
 				return fmt.Errorf("restore failed: %w; rollback incomplete: %v", err, rollbackErr)
 			}
 			for _, previous := range rollback {
-				if rollbackErr := m.applyOperation(previous); rollbackErr != nil {
+				if rollbackErr := apply(previous); rollbackErr != nil {
 					return fmt.Errorf("restore failed: %w; rollback incomplete: %v", err, rollbackErr)
 				}
 			}
@@ -160,6 +169,12 @@ func (m *Manager) ExclusiveRestore(code bool, apply func() error) error {
 }
 
 func (m *Manager) applyOperation(operation Operation) error {
+	// Earlier operations can change ancestry after the transaction preflight.
+	for _, path := range append(changePaths(&operation.Change), operation.Change.CreatedDirs...) {
+		if err := validateRestorePath(path); err != nil {
+			return err
+		}
+	}
 	if operation.Undo {
 		return m.revertChange(&operation.Change)
 	}

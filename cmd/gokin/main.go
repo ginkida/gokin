@@ -547,6 +547,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		}()
 	}
 
+	if effectiveHeadless {
+		defer application.CloseLanguageServers()
+	}
 	defer application.EndSessionHooks(context.Background(), "other")
 	if effectiveHeadless {
 		failureKind = "execution"

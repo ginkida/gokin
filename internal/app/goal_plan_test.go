@@ -169,8 +169,8 @@ func TestNativePlanVerificationHonorsAnExcludedShell(t *testing.T) {
 	a.registry.Unregister("bash")
 	a.registry.MustRegister(shell)
 	ctx := tools.ContextWithToolCapabilityCeiling(t.Context(), []string{"read", "write"})
-	_, _, passed, reason := a.runStepVerificationCommands(ctx, p, step)
-	if passed || !strings.Contains(reason, "capability ceiling") || shell.calls != 0 {
+	_, _, passed, reason, err := a.runStepVerificationCommands(ctx, p, step)
+	if err != nil || passed || !strings.Contains(reason, "capability ceiling") || shell.calls != 0 {
 		t.Fatalf("native verification escaped the caller's tools: passed=%t reason=%s calls=%d", passed, reason, shell.calls)
 	}
 }
@@ -276,4 +276,59 @@ func TestDelegatedGoalPlanUsesTheInvocationModelTurnLimit(t *testing.T) {
 	if err == nil || result.Error == nil || result.Error.Kind != "max_turns" || len(child.Calls()) != 0 || result.Goal.Status != goals.Active || !result.Goal.Suspended {
 		t.Fatalf("delegated plan bypassed or hid the model-turn limit: %+v %v", result, err)
 	}
+}
+
+func TestNativePlanVerificationRunsPreToolHooks(t *testing.T) {
+	for _, mode := range []string{"deny", "rewrite"} {
+		t.Run(mode, func(t *testing.T) {
+			a := newGoalTestApp(t, testkit.NewMockClient(), testkit.NewMockClient())
+			p, step := configureGoalPlan(t, a, testkit.NewMockClient())
+			shell := &verifyHookTool{appHeadlessScriptedTool: appHeadlessScriptedTool{name: "bash", results: []tools.ToolResult{tools.NewSuccessResult("verified")}}, commands: make(chan string, 1)}
+			output := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"VERIFY_DENIED"}}`
+			if mode == "rewrite" {
+				output = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"go test ./rewritten"}}}`
+			}
+			installCwdSettings(t, a, map[string]any{"PreToolUse": []any{fileHookGroup("Bash", "printf '%s' '"+output+"'")}})
+			a.registry.Unregister("bash")
+			a.registry.MustRegister(shell)
+			a.planManager.SetExecutionMode(true)
+			a.planManager.SetCurrentStepID(step.ID)
+			_, _, passed, reason, err := a.runStepVerificationCommands(t.Context(), p, step)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "deny" {
+				if passed || shell.calls != 0 || !strings.Contains(reason, "VERIFY_DENIED") {
+					t.Fatalf("hook denial bypassed: passed=%t calls=%d reason=%s", passed, shell.calls, reason)
+				}
+				if ledger := p.GetRunLedgerSnapshot(); ledger[step.ID] != nil && ledger[step.ID].ToolCalls != 0 {
+					t.Fatal("blocked verification was recorded as executed", ledger[step.ID])
+				}
+			} else {
+				if !passed || shell.CallCount() != 1 {
+					t.Fatalf("verification failed: %t %s", passed, reason)
+				}
+				if command := <-shell.commands; command != "go test ./rewritten" {
+					t.Fatalf("hook rewrite bypassed: %q", command)
+				}
+				if commands := a.snapshotResponseCommands(); len(commands) != 1 || commands[0] != "go test ./rewritten" {
+					t.Fatalf("verification recorded commands that did not run: %v", commands)
+				}
+				ledger := p.GetRunLedgerSnapshot()[step.ID]
+				if ledger == nil || ledger.ToolCalls != 1 || len(ledger.Commands) != 1 || ledger.Commands[0] != "go test ./rewritten" {
+					t.Fatalf("verification plan ledger lost effective command or duplicated execution: %+v", ledger)
+				}
+			}
+		})
+	}
+}
+
+type verifyHookTool struct {
+	appHeadlessScriptedTool
+	commands chan string
+}
+
+func (v *verifyHookTool) Execute(ctx context.Context, args map[string]any) (tools.ToolResult, error) {
+	v.commands <- args["command"].(string)
+	return v.appHeadlessScriptedTool.Execute(ctx, args)
 }

@@ -262,6 +262,16 @@ func (a *App) syncLSPTool(manager *lsp.Manager) error {
 	return nil
 }
 
+// CloseLanguageServers stops lazily started plugin servers on either exit path.
+func (a *App) CloseLanguageServers() {
+	a.mu.Lock()
+	manager := a.lspManager
+	a.mu.Unlock()
+	if manager != nil {
+		_ = manager.Close()
+	}
+}
+
 func (a *App) GetLSPStatus() string {
 	a.mu.Lock()
 	manager := a.lspManager
