@@ -87,7 +87,7 @@ func buildSetupChoices() []setupChoice {
 				Action: "api:" + p.Name,
 				Title:  "GLM Coding Plan (recommended)",
 				Lines: []string{
-					"GLM-5.2 via Z.ai — 1M context, extended thinking",
+					"GLM-5.3 via Z.ai — 1M context, always-on reasoning; Flash for images",
 					"Implicit prompt caching (big token savings)",
 					"Budget-friendly (~$3/month)",
 					"Get key at: " + p.SetupKeyURL,

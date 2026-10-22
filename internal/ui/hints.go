@@ -9,6 +9,7 @@ import (
 
 // HintSystem manages contextual hints for the user.
 type HintSystem struct {
+	claudeKeys   bool
 	enabled      bool
 	hintsShown   map[string]int
 	styles       *Styles
@@ -79,7 +80,7 @@ func (h *HintSystem) GetContextualHint(state State, currentTool string, sessionD
 				if candidate == "" || h.hintsShown[id] > 0 {
 					continue
 				}
-				return candidate, id
+				return profileKeyText(candidate, h.claudeKeys), id
 			}
 			return "", ""
 		}

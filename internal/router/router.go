@@ -229,6 +229,15 @@ func (r *Router) Route(message string) *RoutingDecision {
 	return r.RouteWithContext(context.Background(), message)
 }
 
+// ThinkingBudgetFor selects reasoning without routing, delegation, tool-schema
+// changes, or an auxiliary model request. Direct headless execution still needs
+// the same adaptive thinking policy as interactive executor requests.
+func (r *Router) ThinkingBudgetFor(message string) int32 {
+	analysis := r.analyzer.Analyze(message)
+	r.applyCapabilityAdjustments(analysis)
+	return r.selectThinkingBudget(analysis)
+}
+
 // RouteWithContext is like Route but propagates the caller's context to
 // LLM-backed decomposition. Prefer this when a context is available so the
 // operation can be cancelled by parent timeout.
@@ -501,6 +510,11 @@ func (r *Router) ExecuteWithPolicyDecisions(
 	// want persisted.
 	originalMessage := message
 	decision := r.routeWithContext(ctx, message, false)
+	if tools.HasPendingSkillModelSettings(r.registry) {
+		// Inline skill settings belong to this conversation's next turn.
+		// Automatic delegation would move the workflow to a different owner.
+		decision.Handler = HandlerExecutor
+	}
 
 	cl := r.getClient()
 
@@ -565,11 +579,11 @@ func (r *Router) ExecuteWithPolicyDecisions(
 	priorLen := len(history)
 
 	// Skill authority is one-shot per user request, and Executor.Execute is the
-	// only handler that promotes-and-clears it. Direct, sub-agent and
-	// coordinated turns bypass that boundary entirely, so an explicit `/skill`
+	// boundary that promotes-and-clears it. Direct also calls Executor.Execute;
+	// sub-agent and coordinated turns bypass it, so an explicit `/skill`
 	// handoff routed to one of them would stay pending and activate in a later,
 	// unrelated request. Close the turn here for exactly those handlers.
-	if decision.Handler != HandlerExecutor {
+	if decision.Handler != HandlerExecutor && decision.Handler != HandlerDirect {
 		tools.BeginSkillPermissionTurn(r.registry)
 	}
 
@@ -577,12 +591,12 @@ func (r *Router) ExecuteWithPolicyDecisions(
 	case HandlerDirect:
 		// Direct AI response without tools
 		newHistory, resp, err := r.executeDirect(ctx, history, message)
-		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage), resp, err
+		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage, message), resp, err
 
 	case HandlerExecutor:
 		// Standard function calling loop
 		newHistory, resp, err := r.executor.Execute(ctx, history, message)
-		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage), resp, err
+		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage, message), resp, err
 
 	case HandlerSubAgent:
 		// Spawn a sub-agent. The sub-agent path returns a MINIMAL history (just
@@ -608,7 +622,7 @@ func (r *Router) ExecuteWithPolicyDecisions(
 
 	default:
 		newHistory, resp, err := r.executor.Execute(ctx, history, message)
-		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage), resp, err
+		return restoreOriginalUserMessage(newHistory, priorLen, originalMessage, message), resp, err
 	}
 }
 
@@ -629,7 +643,7 @@ func (r *Router) ExecuteWithPolicyDecisions(
 // Defensive: if newHistory[priorLen] doesn't match the exact shape
 // Executor.Execute produces (a single plain-text user Part), the history is
 // returned unchanged rather than risk corrupting an unrelated turn.
-func restoreOriginalUserMessage(newHistory []*genai.Content, priorLen int, originalMessage string) []*genai.Content {
+func restoreOriginalUserMessage(newHistory []*genai.Content, priorLen int, originalMessage string, sent ...string) []*genai.Content {
 	if priorLen < 0 || priorLen >= len(newHistory) {
 		return newHistory
 	}
@@ -640,6 +654,11 @@ func restoreOriginalUserMessage(newHistory []*genai.Content, priorLen int, origi
 	part := injected.Parts[0]
 	if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.Text == "" {
 		return newHistory
+	}
+	// Remove the known routing prefix while retaining evidence the executor
+	// appended after dispatch, such as a completed background hook result.
+	if len(sent) > 0 && sent[0] != "" && strings.HasPrefix(part.Text, sent[0]) {
+		originalMessage += strings.TrimPrefix(part.Text, sent[0])
 	}
 	newHistory[priorLen] = genai.NewContentFromText(originalMessage, genai.RoleUser)
 	return newHistory

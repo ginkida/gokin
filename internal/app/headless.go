@@ -13,6 +13,8 @@ import (
 
 	"gokin/internal/agent"
 	"gokin/internal/commands"
+	"gokin/internal/goals"
+	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 )
@@ -141,6 +143,7 @@ type HeadlessError struct {
 
 // HeadlessResult is the versioned, single-object automation envelope.
 type HeadlessResult struct {
+	Goal             *goals.Goal    `json:"goal,omitempty"`
 	SchemaVersion    int            `json:"schema_version"`
 	Type             string         `json:"type"`
 	Result           string         `json:"result"`
@@ -193,6 +196,11 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 	emitEarlyFailure := func(kind string, failure error) (HeadlessResult, error) {
 		result.Status = "error"
+		if errors.Is(failure, context.Canceled) {
+			result.Status, kind = "cancelled", "cancelled"
+		} else if errors.Is(failure, context.DeadlineExceeded) {
+			result.Status, kind = "timeout", "timeout"
+		}
 		result.Error = &HeadlessError{Kind: kind, Message: failure.Error()}
 		result.DurationMS = time.Since(started).Milliseconds()
 		if a != nil && a.session != nil {
@@ -222,7 +230,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		)
 	}
 	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
+	if prompt == "" && (a == nil || a.hooksManager == nil) {
 		return emitEarlyFailure("validation", fmt.Errorf("prompt is required"))
 	}
 	if ctx == nil {
@@ -263,6 +271,11 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// claimHeadlessForeground creates this invocation's terminal owner; bind
 	// delegated-agent accounting only after that token exists.
 	runCtx = a.withHeadlessInvocationScope(runCtx)
+	defer a.closeAsyncHooks()
+	runCtx = a.withAuxiliaryRequests(runCtx)
+	if a.contextManager != nil {
+		a.contextManager.SetAuxiliaryRequestContext(runCtx)
+	}
 	restoreInlineSteers := a.executor.SetInlineFinalUserSteers(opts.InlineExternalSteers)
 	defer restoreInlineSteers()
 	pipelineStarted := false
@@ -270,6 +283,17 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		cancel()
 		a.releaseHeadlessForeground(claim, pipelineStarted)
 	}()
+	runCtx = a.withSessionStartHooks(runCtx)
+	if err := hooks.AwaitSessionStart(runCtx); err != nil {
+		return emitEarlyFailure("session_start", err)
+	}
+	var startupFollowup string
+	if initial := a.takeSessionInitialMessage(); initial != "" {
+		startupFollowup, prompt = prompt, initial
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return emitEarlyFailure("validation", fmt.Errorf("prompt is required; pass a prompt or provide SessionStart initialUserMessage"))
+	}
 	// Re-evaluate durable recovery state only after the shared foreground slot
 	// is ours. The prior turn may have persisted a retry while this invocation
 	// was waiting to claim the slot; launching an unrelated prompt from the
@@ -310,13 +334,18 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// builder's handler that silently drifted (no plan-step effects, no
 	// token-estimate fires).
 	previousPresenter := a.currentPresenter()
+	goalFields := strings.Fields(prompt)
+	goalTextMode := len(goalFields) > 0 && goalFields[0] == "/goal"
+	if goal := a.session.GoalState().Current; goal != nil && goal.Status == goals.Active {
+		goalTextMode = true
+	}
 	var sp headlessOutputPresenter
 	switch format {
 	case HeadlessOutputStreamJSON:
 		sp = newStreamJSONPresenter(opts.Stdout, result.SessionID, opts.StreamState)
 	default:
 		presenterWriter := io.Discard
-		if format == HeadlessOutputText {
+		if format == HeadlessOutputText && !goalTextMode {
 			presenterWriter = opts.Stdout
 		}
 		sp = newStdoutPresenter(presenterWriter)
@@ -341,42 +370,131 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// events (handleSubAgentActivity). The original incident (deepseek
 	// baseline: routed headless printed nothing, journal blind) cannot
 	// recur even with routing enabled.
-	pipelineStarted = true
-	a.processMessageWithMemoryQuery(runCtx, prompt, memoryQuery)
-	result.Result = selectHeadlessResult(sp.Result(), a.headlessFinalResultSnapshot())
-
-	// Provider-native structured output is not uniformly available across
-	// Gokin's five backends. Validate locally and give the model a small,
-	// tool-free correction budget after its real workflow. The shared cost
-	// ledger/deadline remain in force across corrections.
 	var structuredErr error
-	if opts.JSONSchema != nil && a.headlessPipelineHealthy(runCtx) {
-		for attempt := 0; attempt <= maxStructuredOutputRetries; attempt++ {
-			var value any
-			value, structuredErr = opts.JSONSchema.Validate(result.Result)
-			if structuredErr == nil {
-				result.StructuredOutput = &value
-				break
+	structuredAttempts := 0
+	for {
+		goalFields := strings.Fields(prompt)
+		var work, commandResult string
+		var goalCommand bool
+		var localCommand bool
+		var goalErr, submissionErr error
+		if len(goalFields) > 0 && goalFields[0] == "/goal" && commands.GoalStartsWork(goalFields[1:]) {
+			runCtx, submissionErr = a.withPromptSubmission(runCtx, prompt)
+		}
+		if submissionErr == nil {
+			runCtx, work, commandResult, localCommand, goalErr = a.headlessSlashCommand(runCtx, prompt)
+			if !localCommand && goalErr == nil {
+				work, commandResult, goalCommand, goalErr = a.goalCommand(runCtx, prompt)
 			}
-			if attempt == maxStructuredOutputRetries {
-				break
-			}
-			correctionCtx := tools.ContextWithToolCapabilityCeiling(runCtx, []string{})
-			correctionCtx = withStructuredOutputCorrection(correctionCtx)
-			a.structuredCorrectionActive.Store(true)
-			a.processMessageWithMemoryQuery(
-				correctionCtx,
-				opts.JSONSchema.correctionPrompt(structuredErr),
-				memoryQuery,
-			)
-			a.structuredCorrectionActive.Store(false)
-			result.Result = selectHeadlessResult(
-				sp.Result(), a.headlessFinalResultSnapshot())
-			if !a.headlessPipelineHealthy(runCtx) {
-				break
+			if localCommand && a.session != nil {
+				result.SessionID = a.session.GetID()
 			}
 		}
+		if submissionErr != nil {
+			a.reportHeadlessStopFailure(runCtx, a.activeHeadlessTerminalToken(), submissionErr)
+		} else if goalErr != nil {
+			kind := "goal"
+			if localCommand {
+				kind = "command"
+			}
+			a.recordHeadlessTerminalOutcome(kind, goalErr.Error())
+		} else if (goalCommand || localCommand) && work == "" {
+			a.recordHeadlessFinalResult(commandResult)
+			// Status/clear commands are read-only with respect to the model. A
+			// schema mismatch must not turn their output into a new worker turn.
+			if opts.JSONSchema != nil {
+				_, structuredErr = opts.JSONSchema.Validate(commandResult)
+			}
+		} else {
+			if goalCommand || localCommand {
+				prompt, memoryQuery = work, work
+			}
+			a.goalMu.Lock()
+			a.goalNext = nil
+			a.goalMu.Unlock()
+			turnCtx := runCtx
+			if goalCommand {
+				if goal := a.session.GoalState().Current; goal != nil {
+					turnCtx = context.WithValue(runCtx, goalContinuationKey{}, &goalContinuation{sessionID: a.session.GetID(), goalID: goal.ID, epoch: a.recoveryEpoch.Load(), turns: goal.Turns})
+				}
+			}
+			for {
+				pipelineStarted = true
+				result.StructuredOutput = nil
+				var deferred *goalTurnDeferral
+				processingCtx := turnCtx
+				if opts.JSONSchema != nil {
+					deferred = &goalTurnDeferral{}
+					processingCtx = context.WithValue(processingCtx, goalTurnDeferralKey{}, deferred)
+				}
+				a.processMessageWithMemoryQuery(processingCtx, prompt, memoryQuery)
+				if runCtx.Err() != nil {
+					// A deadline can fall after /goal creates its owner but before
+					// processMessage installs a turn observation. That early return
+					// still has to pause the exact goal created by this invocation.
+					if source, ok := turnCtx.Value(goalContinuationKey{}).(*goalContinuation); ok {
+						a.sessionLeaseMu.Lock()
+						current := a.session.GoalState().Current
+						unpaused := a.goalSourceMatchesLocked(source) && current != nil && !current.Suspended
+						a.sessionLeaseMu.Unlock()
+						if unpaused {
+							a.failGoalTurn(turnCtx, source, runCtx.Err())
+						}
+					}
+				}
+				if !a.headlessPipelineHealthy(runCtx) {
+					if deferred != nil && deferred.ready {
+						err := deferred.err
+						if err == nil {
+							err = runCtx.Err()
+						}
+						if err == nil {
+							err = fmt.Errorf("goal work stopped before its terminal answer completed")
+						}
+						a.finalizeDeferredGoalTurn(turnCtx, deferred, a.headlessFinalResultSnapshot(), err)
+					}
+					break
+				}
+				result.Result = selectHeadlessResult(sp.Result(), a.headlessFinalResultSnapshot())
+				correctionCtx := context.WithValue(runCtx, goalTurnDeferralKey{}, deferred)
+				if deferred != nil && deferred.lineage != nil {
+					correctionCtx = withConversationLineage(correctionCtx, deferred.lineage.sessionID, deferred.lineage.epoch)
+				}
+				if deferred != nil && deferred.observation != nil && deferred.observation.account != nil {
+					correctionCtx = a.withGoalUsageContext(correctionCtx, deferred.observation.account)
+				}
+				structuredErr = a.correctHeadlessStructuredOutput(correctionCtx, opts.JSONSchema, sp, &result, memoryQuery, &structuredAttempts)
+				finalizationErr := structuredErr
+				if deferred != nil && deferred.err != nil {
+					finalizationErr = deferred.err
+				}
+				if finalizationErr == nil && !a.headlessPipelineHealthy(runCtx) {
+					finalizationErr = fmt.Errorf("structured-output correction did not complete")
+				}
+				if structuredErr != nil && a.headlessPipelineHealthy(runCtx) {
+					a.recordHeadlessTerminalOutcome("structured_output", structuredErr.Error())
+				}
+				a.finalizeDeferredGoalTurn(turnCtx, deferred, result.Result, finalizationErr)
+				if structuredErr != nil || !a.headlessPipelineHealthy(runCtx) {
+					break
+				}
+				next := a.takeGoalContinuation()
+				if next == nil {
+					break
+				}
+				prompt, memoryQuery = next.prompt, next.prompt
+				turnCtx = withConversationLineage(runCtx, next.sessionID, next.epoch)
+				turnCtx = context.WithValue(turnCtx, goalContinuationKey{}, next)
+			}
+		}
+		if startupFollowup == "" || structuredErr != nil || !a.headlessPipelineHealthy(runCtx) {
+			break
+		}
+		prompt, memoryQuery = startupFollowup, startupFollowup
+		startupFollowup = ""
 	}
+	result.Result = selectHeadlessResult(sp.Result(), a.headlessFinalResultSnapshot())
+
 	finishOutput()
 	// The shared finalizer retains foreground ownership while the headless token
 	// is active. Restore presenter/routing immediately; the slot itself remains
@@ -387,6 +505,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	a.restoreHeadlessDirect(claim)
 	result.Result = selectHeadlessResult(sp.Result(), a.headlessFinalResultSnapshot())
 
+	a.closeAsyncHooks()
 	// Persist the turn SYNCHRONOUSLY so a subsequent headless resume continues
 	// this conversation. The normal SaveAfterMessage path is async +
 	// debounced and may not flush before the process exits. Save() is a no-op
@@ -404,6 +523,13 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		if err := a.sessionManager.Save(); err != nil {
 			saveErr = fmt.Errorf("failed to persist session: %w", err)
 			fmt.Fprintf(opts.Stderr, "Error: %v\n", saveErr)
+		}
+	}
+
+	// Headless is a second exit path that never reaches gracefulShutdown, so it
+	if pipelineStarted && runCtx.Err() == nil {
+		if goal := a.session.GoalState().Current; goal != nil && goal.Status == goals.Active {
+			a.recordHeadlessTerminalOutcome("goal_unfinished", "Goal remains active: "+goal.Reason)
 		}
 	}
 
@@ -487,6 +613,9 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 
 	result.Usage, result.Cost = a.headlessInvocationMetricsSnapshot()
+	if rounds, scoped := tools.InvocationModelTurnsClaimed(runCtx); scoped {
+		result.Usage.ModelRounds = rounds
+	}
 	if budgetLedger, budgeted := tools.InvocationBudgetLedgerFromContext(runCtx); budgeted {
 		_, spent := budgetLedger.Snapshot()
 		// The shared ledger is authoritative for a budgeted invocation. Agent
@@ -520,6 +649,12 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 	}
 
+	result.Goal = a.session.GoalState().Current
+	if goalTextMode && format == HeadlessOutputText && result.Result != "" {
+		if _, err := fmt.Fprintln(opts.Stdout, result.Result); err != nil {
+			return result, errors.Join(runErr, err)
+		}
+	}
 	if format == HeadlessOutputJSON || format == HeadlessOutputStreamJSON {
 		if err := json.NewEncoder(opts.Stdout).Encode(result); err != nil {
 			outputErr := fmt.Errorf("write headless JSON result: %w", err)

@@ -11,7 +11,7 @@ import (
 )
 
 var readRuleTools = map[string]bool{
-	"read": true, "grep": true, "glob": true, "list_dir": true, "tree": true,
+	"read": true, "grep": true, "glob": true, "list_dir": true, "tree": true, "lsp": true,
 }
 
 var editRuleTools = map[string]bool{
@@ -406,6 +406,9 @@ func permissionPathTargets(runtimeName string, args map[string]any, workDir stri
 		return value, ok && value != ""
 	}
 	switch runtimeName {
+	case "lsp":
+		value, ok := stringArg("filePath")
+		return []string{value}, ok
 	case "read", "write", "edit":
 		value, ok := stringArg("file_path")
 		return []string{value}, ok

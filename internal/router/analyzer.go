@@ -598,12 +598,12 @@ func (ta *TaskAnalyzer) decomposeWithLLM(ctx context.Context, message string) (*
 	prompt := LLMDecomposerPrompt + message
 
 	// Send to LLM
-	stream, err := ta.llmClient.SendMessage(ctx, prompt)
+	stream, err := client.SendAuxiliaryMessage(ctx, ta.llmClient, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("LLM request failed: %w", err)
 	}
 
-	resp, err := stream.CollectContext(ctx)
+	resp, err := client.CollectAuxiliaryResponse(ctx, ta.llmClient, stream)
 	if err != nil {
 		return nil, fmt.Errorf("LLM response collection failed: %w", err)
 	}

@@ -9,26 +9,25 @@ type ModelPreset struct {
 }
 
 // ModelPresets contains predefined model configurations. GLM (Z.AI) is the
-// default across coding/fast/balanced — gokin's primary target is active coding,
-// and glm-5.2 has a 1M context window, verified implicit prefix caching, and full
-// extended-thinking support.
+// default provider. Coding, fast, and glm select Flash for everyday CLI work;
+// balanced selects the flagship model for tasks that need it.
 var ModelPresets = map[string]ModelPreset{
 	"coding": {
 		Provider:        "glm",
-		Name:            "glm-5.2",
-		Temperature:     0.6,
+		Name:            DefaultGLMModel,
+		Temperature:     1.0,
 		MaxOutputTokens: 65536,
 	},
 	"fast": {
 		Provider:        "glm",
-		Name:            "glm-5.2",
-		Temperature:     0.6,
+		Name:            GLMFlashModel,
+		Temperature:     1.0,
 		MaxOutputTokens: 65536,
 	},
 	"balanced": {
 		Provider:        "glm",
-		Name:            "glm-5.2",
-		Temperature:     0.6,
+		Name:            GLMFlagshipModel,
+		Temperature:     1.0,
 		MaxOutputTokens: 65536,
 	},
 	"creative": {
@@ -39,8 +38,8 @@ var ModelPresets = map[string]ModelPreset{
 	},
 	"glm": {
 		Provider:        "glm",
-		Name:            "glm-5.2",
-		Temperature:     0.7,
+		Name:            DefaultGLMModel,
+		Temperature:     1.0,
 		MaxOutputTokens: 131072,
 	},
 	"kimi": {
@@ -112,14 +111,14 @@ func providerDefaultPreset(provider string) string {
 }
 
 // looksLikeDefaultModelConfig reports whether a ModelConfig still holds the
-// zero-preset defaults (glm-5.2 / 131072 output). Used to decide whether
+// zero-preset defaults (glm-5.3-flash / 131072 output). Used to decide whether
 // auto-applying a provider preset is safe: if the user customised Name or
 // MaxOutputTokens themselves, we leave their values alone.
 func looksLikeDefaultModelConfig(m *ModelConfig) bool {
 	if m == nil {
 		return false
 	}
-	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "glm-5.2" || m.Name == "kimi-for-coding" || m.Name == "k3"
+	defaultName := m.Name == "" || m.Name == "glm-5" || m.Name == "glm-5.1" || m.Name == "glm-5.2" || m.Name == DefaultGLMModel || m.Name == "kimi-for-coding" || m.Name == "k3"
 	defaultMax := m.MaxOutputTokens == 0 || m.MaxOutputTokens == 131072
 	return defaultName && defaultMax
 }

@@ -7,6 +7,17 @@ import (
 
 const completionReviewDraftLimit = 700
 
+// CompletionReviewUnchanged is an internal acknowledgement, never user prose.
+const CompletionReviewUnchanged = "GOKIN_REVIEW_UNCHANGED"
+
+func BuildInteractiveCompletionReviewPrompt(userMessage, response string, touchedPaths, commands, gitChangedPaths, falselyClaimedPaths []string, evidenceLedger string) string {
+	prompt := BuildCompletionReviewPrompt(userMessage, response, touchedPaths, commands, gitChangedPaths, falselyClaimedPaths, evidenceLedger)
+	prompt = strings.TrimSuffix(prompt, "- End with a concise completion summary that names changed files/components and verification performed.\n")
+	return prompt + "- The user has already seen the draft. Do not repeat or paraphrase an unchanged completion summary.\n" +
+		"- After inspecting changes and completing any necessary verification, if the draft remains accurate and complete, reply with exactly " + CompletionReviewUnchanged + " and nothing else.\n" +
+		"- If you changed the implementation, corrected a claim, or found a limitation the user must know, return the complete corrected final answer instead. Never use the acknowledgement to hide a failed or missing check.\n"
+}
+
 func ShouldRunCompletionReview(userMessage, response string, toolsUsed, touchedPaths, commands []string) bool {
 	if len(touchedPaths) == 0 {
 		return false

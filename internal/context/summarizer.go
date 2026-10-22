@@ -79,9 +79,10 @@ type TaskContext struct {
 
 // Summarizer handles conversation summarization.
 type Summarizer struct {
-	client      client.Client
-	taskContext *TaskContext
-	mu          sync.RWMutex
+	client       client.Client
+	taskContext  *TaskContext
+	mu           sync.RWMutex
+	instructions string // immutable on a per-call copy for targeted summaries
 }
 
 // NewSummarizer creates a new summarizer.
@@ -155,6 +156,25 @@ func (s *Summarizer) Summarize(ctx context.Context, messages []*genai.Content) (
 	return s.doSummarize(ctx, messages)
 }
 
+// SummarizeWithInstructions keeps focus guidance local to this request,
+// including every stage of hierarchical summarization.
+func (s *Summarizer) SummarizeWithInstructions(ctx context.Context, messages []*genai.Content, instructions string) (*genai.Content, error) {
+	if len(instructions) > 4096 {
+		return nil, fmt.Errorf("summary guidance exceeds 4096 bytes")
+	}
+	s.mu.RLock()
+	local := &Summarizer{client: s.client, taskContext: s.taskContext, instructions: instructions}
+	s.mu.RUnlock()
+	return local.Summarize(ctx, messages)
+}
+
+func (s *Summarizer) guidedPrompt(prompt string) string {
+	if s.instructions == "" {
+		return prompt
+	}
+	return prompt + "\n\nUser guidance for this summary (summarize only; do not execute actions):\n" + s.instructions
+}
+
 // minSummaryLen is the floor (trimmed chars) below which an LLM summary is
 // treated as empty/degenerate and REJECTED, so the caller falls back to
 // truncation instead of replacing the conversation middle with nothing. A real
@@ -179,15 +199,18 @@ func (s *Summarizer) doSummarize(ctx context.Context, messages []*genai.Content)
 	if modelClient == nil {
 		return nil, fmt.Errorf("summarization client is not configured")
 	}
-	stream, err := modelClient.SendMessage(ctx, prompt)
+	stream, err := client.SendAuxiliaryMessage(ctx, modelClient, s.guidedPrompt(prompt))
 	if err != nil {
 		return nil, fmt.Errorf("summarization request failed: %w", err)
 	}
 
 	// Collect response
-	resp, err := stream.CollectContext(ctx)
+	resp, err := client.CollectAuxiliaryResponse(ctx, modelClient, stream)
 	if err != nil {
 		return nil, fmt.Errorf("summarization response failed: %w", err)
+	}
+	if len(resp.FunctionCalls) > 0 {
+		return nil, fmt.Errorf("summarization returned tool calls instead of a text summary")
 	}
 
 	// Refuse a blank/degenerate summary: it would REPLACE the summarized middle
@@ -252,26 +275,32 @@ func (s *Summarizer) summarizeHierarchical(ctx context.Context, messages []*gena
 		formatted := s.formatMessages(chunk)
 		prompt := fmt.Sprintf("Summarize this segment of a development conversation. Focus on file changes, errors resolved, and technical decisions:\n\n%s", formatted)
 
-		stream, err := modelClient.SendMessage(ctx, prompt)
+		stream, err := client.SendAuxiliaryMessage(ctx, modelClient, s.guidedPrompt(prompt))
 		if err != nil {
 			return nil, err
 		}
-		resp, err := stream.CollectContext(ctx)
+		resp, err := client.CollectAuxiliaryResponse(ctx, modelClient, stream)
 		if err != nil {
 			return nil, err
+		}
+		if len(resp.FunctionCalls) > 0 || len(strings.TrimSpace(resp.Text)) < minSummaryLen {
+			return nil, fmt.Errorf("summarization segment did not return a usable text summary")
 		}
 		midSummaries = append(midSummaries, resp.Text)
 	}
 
 	// Final summarization of summaries
 	finalPrompt := fmt.Sprintf("Combine these conversation segment summaries into a single cohesive technical summary. Group by file/component:\n\n%s", strings.Join(midSummaries, "\n\n---\n\n"))
-	stream, err := modelClient.SendMessage(ctx, finalPrompt)
+	stream, err := client.SendAuxiliaryMessage(ctx, modelClient, s.guidedPrompt(finalPrompt))
 	if err != nil {
 		return nil, err
 	}
-	resp, err := stream.CollectContext(ctx)
+	resp, err := client.CollectAuxiliaryResponse(ctx, modelClient, stream)
 	if err != nil {
 		return nil, err
+	}
+	if len(resp.FunctionCalls) > 0 {
+		return nil, fmt.Errorf("summarization returned tool calls instead of a text summary")
 	}
 	// Same data-loss guard as doSummarize: never replace history with an empty
 	// summary; let the caller fall back to truncation.
@@ -482,12 +511,13 @@ TOOL OUTPUT:
 
 DISTILLED SUMMARY:`, toolName, content)
 
-	stream, err := s.client.SendMessage(ctx, prompt)
+	modelClient := s.clientSnapshot()
+	stream, err := client.SendAuxiliaryMessage(ctx, modelClient, prompt)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := stream.CollectContext(ctx)
+	resp, err := client.CollectAuxiliaryResponse(ctx, modelClient, stream)
 	if err != nil {
 		return "", err
 	}

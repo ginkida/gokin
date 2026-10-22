@@ -366,7 +366,7 @@ var toolSetDefinitions = map[ToolSet][]string{
 		// without depending on an extra tool set being active.
 		"mcp_admin",
 		// Semantic discovery tools — fundamental for code understanding.
-		"go_to_definition", "find_references", "go_search",
+		"go_to_definition", "find_references", "go_search", "lsp",
 		// request_tool moved to ToolSetAgent — it was shipping in the
 		// Core declaration list for main-agent Kimi requests, but the
 		// requester dependency is only wired in the sub-agent path.
@@ -504,6 +504,7 @@ func DefaultRegistry(workDir string) *Registry {
 	r.MustRegister(NewRefactorTool())
 	r.MustRegister(NewToolsListTool(r))
 	r.MustRegister(NewSkillTool(workDir))
+	r.MustRegister(NewLSPTool(workDir))
 	r.MustRegister(NewRequestToolTool())
 	r.MustRegister(NewAskAgentTool())
 
@@ -956,6 +957,7 @@ func DefaultLazyRegistry(workDir string) *LazyRegistry {
 	r.RegisterFactory("go_to_definition", func() Tool { return NewGoToDefinitionTool(workDir) }, declarations["go_to_definition"])
 	r.RegisterFactory("find_references", func() Tool { return NewFindReferencesTool(workDir) }, declarations["find_references"])
 	r.RegisterFactory("go_search", func() Tool { return NewGoSearchTool(workDir) }, declarations["go_search"])
+	r.RegisterFactory("lsp", func() Tool { return NewLSPTool(workDir) }, declarations["lsp"])
 
 	// Review changes tool
 	r.RegisterFactory("review_changes", func() Tool { return NewReviewChangesTool(workDir) }, declarations["review_changes"])

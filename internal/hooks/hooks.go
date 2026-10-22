@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -23,6 +24,15 @@ const (
 	// exits non-zero asks the agent to CONTINUE the turn, with the hook's
 	// output as the reason (bounded to one continuation per user turn).
 	Stop Type = "stop"
+	// UserPromptSubmit runs before submitted text or a typed workflow executes.
+	UserPromptSubmit Type = "user_prompt_submit"
+	// SubagentStart adds context to a newly started or resumed child run.
+	SubagentStart  Type = "subagent_start"
+	SessionEnd     Type = "session_end"
+	SessionStart   Type = "session_start"
+	FileChanged    Type = "file_changed"
+	CwdChanged     Type = "cwd_changed"
+	DirectoryAdded Type = "directory_added"
 )
 
 // Condition represents when a hook should run relative to previous results.
@@ -51,7 +61,12 @@ type Hook struct {
 	// Source records where the hook was configured ("config" = main
 	// config.yaml hooks section, "project" = <workDir>/.gokin/hooks.yaml).
 	// Surfaced by /hooks list. Not part of the YAML contract.
-	Source string `yaml:"-"`
+	Source         string         `yaml:"-"`
+	Claude         *ClaudeCommand `yaml:"-"`
+	claudeMatcher  *regexp.Regexp
+	claudeSettings bool
+	claudePlugin   *claudePluginRuntime
+	claudeManaged  bool
 }
 
 // DisplayName identifies the hook in logs and user-facing failure surfaces:
@@ -120,6 +135,13 @@ type Context struct {
 	Extra           map[string]string // Additional variables
 	previousSuccess bool              // Whether the previous tool call succeeded
 	CapturedOutput  string            // Stdout+stderr captured from last hook execution
+	Prompt          string            // Original text for UserPromptSubmit
+	Reason          string            // Reason for SessionEnd
+	Source          string            // How SessionStart was initiated
+	FilePath        string            // Absolute path for FileChanged
+	FileEvent       string            // change, add or unlink
+	OldCwd, NewCwd  string            // CwdChanged
+	Directory       string            // Absolute directory for DirectoryAdded
 }
 
 // NewContext creates a new hook context.
@@ -241,6 +263,9 @@ func (h *Hook) Matches(hookType Type, toolName string) bool {
 	}
 	if h.Type != hookType {
 		return false
+	}
+	if h.Claude != nil {
+		return h.claudeMatcher == nil || h.claudeMatcher.MatchString(ClaudeToolName(toolName))
 	}
 
 	// Validate condition if set — unrecognized conditions don't match

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,8 +18,10 @@ import (
 	"gokin/internal/chat"
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
+	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/permission"
+	"gokin/internal/plugins"
 	"gokin/internal/security"
 	"gokin/internal/setup"
 
@@ -37,6 +38,7 @@ var (
 	version              = "0.100.141"
 	cfgFile              string
 	model                string
+	reasoningEffort      string
 	provider             string
 	baseURL              string
 	runSetup             bool
@@ -62,6 +64,7 @@ var (
 	allowedToolsCompat   []string
 	deniedToolsCompat    []string
 	addDirs              []string
+	pluginDirs           []string
 	systemPrompt         string
 	systemPromptFile     string
 	appendSystemPrompt   string
@@ -101,6 +104,7 @@ func main() {
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/gokin/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&model, "model", "", "model to use (default depends on provider)")
+	rootCmd.PersistentFlags().StringVar(&reasoningEffort, "effort", "", "GLM-5.3 reasoning effort for this run: auto, low, high, or max")
 	rootCmd.PersistentFlags().StringVar(&provider, "provider", "", "provider to use for this run (glm, minimax, kimi, deepseek, ollama)")
 	rootCmd.PersistentFlags().StringVar(&baseURL, "base-url", "", "custom provider API base URL for this run (in-memory only)")
 	rootCmd.PersistentFlags().BoolVar(&runSetup, "setup", false, "run the setup wizard")
@@ -126,6 +130,7 @@ func main() {
 	rootCmd.PersistentFlags().StringSliceVar(&toolCeiling, "tools", nil, "restrict available tools to these exact names (comma-separated; empty means no tools)")
 	rootCmd.PersistentFlags().StringSliceVar(&deniedTools, "disallowed-tools", nil, "deny matching tools/calls; bare names are also hidden from the model")
 	rootCmd.PersistentFlags().StringSliceVar(&deniedToolsCompat, "disallowedTools", nil, "deny matching tools/calls; bare names are also hidden from the model (Claude-compatible)")
+	rootCmd.PersistentFlags().StringArrayVar(&pluginDirs, "plugin-dir", nil, "load skills, agents, hooks, MCP, and LSP servers from a Claude plugin directory (repeatable; session only)")
 	rootCmd.PersistentFlags().StringArrayVar(&addDirs, "add-dir", nil, "grant access to a directory outside the workspace (repeatable; in-memory for this run)")
 	rootCmd.PersistentFlags().StringVar(&systemPrompt, "system-prompt", "", "replace the generated system prompt for this run")
 	rootCmd.PersistentFlags().StringVar(&systemPromptFile, "system-prompt-file", "", "replace the generated system prompt from a UTF-8 file for this run")
@@ -150,6 +155,25 @@ func main() {
 	rootCmd.AddCommand(newUpdateCmd())
 	rootCmd.AddCommand(newEvalCmd())
 	rootCmd.AddCommand(newDoctorCmd())
+	rootCmd.AddCommand(plugins.NewCommand(func() (plugins.Options, error) {
+		if bare {
+			return plugins.Options{}, fmt.Errorf("plugin management is unavailable in bare mode")
+		}
+		work, err := os.Getwd()
+		if err != nil {
+			return plugins.Options{}, err
+		}
+		var cfg *config.Config
+		if cfgFile != "" {
+			cfg, err = config.LoadFrom(cfgFile)
+		} else {
+			cfg, err = config.LoadWithProjectDir(work)
+		}
+		if err != nil {
+			return plugins.Options{}, err
+		}
+		return plugins.Options{WorkDir: work, Trusted: hooks.IsWorkspaceTrusted(work, cfg.Hooks.TrustedWorkspaces)}, nil
+	}))
 	rootCmd.AddCommand(newBackgroundAgentsCmd())
 	rootCmd.AddCommand(newBackgroundLogsCmd())
 	rootCmd.AddCommand(newBackgroundStopCmd())
@@ -324,7 +348,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 			if inputErr != nil {
 				return inputErr
 			}
-			resolvedPrompt, inputErr = resolveHeadlessPrompt(prompt, args, pipedInput)
+			resolvedPrompt, inputErr = resolveHeadlessPrompt(prompt, args, pipedInput, true)
 			if inputErr != nil {
 				return inputErr
 			}
@@ -381,6 +405,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		cfg, version, provider, model, baseURL, noSessionPersistence); err != nil {
 		return err
 	}
+	if err := applyRuntimeEffortOverride(cfg, reasoningEffort); err != nil {
+		return err
+	}
 	applyBareRunConfig(cfg, bare)
 	applyDebugRunConfig(cfg, resolvedDebug)
 	logging.Debug("runtime configuration resolved",
@@ -410,6 +437,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 			}
 			if err := applyRunConfigOverrides(
 				cfg, version, provider, model, baseURL, noSessionPersistence); err != nil {
+				return err
+			}
+			if err := applyRuntimeEffortOverride(cfg, reasoningEffort); err != nil {
 				return err
 			}
 			applyBareRunConfig(cfg, bare)
@@ -445,7 +475,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	startupToolDenies := optionalRuntimeDeniesForCLIRules(resolvedDeniedToolRules)
 	application, err := app.NewWithOptions(cfg, workDir, app.BuildOptions{
 		NonInteractive:               effectiveHeadless,
+		SyncDeclaredPlugins:          true,
 		Bare:                         bare,
+		PluginDirs:                   pluginDirs,
 		StartupToolCapabilityAllowed: toolCeiling,
 		StartupToolCapabilityDenied:  startupToolDenies,
 	})
@@ -515,6 +547,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		}()
 	}
 
+	defer application.EndSessionHooks(context.Background(), "other")
 	if effectiveHeadless {
 		failureKind = "execution"
 		jsonEnvelopeWritten = isStructuredHeadlessOutput(headlessFormat)
@@ -1002,89 +1035,6 @@ type headlessStreamInputTextBlock struct {
 	Text string `json:"text"`
 }
 
-// runHeadlessInputStream consumes one user record per JSONL line and emits one
-// complete stream-json turn for each record. It intentionally reads the next
-// line only after the current turn has completed, providing natural backpressure
-// and keeping one App/session strictly single-writer.
-func runHeadlessInputStream(
-	ctx context.Context,
-	runner headlessInputRunner,
-	reader io.Reader,
-	opts app.HeadlessOptions,
-	sessionID string,
-) error {
-	if runner == nil {
-		failure := fmt.Errorf("headless application is not initialized")
-		_ = writeHeadlessFailure(opts.Stdout, sessionID, "app_init", failure)
-		return failure
-	}
-	if reader == nil {
-		failure := fmt.Errorf("--input-format stream-json requires redirected stdin")
-		_ = writeHeadlessFailure(opts.Stdout, sessionID, "input", failure)
-		return failure
-	}
-	if opts.StreamState == nil {
-		opts.StreamState = app.NewHeadlessStreamState()
-	}
-
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), maxHeadlessStdinBytes+1)
-	records := 0
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) > maxHeadlessStdinBytes {
-			failure := fmt.Errorf(
-				"stream-json input record %d exceeds %d MiB limit",
-				records+1, maxHeadlessStdinBytes>>20)
-			if writeErr := writeHeadlessFailure(opts.Stdout, sessionID, "input", failure); writeErr != nil {
-				return errors.Join(failure, writeErr)
-			}
-			return failure
-		}
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			// Every other exit from this loop emits a terminal JSON record;
-			// cancellation between records must not be the one shape that
-			// leaves a machine consumer with a non-zero exit and no envelope.
-			if writeErr := writeHeadlessFailure(opts.Stdout, sessionID, "cancelled", err); writeErr != nil {
-				return errors.Join(err, writeErr)
-			}
-			return err
-		}
-		prompt, err := parseHeadlessStreamInput(line)
-		if err != nil {
-			failure := fmt.Errorf("invalid stream-json input record %d: %w", records+1, err)
-			if writeErr := writeHeadlessFailure(opts.Stdout, sessionID, "input", failure); writeErr != nil {
-				return errors.Join(failure, writeErr)
-			}
-			return failure
-		}
-		records++
-		if _, err := runner.RunHeadlessWithOptions(ctx, prompt, opts); err != nil {
-			return err
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		failure := fmt.Errorf(
-			"read stream-json input (each record must be at most %d MiB): %w",
-			maxHeadlessStdinBytes>>20, err)
-		if writeErr := writeHeadlessFailure(opts.Stdout, sessionID, "input", failure); writeErr != nil {
-			return errors.Join(failure, writeErr)
-		}
-		return failure
-	}
-	if records == 0 {
-		failure := fmt.Errorf("--input-format stream-json received no user records")
-		if writeErr := writeHeadlessFailure(opts.Stdout, sessionID, "input", failure); writeErr != nil {
-			return errors.Join(failure, writeErr)
-		}
-		return failure
-	}
-	return nil
-}
-
 func parseHeadlessStreamInput(data []byte) (string, error) {
 	var record headlessStreamInputRecord
 	if err := json.Unmarshal(data, &record); err != nil {
@@ -1188,7 +1138,7 @@ func stdinIsTerminal(cmd *cobra.Command) bool {
 // modern coding CLIs: a flag, one positional query, stdin, or a query plus
 // piped context. Flag and positional query are mutually exclusive so a shell
 // typo cannot silently change the instruction.
-func resolveHeadlessPrompt(flagPrompt string, args []string, pipedInput string) (string, error) {
+func resolveHeadlessPrompt(flagPrompt string, args []string, pipedInput string, allowSessionStart ...bool) (string, error) {
 	flagPrompt = strings.TrimSpace(flagPrompt)
 	positionalPrompt := strings.TrimSpace(strings.Join(args, " "))
 	pipedInput = strings.TrimSpace(pipedInput)
@@ -1208,6 +1158,9 @@ func resolveHeadlessPrompt(flagPrompt string, args []string, pipedInput string) 
 	case pipedInput != "":
 		return pipedInput, nil
 	default:
+		if len(allowSessionStart) > 0 && allowSessionStart[0] {
+			return "", nil // SessionStart may supply the first user turn.
+		}
 		return "", fmt.Errorf("a prompt is required in headless mode; pass --prompt, a positional prompt, or stdin")
 	}
 }
@@ -1304,6 +1257,29 @@ func applyRunConfigOverrides(
 		cfg.Session.Enabled = false
 		cfg.Session.AutoLoad = false
 	}
+	return nil
+}
+
+// applyRuntimeEffortOverride changes the current process only; startup never
+// persists CLI overrides. Reject unsupported models so the flag cannot lie.
+func applyRuntimeEffortOverride(cfg *config.Config, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		return fmt.Errorf("--effort requires auto, low, high, or max")
+	}
+	if err := config.ValidateReasoningEffort(effort); err != nil {
+		return err
+	}
+	if !config.GLMAlwaysOnReasoning(cfg.Model.Name) {
+		return fmt.Errorf("--effort requires GLM-5.3 or GLM-5.3-Flash (current model: %s)", cfg.Model.Name)
+	}
+	cfg.Model.ReasoningEffort = effort
 	return nil
 }
 
@@ -1727,8 +1703,25 @@ func applyRuntimeOverrides(cfg *config.Config, providerOverride, modelOverride s
 	}
 
 	if modelOverride != "" {
+		modelAlias := strings.EqualFold(modelOverride, "haiku")
+		if modelAlias {
+			active := cfg.Model.Provider
+			if active == "" || active == "auto" {
+				active = cfg.API.GetActiveProvider()
+			}
+			current := cfg.Model.Name
+			if providerOverride != "" {
+				current = config.GetProvider(active).DefaultModel
+			}
+			resolved, err := config.SmallFastModel(active, current)
+			if err != nil {
+				return err
+			}
+			modelOverride = resolved
+		}
 		cfg.Model.Name = modelOverride
-		if providerOverride == "" {
+		cfg.Model.Preset = ""
+		if providerOverride == "" && !modelAlias {
 			if detected := config.DetectKnownProviderFromModel(modelOverride); detected != "" {
 				cfg.Model.Provider = detected
 				cfg.API.ActiveProvider = detected

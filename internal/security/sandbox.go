@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"gokin/internal/logging"
@@ -121,7 +122,7 @@ func safeEnvironment(workDir string) []string {
 		"LANG":        "en_US.UTF-8",
 		"LC_ALL":      "en_US.UTF-8",
 		"PWD":         workDir,
-		"TMPDIR":      filepath.Join(workDir, "tmp"),
+		"TMPDIR":      os.TempDir(),
 		"SHELL":       "/bin/bash",
 		"GOPATH":      os.Getenv("GOPATH"),
 		"GOROOT":      os.Getenv("GOROOT"),
@@ -144,6 +145,12 @@ func safeEnvironment(workDir string) []string {
 	return env
 }
 
+// SetStdin supplies literal input to the command without shell interpolation.
+// Call it before Run; the bounded string reader cannot outlive pipe cleanup.
+func (sc *SandboxedCommand) SetStdin(content string) {
+	sc.cmd.Stdin = strings.NewReader(content)
+}
+
 // Run runs the sandboxed command and returns the result
 func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 	result := &SandboxResult{ExitCode: -1}
@@ -152,18 +159,27 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 		return result
 	}
 
-	// Capture stdout and stderr
-	stdout, err := sc.cmd.StdoutPipe()
+	// Own the pipes ourselves: StdoutPipe/StderrPipe let cmd.Wait close the
+	// read ends, but waiting for EOF before Wait deadlocks when a background
+	// descendant holds a write end. With *os.File writers, Wait only reaps the
+	// leader; cleanup can then terminate descendants before we drain to EOF.
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		result.Error = fmt.Errorf("failed to create stdout pipe: %w", err)
 		return result
 	}
+	defer stdout.Close()
+	defer stdoutWriter.Close()
 
-	stderr, err := sc.cmd.StderrPipe()
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		result.Error = fmt.Errorf("failed to create stderr pipe: %w", err)
 		return result
 	}
+	defer stderr.Close()
+	defer stderrWriter.Close()
+	sc.cmd.Stdout = stdoutWriter
+	sc.cmd.Stderr = stderrWriter
 
 	// Start the command
 	if err := sc.cmd.Start(); err != nil {
@@ -174,6 +190,10 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 		result.Error = fmt.Errorf("failed to start command: %w", err)
 		return result
 	}
+	// Only the child may retain write ends. The parent's copies would keep
+	// readers blocked even after every process in the group has exited.
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
 
 	// Read each pipe in exactly one goroutine. Cancellation is handled by
 	// terminating the process tree below, which closes both pipes; nested
@@ -196,18 +216,6 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 
 	waitCh := make(chan error, 1)
 	go func() {
-		// os/exec documents Wait as RACY with StdoutPipe readers: Wait closes
-		// the pipes the moment the process exits, discarding any not-yet-read
-		// tail (CI-reproduced: ExitCode 0 with EMPTY stdout for a command
-		// that printed right before exiting). Start Wait only after BOTH
-		// readers hit EOF — natural on a clean exit, and forced on the
-		// timeout/cancel paths because terminateSandboxProcessTree kills the
-		// write ends. The results are re-buffered (channels have capacity 1)
-		// for the post-select reads below.
-		stdoutRes := <-stdoutCh
-		stderrRes := <-stderrCh
-		stdoutCh <- stdoutRes
-		stderrCh <- stderrRes
 		waitCh <- sc.cmd.Wait()
 	}()
 
@@ -223,16 +231,8 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 	var lifecycleErr error
 	select {
 	case waitErr = <-waitCh:
-		// If completion raced with cancellation, still clean descendants that
-		// may have outlived the bash leader.
 		if err := sc.ctx.Err(); err != nil {
 			lifecycleErr = err
-			terminateSandboxProcessTree(sc.cmd)
-		} else {
-			// Normal exit: sweep group survivors a backgrounded child left
-			// behind (the orphaned-`yes` leak) — ESRCH-safe no-op when the
-			// group is already gone.
-			terminateSandboxProcessTree(sc.cmd)
 		}
 	case <-sc.ctx.Done():
 		lifecycleErr = sc.ctx.Err()
@@ -243,6 +243,10 @@ func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
 		terminateSandboxProcessTree(sc.cmd)
 		waitErr = <-waitCh // Always reap the shell leader.
 	}
+	// Sweep after reaping on every path. Cancellation's first group signal
+	// can race with the shell creating a child; Wait only proves the leader
+	// exited. On normal completion this also closes leaked inherited pipes.
+	terminateSandboxProcessTree(sc.cmd)
 
 	// Wait for both readers after Wait/reap. On cancellation the process-tree
 	// termination above closes inherited pipes, so neither goroutine survives

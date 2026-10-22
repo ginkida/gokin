@@ -91,9 +91,9 @@ func (a *App) runCompletionReviewIfNeeded(
 	if a.hasProgram() {
 		a.safeSendToProgram(ui.StatusUpdateMsg{
 			Type:    ui.StatusInfo,
-			Message: "Final self-review: checking diff and verification before completion",
+			Message: "Checking changes…",
 			Details: map[string]any{
-				"phaseLabel": "Final self-review: checking diff and verification",
+				"phaseLabel": "Checking changes",
 			},
 		})
 	}
@@ -107,21 +107,43 @@ func (a *App) runCompletionReviewIfNeeded(
 
 	ledgerSummary := a.snapshotResponseEvidence().FormatForCompletionReview()
 	reviewPrompt := donegate.BuildCompletionReviewPrompt(userMessage, *response, touchedPaths, commands, gitChangedPaths, falselyClaimed, ledgerSummary)
+	a.mu.Lock()
+	interactive := !a.headlessDirect
+	a.mu.Unlock()
+	if interactive {
+		reviewPrompt = donegate.BuildInteractiveCompletionReviewPrompt(userMessage, *response, touchedPaths, commands, gitChangedPaths, falselyClaimed, ledgerSummary)
+		// Routed turns may return prose without streaming it. Deliver that draft
+		// before review text contributes to the shared accounting counters.
+		a.deliverUnstreamedResponse(*response)
+	}
 	history := a.session.GetHistory()
 	// This Execute is an INTERNAL exchange — a user message typed during the
 	// review must become the NEXT turn (pending queue), not get steered into
-	// the review conversation: on this function's error path newHistory is
-	// discarded, which would silently LOSE an accepted steer.
+	// the review conversation, which may stop before handling that request.
 	resumeSteering := a.executor.SuspendUserSteering()
 	var newHistory []*genai.Content
 	var reviewResponse string
 	var err error
 	func() {
 		defer resumeSteering()
-		newHistory, reviewResponse, err = a.executeTracked(
+		if interactive {
+			defer a.quietCompletionReview()()
+		}
+		newHistory, reviewResponse, err = a.executeTrackedContinuation(
 			ctx, history, reviewPrompt, usage)
 	}()
+	// A failed internal review may have completed mutations. Retain every
+	// returned tool-use/result pair before applying optional-review policy.
+	if len(newHistory) >= len(history) {
+		a.session.SetHistory(newHistory)
+		a.applyToolOutputHygiene()
+	}
 	if err != nil {
+		if ctx.Err() == nil && terminalInternalExchangeError(err) {
+			a.recordHeadlessFinalResult(*response)
+			a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), err)
+			return false
+		}
 		// The completion review is a BEST-EFFORT, optional self-improvement step
 		// — the HARD verification gate is enforceDoneGate, which runs next. Its
 		// failure must NEVER discard the turn's real work: returning false here
@@ -138,8 +160,14 @@ func (a *App) runCompletionReviewIfNeeded(
 		return true
 	}
 
-	a.session.SetHistory(newHistory)
-	a.applyToolOutputHygiene()
+	if interactive {
+		if ctx.Err() != nil || strings.TrimSpace(reviewResponse) == "" ||
+			strings.TrimSpace(reviewResponse) == donegate.CompletionReviewUnchanged ||
+			strings.TrimSpace(reviewResponse) == strings.TrimSpace(*response) {
+			return true
+		}
+		a.presentReviewedRevision(reviewResponse)
+	}
 	if strings.TrimSpace(reviewResponse) != "" {
 		*response = reviewResponse
 	}

@@ -32,8 +32,6 @@ var pathValidatorExempt = map[string]string{
 		"permission layer rather than by path validation",
 	"task_output.go": "opens the path the task manager recorded for a task ID; the model supplies the ID, " +
 		"never the path",
-	"executor.go": "the dispatcher, not a tool: its post-success read uses paths a validated tool has just " +
-		"written, behind a result.Success gate",
 }
 
 func TestToolsTouchingTheFilesystemValidateTheirPaths(t *testing.T) {

@@ -25,6 +25,7 @@ func (a *Agent) recordResponseUsageLocked(resp *client.Response) {
 	}
 	input := resp.TotalInputTokens()
 	cacheRead := min(max(resp.CacheReadInputTokens, 0), input)
+	client.RecordContextTokenUsage(a.runCtx, input, resp.OutputTokens)
 	a.usageInputTokens += input
 	a.usageOutputTokens += max(resp.OutputTokens, 0)
 	a.usageCacheReadTokens += cacheRead

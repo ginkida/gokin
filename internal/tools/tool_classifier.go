@@ -96,6 +96,7 @@ var parallelSafeTools = map[string]bool{
 // or workspace mutation for checkpoint/done-gate accounting.
 var sequentialReadOnlyTools = map[string]bool{
 	"repl_exec": true,
+	"lsp":       true,
 }
 
 // IsParallelSafeTool reports whether concurrent execution and abandonment are

@@ -54,6 +54,15 @@ func TestRestoreOriginalUserMessage(t *testing.T) {
 			t.Fatalf("expected unchanged history for negative priorLen, got len=%d", len(got))
 		}
 	})
+	t.Run("keeps evidence delivered after routing", func(t *testing.T) {
+		sent := "internal routing hint\n\n" + original
+		notes := "\n\n[Async hook check]\nverified evidence"
+		h := []*genai.Content{genai.NewContentFromText(sent+notes, genai.RoleUser)}
+		got := restoreOriginalUserMessage(h, 0, original, sent)
+		if got[0].Parts[0].Text != original+notes {
+			t.Fatalf("routing removed delivered evidence: %q", got[0].Parts[0].Text)
+		}
+	})
 
 	t.Run("no-op when the turn is not model role", func(t *testing.T) {
 		h := []*genai.Content{genai.NewContentFromText("hint\n\n"+original, genai.RoleModel)}

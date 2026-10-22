@@ -1,6 +1,9 @@
 package mcp
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // JSON-RPC 2.0 types
 
@@ -258,6 +261,28 @@ type ServerConfig struct {
 	// for servers with write capabilities (filesystem, git) this narrows the
 	// model's reach to exactly what the user intends. Empty = all tools.
 	AllowedTools []string `yaml:"allowed_tools,omitempty" json:"allowedTools,omitempty"`
+	// Private provenance cannot be supplied by a server configuration file.
+	pluginFingerprint string
+	pluginToolPrefix  string
+	pluginExplicit    bool
+	literalEnv        bool
+	guard             func(context.Context) error
+	prepare           func() error
+}
+
+func (c *ServerConfig) PluginExplicitlyEnabled() bool { return c != nil && c.pluginExplicit }
+
+func (c *ServerConfig) CheckReady(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c == nil {
+		return nil
+	}
+	if c.guard != nil {
+		return c.guard(ctx)
+	}
+	return nil
 }
 
 // MCP protocol version

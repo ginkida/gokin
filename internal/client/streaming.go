@@ -81,6 +81,7 @@ func ProcessStream(ctx context.Context, sr *StreamingResponse, handler *StreamHa
 
 			if chunk.Text != "" {
 				resp.Text += chunk.Text
+				observeMessageText(ctx, chunk.Text)
 				if handler.OnText != nil {
 					handler.OnText(chunk.Text)
 				}

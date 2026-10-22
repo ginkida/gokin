@@ -195,8 +195,9 @@ func clearConversationChecked(app AppInterface) error {
 // mutex on the commands map. Register() panics once NewHandler returns;
 // the boot-phase loaders panic after SealBootPhase.
 type Handler struct {
-	commands map[string]Command
-	frozen   bool
+	skillResolver func(string) bool // configured before publication; may refresh its catalog
+	commands      map[string]Command
+	frozen        bool
 	// bootDone is set by SealBootPhase, called by the builder after all
 	// boot-phase loaders (LoadFileCommands, LoadAliasesFromFile) finish.
 	// Distinct from frozen: frozen blocks Register (inside NewHandler),
@@ -244,6 +245,7 @@ func NewHandler() *Handler {
 	h.Register(&ResumeCommand{})
 	h.Register(&SessionsCommand{})
 	h.Register(&LoopCommand{})
+	h.Register(&GoalCommand{})
 	// Register git commands
 	h.Register(&CommitCommand{})
 	h.Register(&PRCommand{})
@@ -268,6 +270,7 @@ func NewHandler() *Handler {
 	h.Register(&PermissionsCommand{})
 	h.Register(&SandboxCommand{})
 	h.Register(&ThinkingCommand{})
+	h.Register(&EffortCommand{})
 	h.Register(&TimeoutCommand{})
 
 	// Register interactive commands
@@ -288,6 +291,9 @@ func NewHandler() *Handler {
 	h.Register(&TasksCommand{})
 	h.Register(&AuditCommand{})
 	h.Register(&HooksCommand{})
+	h.Register(&ReloadPluginsCommand{})
+	h.Register(&LSPCommand{})
+	h.Register(&PluginCommand{})
 	h.Register(&SkillCommand{})
 	h.Register(&AddDirCommand{})
 	h.Register(&RemoveDirCommand{})
@@ -334,6 +340,7 @@ func NewHandler() *Handler {
 	// Register undo/redo/cost commands
 	h.Register(&UndoCommand{})
 	h.Register(&RedoCommand{})
+	h.Register(&RewindCommand{})
 	h.Register(&CostCommand{})
 
 	// Register checkpoint and utility commands
@@ -412,7 +419,9 @@ func (h *Handler) Parse(input string) (string, []string, bool) {
 
 	// Check if it's a known command (not a path)
 	if _, exists := h.commands[name]; !exists {
-		return "", nil, false
+		if h.skillResolver == nil || !h.skillResolver(name) {
+			return "", nil, false
+		}
 	}
 
 	// Return name and args
@@ -494,6 +503,16 @@ func splitCommandFields(input string) []string {
 func (h *Handler) Execute(ctx context.Context, name string, args []string, app AppInterface) (string, error) {
 	cmd, exists := h.commands[name]
 	if !exists {
+		if app != nil && app.GetToolRegistry() != nil {
+			if registered, ok := app.GetToolRegistry().Get("skill"); ok {
+				if skill, ok := registered.(*tools.SkillTool); ok && skill.HasUserSkill(name) {
+					if raw, ok := RawInvocationArguments(ctx); ok {
+						ctx = WithRawInvocation(ctx, "/skill "+name+" "+raw)
+					}
+					return (&SkillCommand{}).Execute(ctx, append([]string{name}, args...), app)
+				}
+			}
+		}
 		if closest := h.findClosestCommand(name); closest != "" {
 			return "", fmt.Errorf("unknown command: /%s. Did you mean /%s?", name, closest)
 		}
@@ -573,6 +592,22 @@ func (h *Handler) ListCommands() []Command {
 func (h *Handler) GetCommand(name string) (Command, bool) {
 	cmd, exists := h.commands[name]
 	return cmd, exists
+}
+
+// IsPromptCommand identifies expansions before they can execute dynamic shell
+// rendering. Informational and session-control commands do not submit prompts.
+func (h *Handler) IsPromptCommand(name string, args []string) bool {
+	cmd, exists := h.commands[name]
+	if !exists {
+		return h.skillResolver != nil && h.skillResolver(name)
+	}
+	switch cmd.(type) {
+	case *SkillCommand, *FileCommand:
+		return true
+	case *GoalCommand:
+		return GoalStartsWork(args)
+	}
+	return false
 }
 
 // GetPaletteCommands returns all commands formatted for the palette.
@@ -712,4 +747,12 @@ func (p *PaletteProviderAdapter) GetPaletteCommandsForUI() []any {
 	}
 
 	return result
+}
+
+// ConfigureSkillResolver is a boot-phase operation, like alias configuration.
+func (h *Handler) ConfigureSkillResolver(resolve func(string) bool) {
+	if h.bootDone {
+		panic("commands: ConfigureSkillResolver after publication")
+	}
+	h.skillResolver = resolve
 }

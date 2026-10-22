@@ -2,6 +2,9 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -19,6 +22,7 @@ type MCPTool struct {
 	description string                     // Tool description
 	inputSchema *JSONSchema                // MCP input schema
 	declaration *genai.FunctionDeclaration // Cached declaration
+	claudeName  string
 }
 
 // NewMCPTool creates a new MCPTool wrapper.
@@ -39,6 +43,12 @@ func NewMCPTool(client *Client, serverName, prefix string, toolInfo *ToolInfo) *
 
 	// Create declaration with the same effective prefix for consistency
 	declaration := ConvertMCPToolToDeclaration(toolInfo, effectivePrefix)
+	claudeName := "mcp__" + serverName + "__" + toolInfo.Name
+	if client != nil && client.config != nil && client.config.pluginToolPrefix != "" {
+		claudeName = client.config.pluginToolPrefix + toolInfo.Name
+		displayName = pluginMCPFunctionName(claudeName, serverName+"\x00"+toolInfo.Name)
+		declaration.Name = displayName
+	}
 
 	return &MCPTool{
 		client:      client,
@@ -48,6 +58,7 @@ func NewMCPTool(client *Client, serverName, prefix string, toolInfo *ToolInfo) *
 		description: toolInfo.Description,
 		inputSchema: toolInfo.InputSchema,
 		declaration: declaration,
+		claudeName:  claudeName,
 	}
 }
 
@@ -108,6 +119,10 @@ func validateValue(name string, val any, schema *JSONSchema) error {
 		switch val.(type) {
 		case int, int64, float64:
 			// OK
+		case json.Number:
+			if _, err := val.(json.Number).Float64(); err != nil {
+				return tools.NewValidationError(name, "must be a number")
+			}
 		default:
 			return tools.NewValidationError(name, "must be a number")
 		}
@@ -133,6 +148,12 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) (tools.ToolR
 	if t.client == nil {
 		return tools.NewErrorResult("MCP server not connected"), nil
 	}
+	if err := t.client.config.CheckReady(ctx); err != nil {
+		if tools.IsHookStopError(err) {
+			return tools.NewHookStoppedResult(err.Error()), nil
+		}
+		return tools.NewErrorResult(err.Error()), nil
+	}
 
 	if !t.client.IsInitialized() {
 		return tools.NewErrorResult("MCP server not initialized"), nil
@@ -141,6 +162,9 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) (tools.ToolR
 	// Call the MCP tool
 	result, err := t.client.CallTool(ctx, t.toolName, args)
 	if err != nil {
+		if tools.IsHookStopError(err) {
+			return tools.NewHookStoppedResult(err.Error()), nil
+		}
 		return tools.NewErrorResult(fmt.Sprintf("MCP call failed: %s", err)), nil
 	}
 
@@ -199,6 +223,24 @@ func (t *MCPTool) GetServerName() string {
 // GetOriginalToolName returns the original MCP tool name.
 func (t *MCPTool) GetOriginalToolName() string {
 	return t.toolName
+}
+
+func (t *MCPTool) ClaudeToolName() string { return t.claudeName }
+
+func pluginMCPFunctionName(name, identity string) string {
+	valid := len(name) > 0 && len(name) <= 64
+	for _, c := range name {
+		valid = valid && (c == '_' || c == '-' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9')
+	}
+	if valid {
+		return name
+	}
+	alias := sanitizeFunctionName(name)
+	if len(alias) > 47 {
+		alias = alias[:47]
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return alias + "_" + hex.EncodeToString(sum[:8])
 }
 
 // GetClient returns the MCP client.

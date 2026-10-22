@@ -335,7 +335,8 @@ type Executor struct {
 	// freeze every subsequent write — including the writes that would actually
 	// fix the build. The grace window lets the model finish a multi-file
 	// workflow before the barrier kicks in.
-	deltaCheckGracedCalls int
+	deltaCheckGracedCalls    int
+	deltaCheckBarrierRefused bool
 
 	// Retry-time side effect deduplication (write/bash tools).
 	sideEffectDedupEnabled bool
@@ -731,6 +732,33 @@ func (e *Executor) SetWorkDir(workDir string) {
 	e.workDir = strings.TrimSpace(workDir)
 }
 
+// readTrackerPath uses the same path identity as Read/Edit validation. Model
+// calls often use workspace-relative paths, while the edit guard checks the
+// resolved absolute path. Recording the raw argument records an alias the
+// guard cannot find, even when Read returned the complete file successfully.
+func (e *Executor) readTrackerPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if tool, ok := e.registry.Get("read"); ok {
+		if reader, ok := tool.(*ReadTool); ok && reader.pathValidator != nil {
+			if resolved, err := reader.pathValidator.ValidateFile(path); err == nil {
+				return resolved
+			}
+		}
+	}
+	if !filepath.IsAbs(path) && e.workDir != "" {
+		path = filepath.Join(e.workDir, path)
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
 // SetDeltaCheckConfig configures automatic post-edit delta-check behavior.
 func (e *Executor) SetDeltaCheckConfig(enabled bool, timeout time.Duration, warnOnly bool, maxModules int) {
 	if timeout <= 0 {
@@ -910,7 +938,7 @@ func (e *Executor) resolveToolExecutionTimeout(
 		}
 	}
 	timeout := toolExecutionTimeout(base, p95, haveStats, toolName, args)
-	if toolName == "task" && taskNeedsModelRoundHeadroom(args) {
+	if toolName == "skill" || (toolName == "task" && taskNeedsModelRoundHeadroom(args)) {
 		minimum := e.ModelRoundTimeout() + config.DefaultAgentTimeoutHeadroom + toolTimeoutCompletionGrace
 		if timeout < minimum {
 			timeout = minimum
@@ -1004,6 +1032,16 @@ func (e *Executor) clearSideEffectReplayLocked() {
 // GetCheckpointJournal returns the checkpoint journal for inspection or persistence.
 func (e *Executor) GetCheckpointJournal() *CheckpointJournal {
 	return e.checkpoint
+}
+
+// AcknowledgeToolResults reconciles the retry ledger with newly retained tool
+// history. Results not actually retained must keep protecting uncertain effects.
+func (e *Executor) AcknowledgeToolResults(history []*genai.Content) {
+	e.sideEffectLedgerMu.Lock()
+	defer e.sideEffectLedgerMu.Unlock()
+	if e.checkpoint != nil {
+		e.checkpoint.AcknowledgeResults(history)
+	}
 }
 
 // ResetSideEffectLedger clears deduplication ledger for a new top-level request.
@@ -1196,6 +1234,7 @@ func (e *Executor) GetReadTracker() *FileReadTracker {
 // starts fresh. Circuit breakers and tool caches are intentionally preserved
 // (connection failures and cache hits persist across /clear).
 func (e *Executor) ResetSession() {
+	ClearSkillHooks(e.registry)
 	if e.readTracker != nil {
 		e.readTracker.Reset()
 	}
@@ -1222,6 +1261,7 @@ func (e *Executor) ResetSession() {
 	// Grace counter belongs to the prior conversation's failure state — drain
 	// it so a fresh /clear gives the model a clean grace window.
 	e.deltaCheckGracedCalls = 0
+	e.deltaCheckBarrierRefused = false
 	e.deltaCheckMu.Unlock()
 }
 
@@ -1311,7 +1351,24 @@ func (e *Executor) Execute(ctx context.Context, history []*genai.Content, messag
 	// remain in the invocation ledger, but grants and denies must be
 	// re-established by an explicit/model skill load every turn.
 	BeginSkillPermissionTurn(e.registry)
+	return e.ExecuteContinuation(ctx, history, message)
+}
 
+// ExecuteContinuation continues the current user request without resetting
+// its skill permission rules. Reviews and Stop-hook follow-ups are internal
+// exchanges, so their tool calls must retain the request's permission floor.
+func (e *Executor) ExecuteContinuation(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
+	ctx = e.SkillInvocationContext(ctx)
+	if err := SkillHooksError(ctx); err != nil {
+		// This preflight performed no provider round; do not reuse prior usage.
+		e.tokenMu.Lock()
+		e.lastInputTokens, e.lastOutputTokens, e.lastModelTurns = 0, 0, 0
+		e.lastCacheCreationTokens, e.lastCacheReadTokens = 0, 0
+		e.lastEstimatedCost, e.lastCostTracked = 0, false
+		e.lastProvider, e.lastModel = "", ""
+		e.tokenMu.Unlock()
+		return history, "", err
+	}
 	// Add user message to history
 	userContent := genai.NewContentFromText(message, genai.RoleUser)
 	history = append(history, userContent)
@@ -1322,7 +1379,10 @@ func (e *Executor) Execute(ctx context.Context, history []*genai.Content, messag
 // executeLoop runs the function calling loop until a final text response is received.
 func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([]*genai.Content, string, error) {
 	// Snapshot client once per executeLoop to avoid racing with SetClient.
-	cl := e.getClient()
+	baseClient := e.getClient()
+	cl := SkillScopedClient(client.WithRequestGuard(baseClient, hooks.AsyncRewakeRequestGuard), e.registry)
+	ctx = ContextWithSkillModelClient(ctx, e.registry, baseClient)
+	defer client.ReleaseRequestSettings(cl)
 	e.userSteerMu.Lock()
 	e.userSteerActive = true
 	e.userSteerMu.Unlock()
@@ -1620,6 +1680,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			e.handler.OnLoopIteration(i+1, len(toolsUsed))
 		}
 
+		if err := hooks.AwaitSessionStart(ctx); err != nil {
+			return history, finalText, err
+		}
+
 		// Get response from model
 		if budgetEnabled {
 			_, spent := budgetLedger.Snapshot()
@@ -1643,7 +1707,14 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				return history, finalText, err
 			}
 		}
+		if !claimInvocationTurn(ctx) {
+			if budgetEnabled {
+				budgetLedger.EndRound()
+			}
+			return maxTurnsFailure()
+		}
 		modelTurns++
+		history = hooks.InjectAsyncNotes(ctx, history)
 		resp, err := e.getModelResponse(ctx, cl, history)
 		// Usage delivered before a terminal stream error is still billable.
 		// Publish it to the shared ledger before releasing the round lease so a
@@ -1733,6 +1804,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		}
 
 		history = append(history, modelContent)
+		client.ObserveConversationMessage(ctx, modelContent, cl.GetModel(), resp)
 		if budgetEnabled {
 			if !responseCostTracked {
 				return costUnavailableFailure(resp.FunctionCalls, provider, modelName)
@@ -2009,6 +2081,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				notifText := "[System: " + strings.Join(notifications, "; ") + "]"
 				appendNotificationToFunctionResults(results, notifText)
 			}
+			if notes := hooks.TakeAsyncNotes(ctx); notes != "" {
+				appendNotificationToFunctionResults(results, notes)
+			}
 
 			// In-loop context guard: when the previous round's input is nearing
 			// the model's window, pre-emptively prune older tool outputs in place
@@ -2066,6 +2141,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			historyBeforeResults := len(history)
 			history = append(history, funcResultContent)
+			client.ObserveConversationMessage(ctx, funcResultContent, cl.GetModel(), nil)
+			if err := HookStopErrorWithContext(ctx, results); err != nil {
+				return history, "", err
+			}
 
 			// The model ignored the first "finalize now" response. The current
 			// assistant tool_use entries are now paired in history, so it is safe to
@@ -2116,10 +2195,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						return history, finalText, err
 					}
 				}
+				if !claimInvocationTurn(ctx) {
+					if budgetEnabled {
+						budgetLedger.EndRound()
+					}
+					return maxTurnsFailure()
+				}
 				modelTurns++
 				roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
+				roundCtx = ContextWithClaimedModelTurn(roundCtx)
+				roundCtx, finishObservation := client.BeginObservedMessage(roundCtx, cl.GetModel())
 				stream, err := cl.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
 				if err != nil {
+					finishObservation(nil, err)
 					roundCancel()
 					if budgetEnabled {
 						budgetLedger.EndRound()
@@ -2129,6 +2217,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 				// Collect the response
 				resp, err = e.collectStreamWithHandler(roundCtx, stream)
+				finishObservation(resp, err)
 				roundCancel()
 				// Account every response exactly once, including partial failed
 				// streams, before another invocation may acquire the lease.
@@ -2258,6 +2347,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			}
 
 			history = append(history, modelContent)
+			client.ObserveConversationMessage(ctx, modelContent, cl.GetModel(), resp)
 			if budgetEnabled {
 				if !responseCostTracked {
 					return costUnavailableFailure(resp.FunctionCalls, provider, modelName)
@@ -2431,6 +2521,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		finalText += marker
 	}
 
+	if err := e.verifyRecoveredDeltaCheck(ctx); err != nil {
+		return history, finalText, err
+	}
 	return history, finalText, nil
 }
 
@@ -2479,7 +2572,7 @@ func (e *Executor) calculateMaxIterations(history []*genai.Content) int {
 
 // getModelResponse gets an initial response from the model.
 // The cl parameter is a snapshot of the client taken at the start of the execute loop.
-func (e *Executor) getModelResponse(ctx context.Context, cl client.Client, history []*genai.Content) (*client.Response, error) {
+func (e *Executor) getModelResponse(ctx context.Context, cl client.Client, history []*genai.Content) (response *client.Response, responseErr error) {
 	if len(history) == 0 {
 		return nil, fmt.Errorf("cannot get model response: empty history")
 	}
@@ -2499,6 +2592,9 @@ func (e *Executor) getModelResponse(ctx context.Context, cl client.Client, histo
 
 	roundCtx, cancel := e.withModelRoundTimeout(ctx)
 	defer cancel()
+	roundCtx, finishObservation := client.BeginObservedMessage(roundCtx, cl.GetModel())
+	defer func() { finishObservation(response, responseErr) }()
+	roundCtx = ContextWithClaimedModelTurn(roundCtx)
 
 	stream, err := cl.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
 	if err != nil {
@@ -2676,7 +2772,14 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 		callToIdx[call] = i
 	}
 
+	var hookStopErr error
 	for _, group := range groups {
+		if hookStopErr != nil {
+			for _, call := range group.Calls {
+				results[callToIdx[call]] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: NewErrorResult("not executed: " + hookStopErr.Error()).ToMap()}
+			}
+			continue
+		}
 		if ctx.Err() != nil {
 			for _, call := range group.Calls {
 				idx := callToIdx[call]
@@ -2733,10 +2836,15 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				}(idx, call)
 			}
 			wg.Wait()
+			hookStopErr = HookStopError(results)
 		} else {
 			// Execute sequentially (write tools or single tool)
 			for _, call := range group.Calls {
 				idx := callToIdx[call]
+				if hookStopErr != nil {
+					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: NewErrorResult("not executed: " + hookStopErr.Error()).ToMap()}
+					continue
+				}
 				select {
 				case <-ctx.Done():
 					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: NewErrorResult("cancelled").ToMap()}
@@ -2765,6 +2873,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 					result := e.executeTool(toolCtx, call)
 					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
 				}()
+				hookStopErr = HookStopError([]*genai.FunctionResponse{results[idx]})
 			}
 		}
 	}
@@ -2802,7 +2911,7 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 	err := breaker.Execute(ctx, func() error {
 		res := e.doExecuteTool(ctx, call)
 		result = res
-		if !res.Success && res.PolicyBlock == nil && isExecutionFailure(res.Error) {
+		if !res.Success && res.PolicyBlock == nil && res.HookStopReason == "" && isExecutionFailure(res.Error) {
 			return fmt.Errorf("tool execution failed: %s", res.Error)
 		}
 		return nil // validation/permission errors don't count as circuit breaker failures
@@ -2976,8 +3085,28 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Hooks are part of actual execution, not replay. Running them before a
 	// recovered result can repeat arbitrary hook-side effects even though the
 	// tool itself is correctly skipped.
+	ctx = e.SkillInvocationContext(ctx)
+	if err := SkillHooksError(ctx); err != nil {
+		return NewHookStoppedResult(err.Error())
+	}
+	info := hooks.RuntimeInfoFromContext(ctx)
+	info.ToolUseID = call.ID
+	hookRevision := e.hooks.ExecutionRevision()
+	info.ToolNameOverride = ClaudeHookToolName(tool)
+	e.sessionIDMu.RLock()
+	info.SessionID = e.sessionID
+	e.sessionIDMu.RUnlock()
+	if info.ProjectDir == "" {
+		info.ProjectDir = e.workDir
+	}
+	ctx = hooks.ContextWithRuntimeInfo(ctx, info)
+	var preResults []hooks.Result
+	hookDecision := ""
 	if e.hooks != nil {
-		preResults := e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		preResults = e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		if stopped, ok := HookStopResult(preResults); ok {
+			return stopped
+		}
 		if blocked, ok := hooks.Blocked(preResults); ok {
 			name := blocked.Hook.DisplayName()
 			reason := strings.TrimSpace(blocked.Output)
@@ -2988,6 +3117,17 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				"tool", call.Name, "hook", name)
 			return NewPolicyBlockedResult(PolicyBlockHook, fmt.Sprintf(
 				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
+		}
+		// Keep the model's original tool_use input immutable. Only this actual
+		// execution gets the hook's rewritten arguments.
+		ownedCall := *call
+		call = &ownedCall
+		hookDecision = ApplyHookInput(call, preResults)
+		if err := tool.Validate(call.Args); err != nil {
+			return NewErrorResult("hook updatedInput validation: " + err.Error())
+		}
+		if hookDecision == "ask" && e.permissions == nil {
+			return NewPolicyBlockedResult(PolicyBlockPermission, "Hook requires permission approval but no permission manager is available")
 		}
 	}
 
@@ -3000,7 +3140,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if e.notificationMgr != nil {
 				e.notificationMgr.NotifyDenied(call.Name, reason)
 			}
-			return NewPolicyBlockedResult(PolicyBlockSafety, reason)
+			// Compilation diagnostics are recoverable workflow failures. They
+			// must not permanently latch a permission/safety refusal after the
+			// model repairs the tree. A refused delta check is verified again
+			// before this execution can finish successfully.
+			return NewErrorResult(reason)
 		}
 	}
 
@@ -3084,14 +3228,21 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// concurrent sandbox/workspace toggle from changing the invocation that was
 	// validated above.
 	authorizedPermissionArgs := PermissionArgsForTool(tool, call.Args)
+	ctx = permission.ContextWithToolIdentity(ctx, call.Name, PermissionToolIdentity(tool))
+	ctx = ContextWithLSPReadPolicy(ctx, e.permissions, e.registry, e.workDir)
+	ctx = permission.ContextWithHookDecision(ctx, call.Name, authorizedPermissionArgs, hookDecision)
+	grants, denies := SkillPermissionRules(ctx, e.registry)
+	if e.permissions == nil && permission.TemporaryToolRulesDenyWithIdentity(ctx, denies, call.Name, authorizedPermissionArgs, e.workDir) {
+		return NewPolicyBlockedResult(PolicyBlockPermission, "Tool is denied by the active skill")
+	}
 	if e.permissions != nil {
 		permissionCtx := permission.ContextWithWorkDir(ctx, e.workDir)
 		resp, err := e.permissions.CheckWithTemporaryToolRules(
 			permissionCtx,
 			call.Name,
 			ClonePermissionArgs(authorizedPermissionArgs),
-			SkillPermissionGrants(e.registry),
-			SkillPermissionDenies(e.registry),
+			grants,
+			denies,
 		)
 		if err != nil {
 			if e.handler != nil && e.handler.OnToolDenied != nil {
@@ -3130,6 +3281,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			if !filepath.IsAbs(p) || e.dirAccessChecker(p) {
 				continue
 			}
+			if permission.PermissionPromptSuppressed(ctx) {
+				return NewPolicyBlockedResult(PolicyBlockPermission, "Directory access requires approval during skill rendering")
+			}
 			allowed, gErr := e.dirGrantHandler(ctx, call.Name, p)
 			if gErr != nil {
 				return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("directory access check failed for %s: %s", p, gErr))
@@ -3148,6 +3302,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// rest of the turn proceeds untouched; on deny an actionable result keeps the
 	// agent in analysis. Disabled when callbacks are nil (tests/headless).
 	if e.discussGate != nil && e.actionConfirmHandler != nil && IsImplementationTool(call.Name) && e.discussGate() {
+		if permission.PermissionPromptSuppressed(ctx) {
+			return NewPolicyBlockedResult(PolicyBlockPermission, "Action requires approval during skill rendering")
+		}
 		target := call.Name
 		if paths := extractFilePaths(call); len(paths) > 0 {
 			target = paths[0]
@@ -3162,7 +3319,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 4.5: Check tool result cache for read-only tools
-	if e.toolCache != nil {
+	if e.toolCache != nil && !hooks.AgentHookActive(ctx) {
 		if cached, hit := e.toolCache.Get(call.Name, call.Args); hit {
 			serveCache := true
 			// For read tool: dedup unchanged repeats to a stub, but DETECT
@@ -3177,6 +3334,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			// serves FULL fresh content, not a dedup stub) and fall through.
 			if call.Name == "read" && e.readTracker != nil && cached.Success {
 				filePath, _ := call.Args["file_path"].(string)
+				filePath = e.readTrackerPath(filePath)
 				offset := GetIntDefault(call.Args, "offset", 1)
 				limit := GetIntDefault(call.Args, "limit", 2000)
 				if filePath != "" {
@@ -3284,6 +3442,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	if e.handler != nil && e.handler.OnMemoryNotify != nil {
 		execCtx = ContextWithMemoryNotify(execCtx, e.handler.OnMemoryNotify)
 	}
+	// Finish decorating the context before heartbeat/execution goroutines read
+	// it. The dispatcher is scoped to this invocation's cancellation and policy.
+	execCtx = e.SkillInvocationContext(execCtx)
 
 	start := time.Now()
 
@@ -3329,6 +3490,12 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				outcome = toolOutcome{result: NewErrorResult(formatToolPanic(call.Name, r))}
 			}
 		}()
+		if err := e.hooks.CheckExecutionRevision(hookRevision); err != nil {
+			return toolOutcome{result: NewHookStoppedResult(err.Error())}
+		}
+		if err := SkillHooksError(execCtx); err != nil {
+			return toolOutcome{result: NewHookStoppedResult(err.Error())}
+		}
 		if _, scoped := tool.(permissionScopedExecutor); scoped && authorizedPermissionArgs != nil {
 			outcome.result, outcome.err = ExecuteWithPermissionScope(execCtx, tool, call.Args, authorizedPermissionArgs)
 		} else if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
@@ -3418,11 +3585,13 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 
 	// Step 10: Run post-tool or on-error hooks
 	if e.hooks != nil {
+		var postResults []hooks.Result
 		if result.Success {
-			e.hooks.RunPostTool(ctx, call.Name, call.Args, result.Content)
+			postResults = e.hooks.RunPostTool(ctx, call.Name, call.Args, result.Content)
 		} else {
-			e.hooks.RunOnError(ctx, call.Name, call.Args, result.Error)
+			postResults = e.hooks.RunOnError(ctx, call.Name, call.Args, result.Error)
 		}
+		result = AppendHookContext(result, append(preResults, postResults...))
 	}
 
 	// Step 10.5: Auto-format written files
@@ -3468,10 +3637,14 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// Step 12: Apply compaction if configured
 	if e.compactor != nil && result.Success {
 		policyBlock := result.PolicyBlock
+		hookStopReason := result.HookStopReason
+		hookStopKind := result.HookStopKind
 		result = e.compactor.CompactForType(call.Name, result)
 		// Compactors predate policy metadata and some construct a fresh result.
 		// Never let presentation-size compaction erase a fail-closed outcome.
 		result.PolicyBlock = policyBlock
+		result.HookStopReason = hookStopReason
+		result.HookStopKind = hookStopKind
 	}
 
 	// Step 12.5: Cache result or invalidate cache for write operations
@@ -3511,15 +3684,16 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			// serve a stale "no matches" for content the agent just wrote.
 			e.searchCache.Clear()
 		}
-	} else if e.toolCache != nil && result.Success {
+	} else if e.toolCache != nil && result.Success && !hooks.AgentHookActive(ctx) {
 		// Only cache read-only tool results
 		e.toolCache.Put(call.Name, call.Args, result)
 	}
 
 	// Step 12.7: Deduplicate read content for history optimization
 	if e.readTracker != nil {
-		if call.Name == "read" && result.Success {
+		if call.Name == "read" && result.Success && !hooks.AgentHookActive(ctx) {
 			filePath, _ := call.Args["file_path"].(string)
+			filePath = e.readTrackerPath(filePath)
 			offset := GetIntDefault(call.Args, "offset", 1)
 			limit := GetIntDefault(call.Args, "limit", 2000)
 			if filePath != "" {
@@ -3539,6 +3713,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 			for _, key := range []string{"file_path", "path", "source", "destination", "new_path"} {
 				if p, ok := call.Args[key].(string); ok && p != "" {
 					e.readTracker.InvalidateFile(p)
+					e.readTracker.InvalidateFile(e.readTrackerPath(p))
 				}
 			}
 		}
@@ -3565,6 +3740,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		for _, p := range declaredWrittenPaths {
 			if e.readTracker != nil {
 				e.readTracker.InvalidateFile(p)
+				e.readTracker.InvalidateFile(e.readTrackerPath(p))
 			}
 			if e.writeTracker != nil {
 				e.writeTracker.Record(p)
@@ -3587,6 +3763,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// precise error close to the mutation that caused it.
 	if result.Success && shouldRunDeltaCheckCall(call) {
 		e.runGoDiagnosticsAfterMutation(ctx, call, mutation, &result)
+		AppendLSPDiagnostics(ctx, e.registry, call, &result)
 	}
 
 	// Step 12.9: Post-edit delta-check on changed modules (format/lint/build; no tests).
@@ -4011,7 +4188,7 @@ func (e *Executor) trySelfHeal(ctx context.Context, call *genai.FunctionCall) To
 // Handles file_path, path, source, destination, and new_path argument names.
 func extractFilePaths(call *genai.FunctionCall) []string {
 	var paths []string
-	for _, key := range []string{"file_path", "path", "source", "destination", "new_path"} {
+	for _, key := range []string{"file_path", "filePath", "path", "source", "destination", "new_path"} {
 		if p, ok := call.Args[key].(string); ok && p != "" {
 			paths = append(paths, p)
 		}
@@ -4337,6 +4514,8 @@ func stagnationFingerprint(toolName string, args map[string]any) string {
 			return ""
 		}
 		return file + "|" + symbol
+	case "lsp":
+		return fmt.Sprintf("%v|%v|%v|%v|%v", args["operation"], args["filePath"], args["line"], args["character"], args["query"])
 	case "todo":
 		// Updating the task list with DIFFERENT items each time is progress,
 		// not a loop — the model checks off a task and adds the next. Hash the
@@ -4414,7 +4593,6 @@ func isStagnationRecoverySafe(name string) bool {
 var idempotentStateTools = map[string]bool{
 	"memory":       true,
 	"memorize":     true,
-	"skill":        true,
 	"todo":         true,
 	"check_impact": true,
 	"mcp_admin":    true,
@@ -5121,6 +5299,10 @@ func toolExecutionTimeout(base, p95 time.Duration, haveStats bool, toolName stri
 		requested = coordinateTimeout(args) + coordinateCleanupTimeout
 	case "task":
 		requested = taskForegroundTimeout(args)
+	case "skill":
+		// Forked skills may wait for a full agent run or join an existing worker.
+		// The nested task/shell still owns its exact execution deadline.
+		requested = config.DefaultThoroughAgentTimeout
 	case "repl_exec":
 		// Python computation has its own short inactivity watchdog. The wider
 		// outer budget exists for synchronous rlm() callbacks, whose delegated

@@ -28,6 +28,9 @@ const (
 	StateSettings
 	StateAPIKeyEntry
 	StateNotificationCenter
+	StateRewind
+	StateTranscript
+	StateSessionPicker
 )
 
 // PromptKind identifies an asynchronous decision surface whose app-side
@@ -60,7 +63,7 @@ func (m *Model) isModalState() bool {
 		StateModelSelector, StateShortcutsOverlay, StateCommandPalette,
 		StateDiffPreview, StateMultiDiffPreview, StateSearchResults, StateGitStatus,
 		StateFileBrowser, StateBatchProgress, StateContextObservatory, StateSettings,
-		StateAPIKeyEntry, StateNotificationCenter:
+		StateAPIKeyEntry, StateNotificationCenter, StateRewind, StateTranscript, StateSessionPicker:
 		return true
 	}
 	return false
@@ -147,6 +150,11 @@ type (
 		Cancellable    bool
 	}
 	ResponseDoneMsg struct{}
+
+	// ResponseRevisedMsg publishes a corrected final answer after internal
+	// verification. Scrollback keeps the earlier draft and a clear boundary;
+	// copying the response returns only this current, authoritative answer.
+	ResponseRevisedMsg struct{ Text string }
 	// ThinkingTickMsg signals that the model is actively thinking/reasoning.
 	// Used to keep the UI alive and update elapsed time during extended thinking.
 	ThinkingTickMsg struct{}
@@ -470,6 +478,19 @@ type SessionModeCycledMsg struct {
 	Revision uint64
 }
 
+// RewindPromptMsg restores the selected prompt for editing without sending it.
+type RewindPromptMsg struct {
+	Prompt string
+}
+
+// SessionStartWaitMsg correlates a submitted prompt with its startup wait.
+// Esc restores that prompt without cancelling the session's hook processes.
+type SessionStartWaitMsg struct {
+	ID      uint64
+	Prompt  string
+	Waiting bool
+}
+
 // RuntimeStatusSnapshot is a compact runtime health snapshot for Status Bar 2.0.
 type RuntimeStatusSnapshot struct {
 	Mode               string
@@ -494,6 +515,10 @@ type RuntimeStatusSnapshot struct {
 	// (only a one-shot startup toast).
 	ActiveLoops int
 	LoopFiring  bool
+	GoalActive  bool
+	GoalPaused  bool
+	GoalWaiting bool
+	GoalStarted time.Time
 }
 
 // RuntimeStatusMsg delivers a runtime status snapshot fetched in the background.

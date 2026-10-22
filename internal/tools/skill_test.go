@@ -91,8 +91,7 @@ Raw=$ARGUMENTS`)
 	}
 }
 
-// The audit fix (v0.100.90): bare $N is ONE-based, matching the tool's own
-// declaration ("$1..$9"), file commands, and Claude-compatible skills.
+// Native Gokin skills preserve the original ONE-based file-command convention.
 // Zero-based resolution silently dropped a single argument passed to a body
 // using $1 AND suppressed the ARGUMENTS fallback (the placeholder counted as
 // "used"), so the argument vanished without a trace.

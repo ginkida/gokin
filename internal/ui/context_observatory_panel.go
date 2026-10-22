@@ -11,10 +11,11 @@ import (
 
 // ContextObservatoryPanel displays a technical dashboard of agent context health.
 type ContextObservatoryPanel struct {
-	visible bool
-	health  ContextHealthMsg
-	styles  *Styles
-	frame   int // For animations
+	claudeKeys bool
+	visible    bool
+	health     ContextHealthMsg
+	styles     *Styles
+	frame      int // For animations
 }
 
 // NewContextObservatoryPanel creates a new context observatory panel.
@@ -108,7 +109,7 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 		// A bordered dashboard cannot fit in fewer than seven rows. Return a
 		// truthful one-line recovery summary instead of relying on the parent to
 		// tail-crop seven rows (which hid the title and health state).
-		summary := "Context · Esc/Ctrl+H close"
+		summary := "Context · Esc/" + profileKeyText("Ctrl+H", p.claudeKeys) + " close"
 		if hasContext {
 			summary += " · " + healthSummary
 		} else if hasRate {
@@ -126,7 +127,7 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 			p.writeBoxLine(&content, borderStyle, "Metrics appear after the first request.", dimStyle, innerWidth)
 		}
 		separator("├", "─", "┤")
-		p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
+		p.writeBoxLine(&content, borderStyle, "Esc / "+profileKeyText("Ctrl+H", p.claudeKeys)+"  Close", mutedStyle, innerWidth)
 		content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 		return content.String()
 	}
@@ -161,7 +162,7 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 			p.writeBoxLine(&content, borderStyle, row, style, innerWidth)
 		}
 		separator("├", "─", "┤")
-		p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
+		p.writeBoxLine(&content, borderStyle, "Esc / "+profileKeyText("Ctrl+H", p.claudeKeys)+"  Close", mutedStyle, innerWidth)
 		content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 		return content.String()
 	}
@@ -222,7 +223,7 @@ func (p *ContextObservatoryPanel) View(width int, heights ...int) string {
 	}
 
 	separator("├", "─", "┤")
-	p.writeBoxLine(&content, borderStyle, "Esc / Ctrl+H  Close", mutedStyle, innerWidth)
+	p.writeBoxLine(&content, borderStyle, "Esc / "+profileKeyText("Ctrl+H", p.claudeKeys)+"  Close", mutedStyle, innerWidth)
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 
 	return content.String()

@@ -1,9 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"strings"
+
+	"gokin/internal/logging"
 
 	"google.golang.org/genai"
 )
@@ -31,7 +34,7 @@ func (a *App) applyToolOutputHygiene() {
 		return
 	}
 
-	history := a.session.GetHistory()
+	history, version := a.session.GetHistoryWithVersion()
 	if len(history) <= toolOutputHygieneKeepRecent {
 		return
 	}
@@ -101,7 +104,19 @@ func (a *App) applyToolOutputHygiene() {
 	}
 
 	if changed {
-		a.session.SetHistory(history)
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		_, committed, err := a.commitRewindCompaction(ctx, history, version, 0, "tool output cleanup")
+		if err != nil {
+			logging.Warn("could not preserve old tool outputs before cleanup", "error", err)
+			a.surfacePersistenceResult("tool_output_compaction", "Could not preserve old tool outputs; context kept unchanged", err)
+			return
+		}
+		if !committed {
+			return
+		}
 		a.journalEvent("context_hygiene_compacted", map[string]any{
 			"parts": compactedParts,
 		})

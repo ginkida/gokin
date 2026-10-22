@@ -60,6 +60,13 @@ func resolveGrantTarget(path string) (string, error) {
 // restart. Returns the resolved directory path. Refuses ungrantable locations
 // (filesystem root, system dirs, .git, secret dirs) via security.IsGrantableDir.
 func (a *App) GrantAllowedDir(path string, persist bool) (string, error) {
+	a.ensureSDKRootBaseline()
+	a.directoryGrantMu.Lock()
+	defer a.directoryGrantMu.Unlock()
+	return a.grantAllowedDirLocked(path, persist)
+}
+
+func (a *App) grantAllowedDirLocked(path string, persist bool) (string, error) {
 	resolved, err := resolveGrantTarget(path)
 	if err != nil {
 		return "", err
@@ -111,6 +118,8 @@ func (a *App) GrantAllowedDir(path string, persist bool) (string, error) {
 // RevokeGrantedDir removes a SESSION grant (config-persisted dirs are not
 // touched — those require editing config). Returns true if a grant was removed.
 func (a *App) RevokeGrantedDir(path string) (bool, error) {
+	a.directoryGrantMu.Lock()
+	defer a.directoryGrantMu.Unlock()
 	resolved, err := resolveGrantTarget(path)
 	if err != nil {
 		return false, err
@@ -269,6 +278,8 @@ func (a *App) dirGrantPrompt(ctx context.Context, toolName, path string) (bool, 
 // ClearConversation — /clear must restart with a clean slate). Persisted config
 // dirs are untouched.
 func (a *App) resetGrantedDirs() {
+	a.directoryGrantMu.Lock()
+	defer a.directoryGrantMu.Unlock()
 	a.grantedDirsMu.Lock()
 	had := len(a.grantedDirs) > 0
 	a.grantedDirs = nil

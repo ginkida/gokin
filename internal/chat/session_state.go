@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/goals"
 	"gokin/internal/skills"
 
 	"google.golang.org/genai"
@@ -18,6 +19,7 @@ import (
 // SessionState represents the serializable state of a session.
 type SessionState struct {
 	ID         string    `json:"id"`
+	Title      string    `json:"title,omitempty"`
 	StartTime  time.Time `json:"start_time"`
 	LastActive time.Time `json:"last_active"`
 	WorkDir    string    `json:"work_dir,omitempty"`
@@ -29,6 +31,8 @@ type SessionState struct {
 	// incompatibility this guards against.
 	Provider          string                   `json:"provider,omitempty"`
 	History           []SerializedContent      `json:"history"`
+	HistoryWindows    []HistoryWindowArchive   `json:"history_windows,omitempty"`
+	Goal              goals.State              `json:"goal,omitempty"`
 	TokenCounts       []int                    `json:"token_counts,omitempty"`
 	TotalTokens       int                      `json:"total_tokens"`
 	Version           int64                    `json:"version"`
@@ -52,7 +56,9 @@ type SessionState struct {
 	// CheckpointInvokedSkills makes /restore a true state rollback: workflows
 	// activated after a named checkpoint must not remain active after history is
 	// rewound. Missing in legacy states is intentionally treated as unknown.
-	CheckpointInvokedSkills map[string][]skills.Invocation `json:"checkpoint_invoked_skills,omitempty"`
+	CheckpointInvokedSkills map[string][]skills.Invocation     `json:"checkpoint_invoked_skills,omitempty"`
+	SkillHooks              []skills.HookActivation            `json:"skill_hooks,omitempty"`
+	CheckpointSkillHooks    map[string][]skills.HookActivation `json:"checkpoint_skill_hooks,omitempty"`
 }
 
 // SerializedToolCheckpoint is the persisted form of a tool checkpoint entry.
@@ -75,12 +81,13 @@ type SerializedToolCheckpoint struct {
 // therefore restored successful writes as failures, encouraging duplicates.
 // Data is kept as validated JSON so chat does not depend on the tools package.
 type SerializedToolResult struct {
-	Success     bool                   `json:"success"`
-	Content     string                 `json:"content,omitempty"`
-	Error       string                 `json:"error,omitempty"`
-	Data        json.RawMessage        `json:"data,omitempty"`
-	DataPresent bool                   `json:"data_present,omitempty"`
-	PolicyBlock *SerializedPolicyBlock `json:"policy_block,omitempty"`
+	Success        bool                   `json:"success"`
+	Content        string                 `json:"content,omitempty"`
+	Error          string                 `json:"error,omitempty"`
+	Data           json.RawMessage        `json:"data,omitempty"`
+	DataPresent    bool                   `json:"data_present,omitempty"`
+	PolicyBlock    *SerializedPolicyBlock `json:"policy_block,omitempty"`
+	HookStopReason string                 `json:"hook_stop_reason,omitempty"`
 }
 
 // SerializedPolicyBlock preserves authorization/safety refusal metadata across
@@ -159,12 +166,16 @@ type SerializedContent struct {
 
 // SerializedPart represents a serializable content part.
 type SerializedPart struct {
-	Type             string          `json:"type"` // "text", "function_call", "function_response"
+	Type             string          `json:"type"` // "text", "function_call", "function_response", "structured"
 	Text             string          `json:"text,omitempty"`
 	FunctionCall     *SerializedFunc `json:"function_call,omitempty"`
 	FunctionResp     *SerializedFunc `json:"function_response,omitempty"`
 	Thought          bool            `json:"thought,omitempty"`
 	ThoughtSignature []byte          `json:"thought_signature,omitempty"`
+	// Structured preserves multimodal/code payloads and their metadata using
+	// the SDK schema. Treating an image as empty text loses it during resume,
+	// rewind and any compaction that round-trips the retained context.
+	Structured *genai.Part `json:"structured,omitempty"`
 }
 
 // SerializedFunc represents a serializable function call or response.
@@ -203,6 +214,11 @@ func serializePart(part *genai.Part) SerializedPart {
 	sp := SerializedPart{
 		Thought:          part.Thought,
 		ThoughtSignature: part.ThoughtSignature,
+	}
+	if part.InlineData != nil || part.FileData != nil || part.ExecutableCode != nil || part.CodeExecutionResult != nil || part.VideoMetadata != nil || part.MediaResolution != nil {
+		sp.Type = "structured"
+		sp.Structured = cloneStructuredPart(part)
+		return sp
 	}
 
 	if part.FunctionCall != nil {
@@ -257,6 +273,11 @@ func deserializePart(sp SerializedPart) (*genai.Part, error) {
 	var part *genai.Part
 
 	switch sp.Type {
+	case "structured":
+		if sp.Structured == nil {
+			return nil, fmt.Errorf("missing structured message part")
+		}
+		part = cloneStructuredPart(sp.Structured)
 	case "text":
 		text := sp.Text
 		if text == "" {
@@ -295,6 +316,45 @@ func deserializePart(sp SerializedPart) (*genai.Part, error) {
 	part.ThoughtSignature = sp.ThoughtSignature
 
 	return part, nil
+}
+
+func cloneStructuredPart(part *genai.Part) *genai.Part {
+	cloned := *part
+	cloned.ThoughtSignature = append([]byte(nil), part.ThoughtSignature...)
+	if part.InlineData != nil {
+		blob := *part.InlineData
+		blob.Data = append([]byte(nil), blob.Data...)
+		cloned.InlineData = &blob
+	}
+	if part.FileData != nil {
+		file := *part.FileData
+		cloned.FileData = &file
+	}
+	if part.ExecutableCode != nil {
+		code := *part.ExecutableCode
+		cloned.ExecutableCode = &code
+	}
+	if part.CodeExecutionResult != nil {
+		result := *part.CodeExecutionResult
+		cloned.CodeExecutionResult = &result
+	}
+	if part.VideoMetadata != nil {
+		metadata := *part.VideoMetadata
+		if metadata.FPS != nil {
+			fps := *metadata.FPS
+			metadata.FPS = &fps
+		}
+		cloned.VideoMetadata = &metadata
+	}
+	if part.MediaResolution != nil {
+		resolution := *part.MediaResolution
+		if resolution.NumTokens != nil {
+			tokens := *resolution.NumTokens
+			resolution.NumTokens = &tokens
+		}
+		cloned.MediaResolution = &resolution
+	}
+	return &cloned
 }
 
 // MarshalJSON implements json.Marshaler for SessionState.
@@ -380,6 +440,12 @@ func generateToolID() string {
 
 // GenerateSummary creates a brief summary of the session based on messages.
 func (s *SessionState) GenerateSummary() string {
+	if title := strings.Join(strings.Fields(s.Title), " "); title != "" {
+		if runes := []rune(title); len(runes) > 100 {
+			return string(runes[:97]) + "..."
+		}
+		return title
+	}
 	if len(s.History) == 0 {
 		return ""
 	}

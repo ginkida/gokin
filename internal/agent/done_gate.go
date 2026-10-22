@@ -78,6 +78,9 @@ func agentDoneGateMaxFixes(p *donegate.Policy) int {
 // verify); touchedPaths records only successful mutations — a failed edit
 // changed nothing, so it must not arm the gate.
 func (a *Agent) recordToolExecution(toolName string, args map[string]any, result tools.ToolResult) {
+	if result.HookUpdatedInput != nil {
+		args = result.HookUpdatedInput
+	}
 	a.toolsMu.Lock()
 	defer a.toolsMu.Unlock()
 	a.toolsUsed = append(a.toolsUsed, toolName)

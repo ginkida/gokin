@@ -251,6 +251,12 @@ func (r *Runner) SetPermissions(mgr *permission.Manager) {
 	r.mu.Unlock()
 }
 
+// ResolveSkillModelSettings uses the same client snapshot as agent creation;
+// it does not change the runner, foreground client, or stored configuration.
+func (r *Runner) ResolveSkillModelSettings(model, effort string) (string, string, error) {
+	return client.ResolveSkillModelSettings(r.snapshotAgentDeps().client, model, effort)
+}
+
 // SetHooks installs the same trusted hook policy on foreground-created and
 // recovered sub-agents. Existing agents are updated outside r.mu so their own
 // state locks cannot invert the Runner lock order.
@@ -486,11 +492,18 @@ func (r *Runner) reportAgentUsage(id string, result *AgentResult) {
 	}
 	r.mu.RLock()
 	callback := r.onAgentUsage
+	runningAgent := r.agents[id]
 	var invocationScope InvocationScope
-	if runningAgent := r.agents[id]; runningAgent != nil {
+	if runningAgent != nil {
 		invocationScope = runningAgent.invocationScope
 	}
 	r.mu.RUnlock()
+	if runningAgent != nil {
+		func() {
+			defer recoverAgentLifecycleCallback("usage checkpoint", id)
+			client.CheckpointContextTokenUsage(runningAgent.RunContext())
+		}()
+	}
 	if callback != nil {
 		// Accounting/telemetry is ancillary. A buggy integration callback must
 		// never turn a successfully completed agent into a panic failure or skip
@@ -869,7 +882,8 @@ func (r *Runner) newConfiguredAgent(
 	agentBaseRegistry := deps.baseRegistry
 	agentWorkDir := strings.TrimSpace(deps.workDir)
 	agentClient := deps.client
-	if _, budgeted := tools.InvocationBudgetLedgerFromContext(ctx); budgeted {
+	_, turnScoped := tools.MaxTurnsFromContext(ctx)
+	if _, budgeted := tools.InvocationBudgetLedgerFromContext(ctx); budgeted || turnScoped {
 		agentClient = newInvocationBudgetClient(deps.client)
 	}
 	var isolated *isolatedWorkspace
@@ -935,6 +949,9 @@ func (r *Runner) newConfiguredAgent(
 			perms,
 			deps.ctxCfg,
 		)
+		if strings.Contains(agentType, ":") {
+			agent.definitionError = fmt.Errorf("plugin agent %q is unavailable", agentType)
+		}
 	}
 	agent.SetModelRoundTimeout(deps.modelRoundTimeout)
 

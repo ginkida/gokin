@@ -375,7 +375,7 @@ func loadFromEnv(cfg *Config) {
 	for _, p := range Providers {
 		for _, envVar := range p.EnvVars {
 			if key := os.Getenv(envVar); key != "" {
-				p.SetKey(&cfg.API, key)
+				cfg.API.environmentKey(p.Name, key)
 				break
 			}
 		}
@@ -391,16 +391,16 @@ func loadFromEnv(cfg *Config) {
 	// keys. Better to fall through to "no key configured" so the user
 	// gets a clear /doctor signal and runs /login with the right key.
 	if apiKey := os.Getenv("GOKIN_API_KEY"); apiKey != "" {
-		cfg.API.APIKey = apiKey
+		cfg.API.environmentKey(legacyCredential, apiKey)
 	} else if apiKey := os.Getenv("GOKIN_GLM_KEY"); apiKey != "" {
-		cfg.API.APIKey = apiKey
-		cfg.API.GLMKey = apiKey
+		cfg.API.environmentKey(legacyCredential, apiKey)
+		cfg.API.environmentKey("glm", apiKey)
 		if cfg.API.Backend == "" {
 			cfg.API.Backend = "glm"
 		}
 	} else if apiKey := os.Getenv("GLM_API_KEY"); apiKey != "" {
-		cfg.API.APIKey = apiKey
-		cfg.API.GLMKey = apiKey
+		cfg.API.environmentKey(legacyCredential, apiKey)
+		cfg.API.environmentKey("glm", apiKey)
 		if cfg.API.Backend == "" {
 			cfg.API.Backend = "glm"
 		}
@@ -420,6 +420,12 @@ func loadFromEnv(cfg *Config) {
 
 // Validate validates the configuration.
 func (c *Config) Validate() error {
+	if err := ValidateKeybindings(c.UI.Keybindings); err != nil {
+		return err
+	}
+	if err := ValidateReasoningEffort(c.Model.ReasoningEffort); err != nil {
+		return err
+	}
 	if err := ValidateRetryConfig(c); err != nil {
 		return err
 	}

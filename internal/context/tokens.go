@@ -30,6 +30,10 @@ var DefaultModelLimits = map[string]TokenLimits{
 	// context window (Z.AI, Jun 2026); glm-5.1 and earlier 5.x stay at
 	// 200K. Output caps are 128K across the 5.x line; older GLM families
 	// differ per model.
+	"glm-5.3": {
+		MaxInputTokens:  1000000,
+		MaxOutputTokens: 131072,
+	},
 	"glm-5.2": {
 		MaxInputTokens:  1000000,
 		MaxOutputTokens: 131072,
@@ -107,18 +111,22 @@ var DefaultPricing = map[string]ModelPricing{
 	// in v0.78.30. CalculateCost would never look these up since model
 	// names don't reach this map for removed providers.
 
-	// GLM (prices in USD equivalent from CNY)
+	// Z.AI pay-as-you-go USD prices, verified 2026-10-08.
+	// Coding Plan subscription charges are separate from these estimates.
 	// Z.AI bills cache hits at roughly one fifth of normal input. Keep the
 	// cached rates explicit so /cost reflects provider-reported cache reads.
-	"glm-5.2":     {InputCostPer1M: 4.00, CachedInputCostPer1M: 0.80, OutputCostPer1M: 16.00},
-	"glm-5.1":     {InputCostPer1M: 4.00, CachedInputCostPer1M: 0.80, OutputCostPer1M: 16.00},
-	"glm-5":       {InputCostPer1M: 1.00, CachedInputCostPer1M: 0.20, OutputCostPer1M: 4.00},
-	"glm-5-turbo": {InputCostPer1M: 0.70, CachedInputCostPer1M: 0.14, OutputCostPer1M: 2.80},
-	"glm-4.7":     {InputCostPer1M: 1.00, CachedInputCostPer1M: 0.20, OutputCostPer1M: 1.00},
-	"glm-4.6":     {InputCostPer1M: 0.70, CachedInputCostPer1M: 0.14, OutputCostPer1M: 0.70},
-	"glm-4.5":     {InputCostPer1M: 0.50, CachedInputCostPer1M: 0.10, OutputCostPer1M: 0.50},
-	"glm-4.5-air": {InputCostPer1M: 0.14, CachedInputCostPer1M: 0.028, OutputCostPer1M: 0.14},
-	"glm-4":       {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
+	"glm-5.3":        {InputCostPer1M: 1.40, CachedInputCostPer1M: 0.26, OutputCostPer1M: 4.40},
+	"glm-5.3-flash":  {InputCostPer1M: 0.15, CachedInputCostPer1M: 0.03, OutputCostPer1M: 0.50},
+	"glm-5.3-flashx": {InputCostPer1M: 0.37, CachedInputCostPer1M: 0.075, OutputCostPer1M: 1.25},
+	"glm-5.2":        {InputCostPer1M: 1.40, CachedInputCostPer1M: 0.26, OutputCostPer1M: 4.40},
+	"glm-5.1":        {InputCostPer1M: 1.40, CachedInputCostPer1M: 0.26, OutputCostPer1M: 4.40},
+	"glm-5":          {InputCostPer1M: 1.00, CachedInputCostPer1M: 0.20, OutputCostPer1M: 3.20},
+	"glm-5-turbo":    {InputCostPer1M: 0.70, CachedInputCostPer1M: 0.14, OutputCostPer1M: 2.80},
+	"glm-4.7":        {InputCostPer1M: 0.60, CachedInputCostPer1M: 0.11, OutputCostPer1M: 2.20},
+	"glm-4.6":        {InputCostPer1M: 0.60, CachedInputCostPer1M: 0.11, OutputCostPer1M: 2.20},
+	"glm-4.5":        {InputCostPer1M: 0.60, CachedInputCostPer1M: 0.11, OutputCostPer1M: 2.20},
+	"glm-4.5-air":    {InputCostPer1M: 0.20, CachedInputCostPer1M: 0.03, OutputCostPer1M: 1.10},
+	"glm-4":          {InputCostPer1M: 1.00, OutputCostPer1M: 1.00},
 
 	// MiniMax Pay-as-you-go pricing (USD / 1M tokens).
 	"MiniMax-M2.7":           {InputCostPer1M: 0.30, OutputCostPer1M: 1.20},

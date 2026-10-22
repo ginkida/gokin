@@ -153,6 +153,7 @@ func TestRunHeadless_PlanRejectionProtocolSuccessStillFailsClosed(t *testing.T) 
 		)},
 	}
 	app, _ := newHeadlessPolicyTestApp(t, mock, tool)
+	app.config.Plan.Enabled = true // This scenario explicitly exercises the enabled planning feature.
 
 	_, err := captureHeadlessStdoutResult(t, func() error {
 		return app.RunHeadless(context.Background(), "propose and execute a plan")

@@ -117,9 +117,10 @@ func deserializeToolCheckpoints(checkpoints []chat.SerializedToolCheckpoint) []t
 			result = tools.ToolResult{Success: true, Content: content}
 		} else {
 			result = tools.ToolResult{
-				Success: cp.ResultV2.Success,
-				Content: cp.ResultV2.Content,
-				Error:   cp.ResultV2.Error,
+				Success:        cp.ResultV2.Success,
+				Content:        cp.ResultV2.Content,
+				Error:          cp.ResultV2.Error,
+				HookStopReason: cp.ResultV2.HookStopReason,
 			}
 			if cp.ResultV2.PolicyBlock != nil {
 				result.PolicyBlock = &tools.PolicyBlock{
@@ -205,9 +206,10 @@ func serializeToolCheckpointsWithPolicy(entries []tools.ToolCheckpoint, exact bo
 			signature = tools.ToolCheckpointSignature(e.ToolName, e.Args)
 		}
 		resultV2 := &chat.SerializedToolResult{
-			Success: e.Result.Success,
-			Content: e.Result.Content,
-			Error:   e.Result.Error,
+			Success:        e.Result.Success,
+			Content:        e.Result.Content,
+			Error:          e.Result.Error,
+			HookStopReason: e.Result.HookStopReason,
 		}
 		if e.Result.PolicyBlock != nil {
 			resultV2.PolicyBlock = &chat.SerializedPolicyBlock{

@@ -168,7 +168,7 @@ func FormatBlock(files []RelatedFile, workDir string) string {
 	}
 	var b strings.Builder
 	b.WriteString("\n\n--- Related files in this package ---\n")
-	b.WriteString("(auto-included so you don't need extra read calls; use `read` for full content)\n\n")
+	b.WriteString("(context previews only; before editing any file below, call `read` on that exact file for full content)\n\n")
 	for _, f := range files {
 		rel := f.Path
 		if workDir != "" {

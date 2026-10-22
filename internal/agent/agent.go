@@ -63,14 +63,18 @@ type Agent struct {
 	// modelRoundTimeout is the configurable hard cap for one provider round.
 	// Guarded by stateMu so ApplyConfig can update live agents safely between
 	// rounds without racing their execution goroutines.
-	modelRoundTimeout time.Duration
-	history           []*genai.Content
-	status            AgentStatus
-	startTime         time.Time
-	endTime           time.Time
-	maxTurns          int
-	thoroughness      tools.Thoroughness
-	outputStyle       tools.OutputStyle
+	modelRoundTimeout  time.Duration
+	history            []*genai.Content
+	status             AgentStatus
+	startTime          time.Time
+	endTime            time.Time
+	maxTurns           int
+	pluginDefinition   *DynamicAgentType
+	definitionError    error
+	definitionEffort   string
+	definitionMaxTurns int
+	thoroughness       tools.Thoroughness
+	outputStyle        tools.OutputStyle
 	// invocationScope is rebound under stateMu at the start of every Run. A
 	// persisted agent ID can be resumed by a different top-level invocation, so
 	// attribution belongs to the run lease rather than the Agent's lifetime.
@@ -370,17 +374,21 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 	// WithModel(GetModel()) is a same-model clone. Nil-guarded — some tests and
 	// the plan-handoff path construct an agent without a client.
 	agentClient := c
+	var definitionErr error
 	if c != nil {
-		modelName := mapModelName(model)
-		if modelName == "" {
-			modelName = c.GetModel()
-		}
-		if modelName != "" {
-			agentClient = c.WithModel(modelName)
+		modelName, err := resolveAgentModelName(c, model)
+		definitionErr = err
+		if err == nil && modelName != "" {
+			if strings.EqualFold(strings.TrimSpace(model), "haiku") {
+				agentClient = client.WithModelOnCurrentProvider(c, modelName)
+			} else {
+				agentClient = c.WithModel(modelName)
+			}
 		}
 	}
 
 	agent := &Agent{
+		definitionError:    definitionErr,
 		ID:                 id,
 		Type:               agentType,
 		Model:              model,
@@ -416,6 +424,8 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 		allowedRequestedTools:    requestedToolSet(allowedTools),
 	}
 	agent.bindSkillToolLedger()
+	agentClient = tools.SkillScopedClient(client.WithRequestGuard(agentClient, checkPluginAgentExecution), agent.registry)
+	agent.client = agentClient
 
 	// Apply per-agent-type context budgets before other wiring
 	agent.applyAgentTypeDefaults()
@@ -516,6 +526,35 @@ func NewAgent(agentType AgentType, c client.Client, baseRegistry tools.ToolRegis
 // NewAgentWithDynamicType creates a new agent with a dynamic type configuration.
 func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseRegistry tools.ToolRegistry, workDir string, maxTurns int, model string, permManager *permission.Manager, ctxCfg *config.ContextConfig) *Agent {
 	id := generateAgentID()
+	dynType = cloneDynamicAgentType(dynType)
+	var definitionErr error
+	var nativeEffort string
+	if dynType.plugin != nil {
+		names := pluginAgentToolNames(dynType, baseRegistry)
+		if dynType.ToolsSpecified && len(dynType.AllowedTools) > 0 && len(names) == 0 {
+			definitionErr = fmt.Errorf("plugin agent %q has no available tools matching its tools list", dynType.Name)
+		}
+		// Keep the base registry equally restricted: request_tool and nested
+		// delegation must never recover a denied or caller-filtered tool.
+		baseRegistry = tools.CloneRegistryForWorkDirWithToolCeiling(baseRegistry, "", names)
+		dynType.AllowedTools = names
+		selection := model
+		if selection == "" {
+			selection = dynType.Model
+		}
+		if selection != "" || dynType.Effort != "" {
+			resolved, effort, err := client.ResolveSkillModelSettings(c, selection, dynType.Effort)
+			if err != nil {
+				definitionErr = fmt.Errorf("plugin agent model settings: %w", err)
+				model = ""
+			} else {
+				model, nativeEffort = resolved, effort
+			}
+		}
+		if dynType.MaxTurns > 0 && (maxTurns <= 0 || maxTurns > dynType.MaxTurns) {
+			maxTurns = dynType.MaxTurns
+		}
+	}
 
 	// Create filtered registry based on dynamic type's allowed tools
 	filteredRegistry := createFilteredRegistryFromList(dynType.AllowedTools, baseRegistry)
@@ -529,16 +568,21 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 	// Nil-guarded for the no-client construction paths.
 	agentClient := c
 	if c != nil {
-		modelName := mapModelName(model)
-		if modelName == "" {
-			modelName = c.GetModel()
+		modelName, err := resolveAgentModelName(c, model)
+		if err != nil {
+			definitionErr = err
 		}
-		if modelName != "" {
-			agentClient = c.WithModel(modelName)
+		if err == nil && modelName != "" {
+			if dynType.plugin != nil || strings.EqualFold(strings.TrimSpace(model), "haiku") {
+				agentClient = client.WithModelOnCurrentProvider(c, modelName)
+			} else {
+				agentClient = c.WithModel(modelName)
+			}
 		}
 	}
 
 	agent := &Agent{
+		definitionError:    definitionErr,
 		ID:                 id,
 		Type:               AgentType(dynType.Name), // Use dynamic type name
 		Model:              model,
@@ -575,7 +619,22 @@ func NewAgentWithDynamicType(dynType *DynamicAgentType, c client.Client, baseReg
 		// Store custom prompt for dynamic type
 		projectContext: dynType.SystemPrompt,
 	}
+	if dynType.plugin != nil {
+		agent.pluginDefinition = dynType
+		agent.definitionError = definitionErr
+		agent.definitionEffort = nativeEffort
+		agent.definitionMaxTurns = dynType.MaxTurns
+		agent.requestedToolsRestricted = true
+	}
 	agent.bindSkillToolLedger()
+	guard := checkPluginAgentExecution
+	if dynType.plugin != nil {
+		guard = func(ctx context.Context) error {
+			return checkPluginAgentExecution(contextWithPluginAgentAuthority(ctx, dynType))
+		}
+	}
+	agentClient = tools.SkillScopedClient(client.WithRequestGuard(agentClient, guard), agent.registry)
+	agent.client = agentClient
 
 	// Apply per-agent-type context budgets before other wiring
 	agent.applyAgentTypeDefaults()
@@ -971,6 +1030,13 @@ func (a *Agent) SetOutputStyle(s tools.OutputStyle) {
 // SetProjectContext injects project guidelines for sub-agent system prompts.
 func (a *Agent) SetProjectContext(ctx string) {
 	a.stateMu.Lock()
+	if a.pluginDefinition != nil {
+		if ctx == "" {
+			ctx = a.pluginDefinition.SystemPrompt
+		} else {
+			ctx = a.pluginDefinition.SystemPrompt + "\n\nProject instructions:\n" + ctx
+		}
+	}
 	a.projectContext = ctx
 	a.stateMu.Unlock()
 }
@@ -1368,12 +1434,23 @@ func (a *Agent) IsPlanningMode() bool {
 func mapModelName(name string) string {
 	switch strings.ToLower(name) {
 	case "flash", "fast":
-		return "glm-5-turbo"
+		return config.GLMFlashModel
 	case "pro", "strong":
-		return "glm-5.2"
+		return config.GLMFlagshipModel
 	default:
 		return name // Return as is if already a full model name
 	}
+}
+
+func resolveAgentModelName(c client.Client, name string) (string, error) {
+	if strings.EqualFold(strings.TrimSpace(name), "haiku") {
+		return client.ResolveSmallFastModel(c)
+	}
+	model := mapModelName(name)
+	if model == "" {
+		model = c.GetModel()
+	}
+	return model, nil
 }
 
 // generateAgentID creates a unique identifier for an agent.
@@ -1488,11 +1565,65 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 
 // Run executes the agent with the given prompt and returns the result.
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
+	if a.definitionError != nil {
+		return &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: a.definitionError.Error(), Completed: true}, a.definitionError
+	}
+	ctx = contextWithPluginAgentAuthority(ctx, a.pluginDefinition)
+	if err := checkPluginAgentExecution(ctx); err != nil {
+		return &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: err.Error(), Completed: true}, err
+	}
+	tools.ClearSkillHooks(a.registry)
+	defer tools.ClearSkillHooks(a.registry)
+	ctx = tools.ContextWithDelegatedSkillHooks(ctx, a.registry, a.baseRegistry, a.hooks)
+	if err := tools.SkillHooksError(ctx); err != nil {
+		return &AgentResult{AgentID: a.ID, Status: AgentStatusFailed, Error: err.Error(), Completed: true}, err
+	}
+	info := hooks.RuntimeInfoFromContext(ctx)
+	info.AgentID, info.AgentType = a.ID, string(a.Type)
+	if hooks.AgentHookActive(ctx) {
+		ctx = client.ContextWithMessageObserver(ctx, nil)
+	} else {
+		ctx = client.ContextWithMessageParent(ctx, a.ID, info.ToolUseID)
+	}
+	if info.ProjectDir == "" {
+		info.ProjectDir = a.workDir
+	}
+	ctx = hooks.ContextWithRuntimeInfo(ctx, info)
+	hookCtx := ctx
+	asyncScope := hooks.NewAsyncScope(ctx, nil)
+	ctx = hooks.ContextWithAsyncScope(ctx, asyncScope)
+	defer asyncScope.Close()
+	ctx = hooks.ContextWithPromptClient(ctx, a.client, func() error {
+		return tools.SkillHooksError(tools.ContextWithSkillHooks(hookCtx, a.registry, a.hooks))
+	})
+	ctx = tools.ContextWithAgentHookDispatcher(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
+		if err := ctx.Err(); err != nil {
+			return tools.ToolResult{}, err
+		}
+		return a.executeToolResultSafely(ctx, &genai.FunctionCall{ID: fmt.Sprintf("%s-hook-%d", a.ID, time.Now().UnixNano()), Name: name, Args: args}), nil
+	})
 	// A reusable/resumed Agent gets fresh skill permission rules for every run.
 	// Skill instructions may persist in history; grants and denies do not.
 	tools.BeginSkillPermissionTurn(a.registry)
+	var seedErr error
+	ctx, seedErr = tools.ConsumeForkedSkill(ctx, a.registry, a.invokedSkills)
+	if seedErr != nil {
+		return &AgentResult{AgentID: a.ID, Status: AgentStatusFailed, Error: seedErr.Error(), Completed: true}, seedErr
+	}
+	// Include auxiliary requests (reflection/compaction/planning), while
+	// explicitly masking inherited request settings in a different child's run.
+	effort := tools.ForkedSkillEffort(ctx, a.registry)
+	if effort == "" {
+		effort = a.definitionEffort
+	}
+	ctx = client.ContextWithReasoningEffort(ctx, effort)
 
 	invocationScope := InvocationScopeFromContext(ctx)
+	_, turnScoped := tools.MaxTurnsFromContext(ctx)
+	_, budgeted := tools.InvocationBudgetLedgerFromContext(ctx)
+	if turnScoped || budgeted {
+		ctx = client.ContextWithBoundedAuxiliaryRequests(ctx)
+	}
 	a.stateMu.Lock()
 	a.status = AgentStatusRunning
 	a.startTime = time.Now()
@@ -1558,6 +1689,37 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 			}
 		}
 		a.stateMu.Unlock()
+	}
+
+	// Startup checks belong to the child's history and cannot veto creation.
+	// A resumed run keeps an existing copy so the provider prefix stays stable.
+	if a.hooks != nil {
+		startup := a.hooks.RunSubagentStart(ctx, a.workDir)
+		var contexts []string
+		for _, check := range startup {
+			if check.Error == nil && check.AdditionalContext != "" {
+				contexts = append(contexts, check.AdditionalContext)
+			}
+		}
+		if len(contexts) > 0 {
+			text := "[SubagentStart hook context]\n" + strings.Join(contexts, "\n")
+			a.stateMu.Lock()
+			found := false
+			for _, content := range a.history {
+				if content == nil {
+					continue
+				}
+				for _, part := range content.Parts {
+					if part != nil && part.Text == text {
+						found = true
+					}
+				}
+			}
+			if !found {
+				a.history = append(a.history, genai.NewContentFromText(text, genai.RoleUser))
+			}
+			a.stateMu.Unlock()
+		}
 	}
 
 	// Execute the prompt through the function calling loop
@@ -1739,7 +1901,7 @@ var broadLoopExplorationTools = toolNameSet(
 	// no external cost, and called many times over distinct symbols/files in
 	// one understand/refactor task. Missing here, a reasoning-heavy Kimi K3
 	// sub-agent navigating a codebase hit the low base ceiling (v0.100.95).
-	"go_search", "go_to_definition", "find_references",
+	"go_search", "go_to_definition", "find_references", "lsp",
 	"review_changes",
 )
 
@@ -2972,6 +3134,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	noProgressRecoveries := 0   // Per-category budget: max 2
 	verifyNudged := false       // verify-before-done nudge fires at most once
 	doneGateFixes := 0
+	stopHookContinued := false
 	doneGateCheckedAtGen := -1
 	claimCorrectionInjected := false
 	lastCallPlanFingerprint := ""
@@ -3020,7 +3183,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		logging.Warn("maxTurns exceeds MaxTurnLimit, capping", "agent_id", a.ID,
 			"requested", a.maxTurns, "capped", MaxTurnLimit)
 	}
-	for i = 0; i < effectiveMaxTurns; i++ {
+	for i = 0; i < effectiveMaxTurns && (a.definitionMaxTurns <= 0 || i < a.definitionMaxTurns); i++ {
 		select {
 		case <-ctx.Done():
 			return a.history, output.String(), ctx.Err()
@@ -3242,7 +3405,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.stateMu.Unlock()
 
 			if errors.Is(apiErr, tools.ErrBudgetExceeded) ||
-				errors.Is(apiErr, tools.ErrCostUnavailable) {
+				errors.Is(apiErr, tools.ErrCostUnavailable) || errors.Is(apiErr, tools.ErrMaxTurnsExceeded) {
 				return a.finishInvocationBudgetFailure(resp, output, apiErr)
 			}
 
@@ -3372,6 +3535,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		a.history = append(a.history, modelContent)
 		a.recordResponseUsageLocked(resp)
 		a.stateMu.Unlock()
+		client.ObserveConversationMessage(ctx, modelContent, a.client.GetModel(), resp)
 
 		turnMadeProgress := false
 
@@ -3720,6 +3884,14 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.stateMu.Lock()
 			a.history = append(a.history, funcContent)
 			a.stateMu.Unlock()
+			client.ObserveConversationMessage(ctx, funcContent, a.client.GetModel(), nil)
+			var hookResponses []*genai.FunctionResponse
+			for _, result := range results {
+				hookResponses = append(hookResponses, result.Response)
+			}
+			if err := tools.HookStopErrorWithContext(ctx, hookResponses); err != nil {
+				return a.history, output.String(), err
+			}
 
 			// Esc may have been pressed during tool execution. Stop only after
 			// the pair-complete history commit above so persistence/resume has an
@@ -3823,6 +3995,29 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			continue
 		}
 
+		if a.hooks != nil && ctx.Err() == nil {
+			info := hooks.RuntimeInfoFromContext(ctx)
+			info.StopHookActive = stopHookContinued
+			info.Effort = client.EffectiveReasoningEffort(ctx, a.client)
+			stopCtx := hooks.ContextWithRuntimeInfo(ctx, info)
+			stopResults := a.hooks.RunStopInDir(stopCtx, a.workDir, resp.Text)
+			if ctx.Err() != nil {
+				return a.history, output.String(), ctx.Err()
+			}
+			if stopped, ok := tools.HookStopResult(stopResults); ok {
+				return a.history, output.String(), tools.HookStoppedError(stopped)
+			}
+			if blocked, ok := hooks.Blocked(stopResults); ok {
+				if stopHookContinued {
+					return a.history, output.String(), fmt.Errorf("Stop hook still requires continuation: %s", blocked.Output)
+				}
+				stopHookContinued = true
+				a.stateMu.Lock()
+				a.history = append(a.history, genai.NewContentFromText("[Stop hook asks you to continue] "+blocked.Output, genai.RoleUser))
+				a.stateMu.Unlock()
+				continue
+			}
+		}
 		// No more function calls, we're done
 		if turnMadeProgress {
 			noProgressTurns = 0
@@ -3846,8 +4041,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 	// Surface it as an error: agent.Run preserves the partial output (result.Output)
 	// on the failure path, and the loop adapter then classifies it as a (non-
 	// transient) task failure so the auto-pause breaker can do its job.
-	if i >= effectiveMaxTurns {
+	if i >= effectiveMaxTurns || a.definitionMaxTurns > 0 && i >= a.definitionMaxTurns {
 		a.safeOnText("\n[Reached maximum turn limit — stopping]\n")
+		if a.definitionMaxTurns > 0 {
+			effectiveMaxTurns = min(effectiveMaxTurns, a.definitionMaxTurns)
+		}
 		return a.history, output.String(), fmt.Errorf("reached maximum turn limit (%d turns)", effectiveMaxTurns)
 	}
 
@@ -4922,7 +5120,17 @@ func (a *Agent) withCompactionTimeout(parent context.Context) (context.Context, 
 }
 
 // getModelResponse gets a response from the model.
-func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) {
+func (a *Agent) getModelResponse(ctx context.Context) (response *client.Response, responseErr error) {
+	requestClient := client.WithRequestGuard(a.client, hooks.AsyncRewakeRequestGuard)
+	ctx, finishObservation := client.BeginObservedMessage(ctx, requestClient.GetModel())
+	defer func() { finishObservation(response, responseErr) }()
+	asyncNotes := hooks.TakeAsyncNotes(ctx)
+	// The clone may initially carry the foreground schema. Publish this
+	// agent's actual registry on every round, including request_tool additions
+	// and live task/skill catalogs, without changing the parent or siblings.
+	if a.registry != nil {
+		a.client.SetTools(a.registry.GeminiTools())
+	}
 	// Refresh active skill carry-forward before an ordinary text round. Insert
 	// before the current user message so the user's instruction remains the
 	// actual message passed to SendMessageWithHistory. Never do this for a
@@ -4930,6 +5138,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 	// and its response can violate strict provider tool-pair protocols.
 	invokedSkills := a.invokedSkillSnapshot()
 	a.stateMu.Lock()
+	a.history = hooks.InjectAsyncText(a.history, asyncNotes)
 	historyLen := len(a.history)
 	if historyLen == 0 {
 		a.stateMu.Unlock()
@@ -4984,7 +5193,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 			if hasInlineData {
 				roundCtx, roundCancel := a.withModelRoundTimeout(ctx)
 				defer roundCancel()
-				stream, err := a.client.SendMessageWithHistory(roundCtx, append(historyWithoutLast, lastContent), "Continue processing the tool results above.")
+				stream, err := requestClient.SendMessageWithHistory(roundCtx, append(historyWithoutLast, lastContent), "Continue processing the tool results above.")
 				if err != nil {
 					return nil, err
 				}
@@ -4993,7 +5202,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 
 			roundCtx, roundCancel := a.withModelRoundTimeout(ctx)
 			defer roundCancel()
-			stream, err := a.client.SendFunctionResponse(roundCtx, historyWithoutLast, funcResponses)
+			stream, err := requestClient.SendFunctionResponse(roundCtx, historyWithoutLast, funcResponses)
 			if err != nil {
 				return nil, err
 			}
@@ -5026,7 +5235,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (*client.Response, error) 
 	roundCtx, roundCancel := a.withModelRoundTimeout(ctx)
 	defer roundCancel()
 
-	stream, err := a.client.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
+	stream, err := requestClient.SendMessageWithHistory(roundCtx, historyWithoutLast, message)
 	if err != nil {
 		return nil, err
 	}
@@ -5050,7 +5259,14 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 	classifier := NewToolDependencyClassifier()
 	groups := classifier.ClassifyDependencies(calls)
 
+	var hookStopErr error
 	for _, group := range groups {
+		if hookStopErr != nil {
+			for _, call := range group.Calls {
+				results[callIndex[call]] = toolCallResult{Response: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: tools.NewErrorResult("not executed: " + hookStopErr.Error()).ToMap()}}
+			}
+			continue
+		}
 		if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
 			for _, call := range group.Calls {
 				results[callIndex[call]] = budgetSkippedToolCallResult(call, budgetErr)
@@ -5060,15 +5276,25 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 		if group.Parallel && len(group.Calls) > 1 {
 			// Execute read-only tools in parallel
 			a.executeToolsParallel(ctx, group.Calls, results, callIndex)
+			var responses []*genai.FunctionResponse
+			for _, call := range group.Calls {
+				responses = append(responses, results[callIndex[call]].Response)
+			}
+			hookStopErr = tools.HookStopError(responses)
 		} else {
 			// Execute sequentially (write tools or single tool)
 			for _, call := range group.Calls {
 				idx := callIndex[call]
+				if hookStopErr != nil {
+					results[idx] = toolCallResult{Response: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: tools.NewErrorResult("not executed: " + hookStopErr.Error()).ToMap()}}
+					continue
+				}
 				if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
 					results[idx] = budgetSkippedToolCallResult(call, budgetErr)
 					continue
 				}
 				results[idx] = a.executeToolCancellable(ctx, call)
+				hookStopErr = tools.HookStopError([]*genai.FunctionResponse{results[idx].Response})
 			}
 		}
 	}
@@ -5374,7 +5600,7 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 	var reflection *Reflection
 
 	// Apply self-reflection on errors to provide recovery suggestions
-	if ctx.Err() == nil && !result.Success && result.PolicyBlock == nil && a.reflector != nil {
+	if ctx.Err() == nil && !result.Success && result.PolicyBlock == nil && result.HookStopReason == "" && a.reflector != nil {
 		// --- Fix Cache: fast path ---
 		// Try session-local cache before full Reflect pipeline
 		category := a.reflector.QuickCategorize(result.Content)
@@ -5479,7 +5705,7 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 	}
 
 	// Check for autonomous delegation opportunity
-	if ctx.Err() == nil && !result.Success && result.PolicyBlock == nil && a.delegation != nil && a.delegation.HasMessenger() {
+	if ctx.Err() == nil && !result.Success && result.PolicyBlock == nil && result.HookStopReason == "" && a.delegation != nil && a.delegation.HasMessenger() {
 		delCtx := &DelegationContext{
 			AgentType:       a.Type,
 			CurrentTurn:     a.GetTurnCount(),
@@ -5526,8 +5752,12 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 	// Compact result if it's too large before converting to map
 	if a.compactor != nil {
 		policyBlock := result.PolicyBlock
+		hookStopReason := result.HookStopReason
+		hookStopKind := result.HookStopKind
 		result = a.compactor.CompactForType(call.Name, result)
 		result.PolicyBlock = policyBlock
+		result.HookStopReason = hookStopReason
+		result.HookStopKind = hookStopKind
 	}
 
 	return toolCallResult{
@@ -5544,6 +5774,9 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 // Named return `out` so the deferred tool-activity "end" event can report the
 // real outcome (success + a short summary) — see subAgentToolOutcome.
 func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out tools.ToolResult) {
+	if err := checkPluginAgentExecution(ctx); err != nil {
+		return tools.NewHookStoppedResult(err.Error())
+	}
 	tool, ok := a.registry.Get(call.Name)
 	if !ok {
 		return tools.NewErrorResult(fmt.Sprintf("tool not available for this agent: %s", call.Name))
@@ -5554,22 +5787,80 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 		return tools.NewErrorResult(fmt.Sprintf("validation error: %s", err))
 	}
 
+	a.stateMu.RLock()
+	hookManager := a.hooks
+	workDir := a.workDir
+	a.stateMu.RUnlock()
+	ctx = tools.ContextWithSkillHooks(ctx, a.registry, hookManager)
+	if err := tools.SkillHooksError(ctx); err != nil {
+		return tools.NewHookStoppedResult(err.Error())
+	}
+	info := hooks.RuntimeInfoFromContext(ctx)
+	if !hooks.AgentHookActive(ctx) {
+		info.AgentID, info.AgentType = a.ID, string(a.Type)
+	}
+	info.ToolUseID = call.ID
+	hookRevision := hookManager.ExecutionRevision()
+	info.ToolNameOverride = tools.ClaudeHookToolName(tool)
+	info.Effort = client.EffectiveReasoningEffort(ctx, a.client)
+	if info.ProjectDir == "" {
+		info.ProjectDir = workDir
+	}
+	ctx = hooks.ContextWithRuntimeInfo(ctx, info)
+	var preResults []hooks.Result
+	hookDecision := ""
+	if hookManager != nil {
+		preResults = hookManager.RunScoped(ctx, hooks.PreTool, hooks.NewContext(call.Name, call.Args, workDir))
+		if stopped, ok := tools.HookStopResult(preResults); ok {
+			return stopped
+		}
+		if blocked, ok := hooks.Blocked(preResults); ok {
+			name := blocked.Hook.DisplayName()
+			reason := strings.TrimSpace(blocked.Output)
+			if reason == "" && blocked.Error != nil {
+				reason = blocked.Error.Error()
+			}
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockHook, fmt.Sprintf(
+				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
+		}
+	}
+	ownedCall := *call
+	call = &ownedCall
+	hookDecision = tools.ApplyHookInput(call, preResults)
+	for _, result := range preResults {
+		if result.UpdatedInput != nil {
+			defer func() { out.HookUpdatedInput = call.Args }()
+			break
+		}
+	}
+	if err := tool.Validate(call.Args); err != nil {
+		return tools.NewErrorResult("hook updatedInput validation: " + err.Error())
+	}
+	if hookDecision == "ask" && a.permissions == nil {
+		return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, "Hook requires approval but no permission manager is available")
+	}
 	// Check permissions before executing
 	// Capture hidden runtime state even when this agent has no interactive
 	// permission manager. Hooks and UI policy toggles may run before execution;
 	// Bash must still execute only under the exact scope observed here.
 	authorizedPermissionArgs := tools.PermissionArgsForTool(tool, call.Args)
+	ctx = permission.ContextWithToolIdentity(ctx, call.Name, tools.PermissionToolIdentity(tool))
+	ctx = permission.ContextWithHookDecision(ctx, call.Name, authorizedPermissionArgs, hookDecision)
+	a.stateMu.RLock()
+	permissionWorkDir := a.workDir
+	a.stateMu.RUnlock()
+	grants, denies := tools.SkillPermissionRules(ctx, a.registry)
+	if a.permissions == nil && permission.TemporaryToolRulesDenyWithIdentity(ctx, denies, call.Name, authorizedPermissionArgs, permissionWorkDir) {
+		return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, "Tool is denied by the active skill")
+	}
 	if a.permissions != nil {
-		a.stateMu.RLock()
-		permissionWorkDir := a.workDir
-		a.stateMu.RUnlock()
 		permissionCtx := permission.ContextWithWorkDir(ctx, permissionWorkDir)
 		resp, err := a.permissions.CheckWithTemporaryToolRules(
 			permissionCtx,
 			call.Name,
 			tools.ClonePermissionArgs(authorizedPermissionArgs),
-			tools.SkillPermissionGrants(a.registry),
-			tools.SkillPermissionDenies(a.registry),
+			grants,
+			denies,
 		)
 		if err != nil {
 			return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, fmt.Sprintf("permission error: %s", err))
@@ -5583,20 +5874,14 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 		}
 	}
 
-	a.stateMu.RLock()
-	hookManager := a.hooks
-	workDir := a.workDir
-	a.stateMu.RUnlock()
 	if hookManager != nil {
-		preResults := hookManager.RunPreToolInDir(ctx, workDir, call.Name, call.Args)
-		if blocked, ok := hooks.Blocked(preResults); ok {
-			name := blocked.Hook.DisplayName()
-			reason := strings.TrimSpace(blocked.Output)
-			if reason == "" && blocked.Error != nil {
-				reason = blocked.Error.Error()
-			}
-			return tools.NewPolicyBlockedResult(tools.PolicyBlockHook, fmt.Sprintf(
-				"hook blocked: pre-tool hook %q refused %s: %s", name, call.Name, reason))
+		nativeResults := hookManager.RunNativePreToolInDir(ctx, workDir, call.Name, call.Args)
+		preResults = append(preResults, nativeResults...)
+		if stopped, ok := tools.HookStopResult(nativeResults); ok {
+			return stopped
+		}
+		if blocked, ok := hooks.Blocked(nativeResults); ok {
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockHook, "hook blocked: "+blocked.Hook.DisplayName()+": "+blocked.Output)
 		}
 	}
 	// Permission prompts and pre-hooks may outlive cancellation. Re-check the
@@ -5637,6 +5922,29 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	// commit a side effect and then fail, and cancellation can suppress later
 	// reflection/bookkeeping. IsWriteTool fails closed for unknown tools.
 	a.recordStatefulToolAttempt(call.Name)
+	var skillCommandIndex int
+	ctx = tools.ContextWithSkillToolDispatcher(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
+		skillCommandIndex++
+		return a.executeToolResultSafely(ctx, &genai.FunctionCall{ID: fmt.Sprintf("%s-skill-tool-%d", call.ID, skillCommandIndex), Name: name, Args: args}), nil
+	})
+	ctx = tools.ContextWithSkillModelClient(ctx, a.registry, a.client)
+	ctx = tools.ContextWithSkillShellInvoker(ctx, func(ctx context.Context, command string) (tools.ToolResult, error) {
+		skillCommandIndex++
+		return a.executeToolResultSafely(ctx, &genai.FunctionCall{
+			ID:   fmt.Sprintf("%s-skill-shell-%d", call.ID, skillCommandIndex),
+			Name: "bash", Args: map[string]any{"command": command},
+		}), nil
+	})
+	if err := hookManager.CheckExecutionRevision(hookRevision); err != nil {
+		return tools.NewHookStoppedResult(err.Error())
+	}
+	if err := checkPluginAgentExecution(ctx); err != nil {
+		return tools.NewHookStoppedResult(err.Error())
+	}
+	if err := tools.SkillHooksError(ctx); err != nil {
+		return tools.NewHookStoppedResult(err.Error())
+	}
+	ctx = tools.ContextWithLSPReadPolicy(ctx, a.permissions, a.registry, workDir)
 	result, err := tools.ExecuteWithPermissionScope(ctx, tool, call.Args, authorizedPermissionArgs)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "Permission scope changed before execution:") {
@@ -5645,21 +5953,25 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 			out = tools.NewErrorResult(err.Error())
 		}
 		if hookManager != nil && agentToolExecutionActive(ctx) {
-			hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
+			postResults := hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
+			out = tools.AppendHookContext(out, append(preResults, postResults...))
 		}
 		return
 	}
 	out = result
+	tools.AppendLSPDiagnostics(ctx, a.registry, call, &out)
 	if !out.Success && out.PolicyBlock == nil &&
 		strings.HasPrefix(out.Error, "Permission scope changed before execution:") {
 		out = tools.WithPolicyBlock(out, tools.PolicyBlockPermission, out.Error)
 	}
 	if hookManager != nil && agentToolExecutionActive(ctx) {
+		var postResults []hooks.Result
 		if out.Success {
-			hookManager.RunPostToolInDir(ctx, workDir, call.Name, call.Args, out.Content)
+			postResults = hookManager.RunPostToolInDir(ctx, workDir, call.Name, call.Args, out.Content)
 		} else {
-			hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
+			postResults = hookManager.RunOnErrorInDir(ctx, workDir, call.Name, call.Args, out.Error)
 		}
+		out = tools.AppendHookContext(out, append(preResults, postResults...))
 	}
 	return
 }
@@ -6137,6 +6449,7 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 		a.stateMu.Lock()
 		a.history = append(a.history, modelContent)
 		a.stateMu.Unlock()
+		client.ObserveConversationMessage(ctx, modelContent, a.client.GetModel(), resp)
 
 		// No tool calls — model is done
 		if len(resp.FunctionCalls) == 0 {
@@ -6177,6 +6490,7 @@ func (a *Agent) executeDirectly(ctx context.Context, action *PlannedAction, star
 		a.stateMu.Lock()
 		a.history = append(a.history, funcContent)
 		a.stateMu.Unlock()
+		client.ObserveConversationMessage(ctx, funcContent, a.client.GetModel(), nil)
 	}
 
 	return &AgentResult{

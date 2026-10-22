@@ -29,6 +29,26 @@ func TestRunnerAgentUsageCallbackReportsEveryInvocation(t *testing.T) {
 	}
 }
 
+func TestRunnerUsageCheckpointRunsOutsideLocksAndSurvivesCallbackFailure(t *testing.T) {
+	r := &Runner{agents: make(map[string]*Agent)}
+	checkpoints, reports := 0, 0
+	r.agents["accounted"] = &Agent{runCtx: client.ContextWithTokenUsageCheckpoint(t.Context(), func() {
+		r.mu.Lock()
+		r.mu.Unlock()
+		checkpoints++
+		if checkpoints == 2 {
+			panic("checkpoint storage failed")
+		}
+	})}
+	// Durable attribution also works without a session-wide usage callback.
+	r.reportAgentUsage("accounted", &AgentResult{InputTokens: 10})
+	r.SetOnAgentUsage(func(string, *AgentResult) { reports++ })
+	r.reportAgentUsage("accounted", &AgentResult{InputTokens: 20})
+	if checkpoints != 2 || reports != 1 {
+		t.Fatalf("accounting failure suppressed run delivery: checkpoints=%d reports=%d", checkpoints, reports)
+	}
+}
+
 func TestRunnerAgentUsageCallbackPanicIsContained(t *testing.T) {
 	r := &Runner{}
 	r.SetOnAgentUsage(func(string, *AgentResult) {

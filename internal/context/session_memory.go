@@ -228,13 +228,22 @@ func (s *SessionMemoryManager) RecordToolCall() {
 // ExtractAsync copies the history slice and runs extraction in a background goroutine.
 // This is the safe entry point — callers don't need to worry about race conditions.
 func (s *SessionMemoryManager) ExtractAsync(history []*genai.Content, currentTokens int) {
+	s.ExtractAsyncWithContext(s.ctx, history, currentTokens)
+}
+
+func (s *SessionMemoryManager) ExtractAsyncWithContext(ctx context.Context, history []*genai.Content, currentTokens int) {
 	snapshot := make([]*genai.Content, len(history))
 	copy(snapshot, history)
 	s.asyncWG.Add(1)
-	go func() {
+	run := func() {
 		defer s.asyncWG.Done()
-		s.Extract(snapshot, currentTokens)
-	}()
+		s.extractWithContext(ctx, snapshot, currentTokens)
+	}
+	if client.AuxiliaryRequestsBounded(ctx) {
+		run()
+	} else {
+		go run()
+	}
 }
 
 // Wait blocks until extraction work launched by this manager has finished.
@@ -263,6 +272,10 @@ func (s *SessionMemoryManager) Close(ctx context.Context) error {
 // Extract extracts session memory from conversation history using heuristic analysis.
 // This does NOT make any LLM calls — it uses pattern matching on the history.
 func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens int) {
+	s.extractWithContext(s.ctx, history, currentTokens)
+}
+
+func (s *SessionMemoryManager) extractWithContext(ctx context.Context, history []*genai.Content, currentTokens int) {
 	if len(history) < 4 {
 		return // Too little history
 	}
@@ -352,10 +365,15 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 			s.flushPromotedSessionLearnings(projectLearning, durableLearnings)
 		}
 		s.asyncWG.Add(1)
-		go func() {
+		run := func() {
 			defer s.asyncWG.Done()
-			s.extractWithLLM(history, heuristicContent, contentGeneration)
-		}()
+			s.extractWithLLMContext(ctx, history, heuristicContent, contentGeneration)
+		}
+		if client.AuxiliaryRequestsBounded(ctx) {
+			run()
+		} else {
+			go run()
+		}
 		logging.Debug("session memory extracted",
 			"files", len(files),
 			"tools", len(toolCounts),
@@ -391,8 +409,20 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 // extractWithLLM uses the Summarizer to create a higher-quality session summary.
 // Runs in a goroutine; falls back to heuristic content on failure.
 func (s *SessionMemoryManager) extractWithLLM(history []*genai.Content, fallback string, baseGeneration uint64) {
+	s.extractWithLLMContext(s.ctx, history, fallback, baseGeneration)
+}
+
+func (s *SessionMemoryManager) extractWithLLMContext(owner context.Context, history []*genai.Content, fallback string, baseGeneration uint64) {
+	if !client.AuxiliaryRequestsBounded(owner) {
+		owner = context.WithoutCancel(owner)
+	}
+	owner, stopOwner := context.WithCancel(owner)
+	stop := context.AfterFunc(s.ctx, stopOwner)
+	defer stop()
+	defer stopOwner()
+	defer client.CheckpointContextTokenUsage(owner)
 	timeout := s.ModelRoundTimeout()
-	ctx, cancel := context.WithTimeoutCause(s.ctx, timeout, client.NewModelRoundTimeoutError(timeout))
+	ctx, cancel := context.WithTimeoutCause(owner, timeout, client.NewModelRoundTimeoutError(timeout))
 	defer cancel()
 	// Clear the in-flight guard on every exit path (success, LLM failure, or
 	// a future early return) so the next qualifying Extract() can proceed.
@@ -970,12 +1000,12 @@ func (s *ClientSessionSummarizer) Summarize(ctx context.Context, history []*gena
 		msgs = msgs[len(msgs)-20:]
 	}
 
-	stream, err := s.client.SendMessageWithHistory(ctx, msgs, prompt)
+	stream, err := client.SendAuxiliaryMessageWithHistory(ctx, s.client, msgs, prompt)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := stream.CollectContext(ctx)
+	resp, err := client.CollectAuxiliaryResponse(ctx, s.client, stream)
 	if err != nil {
 		return "", err
 	}

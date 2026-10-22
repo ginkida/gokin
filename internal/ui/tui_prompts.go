@@ -1459,7 +1459,7 @@ func (m Model) renderModelSelector() string {
 		Italic(true)
 
 	// Header
-	header := titleStyle.Render("Select Model") + "  " + subtitleStyle.Render("Ctrl+K")
+	header := titleStyle.Render("Select Model") + "  " + subtitleStyle.Render(m.keyLabel("Ctrl+K"))
 	builder.WriteString(fitPanelContent(header, contentWidth))
 	if compact {
 		builder.WriteString("\n")

@@ -34,8 +34,60 @@ func TestApplyRuntimeOverrides_ProviderSelectsRuntimeAndDefaultModel(t *testing.
 	if cfg.API.ActiveProvider != "glm" || cfg.API.Backend != "glm" || cfg.Model.Provider != "glm" {
 		t.Fatalf("provider not applied: api=%q backend=%q model.provider=%q", cfg.API.ActiveProvider, cfg.API.Backend, cfg.Model.Provider)
 	}
-	if cfg.Model.Name != "glm-5.2" {
-		t.Fatalf("model name = %q, want provider default glm-5.2", cfg.Model.Name)
+	if cfg.Model.Name != "glm-5.3-flash" {
+		t.Fatalf("model name = %q, want provider default glm-5.3-flash", cfg.Model.Name)
+	}
+}
+
+func TestFlashDefaultPreservesModelSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, override, want string
+	}{
+		{"omitted", "{}", "", "glm-5.3-flash"},
+		{"provider-only", "model: {provider: glm}", "", "glm-5.3-flash"},
+		{"saved-flagship", "model: {provider: glm, name: glm-5.3, max_output_tokens: 131072}", "", "glm-5.3"},
+		{"runtime-flagship", "{}", "glm-5.3", "glm-5.3"},
+		{"saved-other-provider", "api: {active_provider: kimi}\nmodel: {provider: kimi, name: k3}", "", "k3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfiguredConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applyRuntimeOverrides(cfg, "", tc.override); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Model.Name != tc.want {
+				t.Fatalf("model = %q, want %q", cfg.Model.Name, tc.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeEffortOverride(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Model.ReasoningEffort = "max"
+	if err := applyRuntimeEffortOverride(cfg, ""); err != nil || cfg.Model.ReasoningEffort != "max" {
+		t.Fatalf("omitted flag changed config: %v, %s", err, cfg.Model.ReasoningEffort)
+	}
+	if err := applyRuntimeEffortOverride(cfg, " HIGH "); err != nil || cfg.Model.ReasoningEffort != "high" {
+		t.Fatalf("effort not applied: %v, %s", err, cfg.Model.ReasoningEffort)
+	}
+	for _, value := range []string{"medium", " ", "invalid"} {
+		if err := applyRuntimeEffortOverride(cfg, value); err == nil {
+			t.Fatalf("invalid effort %q accepted", value)
+		}
+		if cfg.Model.ReasoningEffort != "high" {
+			t.Fatal("invalid override mutated config")
+		}
+	}
+	cfg.Model.Name = "glm-5.2"
+	if err := applyRuntimeEffortOverride(cfg, "max"); err == nil {
+		t.Fatal("unsupported model accepted effort")
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
+	"gokin/internal/lsp"
 	"gokin/internal/mcp"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
@@ -108,8 +109,12 @@ type Builder struct {
 	// MCP (Model Context Protocol)
 	mcpManager             *mcp.Manager
 	mcpConnectSummary      string // Deferred UI summary of initial MCP connect results
+	pluginStartupSummary   string
+	pluginAutoUpdater      *pluginAutoUpdater
+	pluginCommandUpdater   *pluginAutoUpdater
 	contextAgent           *appcontext.ContextAgent
 	codeIntelProvider      codeintel.ReadOnlyProvider
+	lspManager             *lsp.Manager
 	replManager            hybridRuntime
 	harnessStore           *harness.Store
 	replDetector           func(context.Context, string) repl.Availability
@@ -157,11 +162,18 @@ type Builder struct {
 type BuildOptions struct {
 	// NonInteractive guarantees that application construction never prompts on
 	// stdin, writes human-oriented messages to stdout, or starts an implicit
-	// download. It is intended for headless/automation callers.
+	// model download. It is intended for headless/automation callers.
 	NonInteractive bool
+	// SyncDeclaredPlugins reconciles explicitly declared marketplaces/plugins
+	// before runtime discovery. Interactive automatic updates run after the
+	// first user message; noninteractive hosts reconcile them during startup.
+	// The CLI enables this; embedding hosts opt in to fetching code and
+	// re-running previously accepted command sources.
+	SyncDeclaredPlugins bool
 	// Bare constructs the minimal Read/Edit/Bash runtime without automatic
 	// project instructions, skills, hooks, MCP, memory, or agent discovery.
-	Bare bool
+	Bare       bool
+	PluginDirs []string
 	// StartupToolCapabilityAllowed/Denied are an early, deny-only view used to
 	// avoid initializing optional runtimes the invocation cannot call. Full
 	// validation and executor authority remain ConfigureToolCapability's job
@@ -272,42 +284,7 @@ func (b *Builder) checkAllowedDirs() error {
 		return nil // Skip if we can't get home dir
 	}
 
-	// First run - prompt about allowing home directory
-	fmt.Printf("\nAllowed directories setup (first run)\n\n")
-	fmt.Printf("   Current working directory: %s\n", b.workDir)
-	fmt.Printf("   AI can only access the working directory.\n\n")
-	fmt.Printf("   Do you want to allow access to home directory (%s)?\n", homeDir)
-	fmt.Printf("   This will allow AI to work with files in any of your projects.\n\n")
-	fmt.Printf("   [1] Yes, allow access to home directory\n")
-	fmt.Printf("   [2] No, allow only current directory\n")
-	fmt.Printf("   [3] Specify another directory\n\n")
-	fmt.Printf("   Choice [1/2/3]: ")
-
-	var response string
-	fmt.Scanln(&response)
-	response = strings.TrimSpace(strings.ToLower(response))
-
-	var dirToAdd string
-	switch response {
-	case "1", "y", "yes":
-		dirToAdd = homeDir
-	case "3":
-		fmt.Printf("   Enter path: ")
-		fmt.Scanln(&dirToAdd)
-		dirToAdd = strings.TrimSpace(dirToAdd)
-		if dirToAdd == "" {
-			// User cancelled - save workDir to prevent re-prompting
-			dirToAdd = b.workDir
-			fmt.Printf("   Only working directory allowed.\n")
-		} else if strings.HasPrefix(dirToAdd, "~/") {
-			// Expand ~ if present
-			dirToAdd = filepath.Join(homeDir, dirToAdd[2:])
-		}
-	default:
-		// "2" or any other - save workDir to prevent re-prompting
-		dirToAdd = b.workDir
-		fmt.Printf("   Only current working directory allowed.\n")
-	}
+	dirToAdd := chooseInitialWorkspaceDir(os.Stdin, os.Stdout, b.workDir, homeDir)
 
 	if b.cfg.AddAllowedDir(dirToAdd) {
 		logging.Debug("saving config", "path", config.GetConfigPath(), "allowed_dir", dirToAdd)
@@ -445,6 +422,9 @@ func (b *Builder) initTools() error {
 	} else {
 		b.registry = tools.DefaultRegistry(b.workDir)
 	}
+	// Plugin discovery later activates LSP. Construction alone must not
+	// advertise an unavailable tool or start language servers.
+	b.registry.Unregister("lsp")
 	if err := b.initHybridEngine(); err != nil {
 		return err
 	}
@@ -921,6 +901,11 @@ func (b *Builder) initSession() error {
 	}
 
 	b.contextManager = appcontext.NewContextManager(b.ctx, b.session, b.mainClient, &b.cfg.Context)
+	if b.options.NonInteractive {
+		// Session restore can trigger count callbacks before RunHeadless installs
+		// its invocation. Defer automatic model work to its bounded request path.
+		b.contextManager.SetAuxiliaryRequestContext(client.ContextWithBoundedAuxiliaryRequests(b.ctx))
+	}
 	b.contextManager.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.contextAgent = appcontext.NewContextAgent(b.contextManager, b.session, b.configDir)
 
@@ -1020,6 +1005,9 @@ func (b *Builder) initBareManagers() error {
 // initManagers creates various manager components.
 func (b *Builder) initManagers() error {
 	if b.options.Bare {
+		if len(b.options.PluginDirs) > 0 {
+			return fmt.Errorf("--plugin-dir is unavailable in minimal bare mode")
+		}
 		return b.initBareManagers()
 	}
 	// Permission manager
@@ -1147,10 +1135,38 @@ func (b *Builder) initManagers() error {
 				// configuration. Reuse the exact, user-owned workspace trust
 				// boundary already required for more-powerful project hooks.
 				skillTool.SetWorkspaceTrusted(workspaceTrusted)
+				skillTool.SetShellExecutionDisabled(b.cfg.Tools.DisableSkillShellExecution)
 			}
 		}
 	}
 	b.hooksManager = hooks.NewManager(b.cfg.Hooks.Enabled, b.workDir)
+	userSettingsDir, settingsDirErr := hooks.ClaudeUserSettingsDir()
+	if settingsDirErr != nil && (b.cfg.Hooks.Enabled || len(b.options.PluginDirs) > 0) {
+		return fmt.Errorf("resolve Claude settings directory: %w", settingsDirErr)
+	}
+	b.hooksManager.ConfigureClaudeManagedSettings(hooks.ClaudeManagedSettingsDir())
+	b.hooksManager.ConfigureClaudePlugins(b.options.PluginDirs)
+	b.hooksManager.ConfigureClaudeSettings(b.workDir, userSettingsDir, workspaceTrusted)
+	b.syncStartupPlugins(userSettingsDir, workspaceTrusted)
+	if err := b.hooksManager.RefreshClaudeSettings(); err != nil {
+		if len(b.options.PluginDirs) > 0 {
+			return fmt.Errorf("load plugins: %w", err)
+		}
+		logging.Warn("Claude settings hooks unavailable", "error", err)
+	}
+	for _, issue := range b.hooksManager.ClaudeDependencyWarnings() {
+		logging.Warn("plugin dependencies", "issue", issue)
+		if !strings.Contains(b.pluginStartupSummary, issue) {
+			b.pluginStartupSummary += "\n" + issue
+		}
+	}
+	if b.registry != nil {
+		if registered, ok := b.registry.Get("skill"); ok {
+			if skill, ok := registered.(*tools.SkillTool); ok {
+				skill.ConfigureClaudePlugins(b.hooksManager)
+			}
+		}
+	}
 	for _, hookCfg := range b.cfg.Hooks.Hooks {
 		b.hooksManager.AddHook(&hooks.Hook{
 			Name:        hookCfg.Name,
@@ -1250,6 +1266,13 @@ func (b *Builder) initManagers() error {
 		logging.Warn("file command", "warning", w)
 	}
 	b.fileCommands = fileCommands
+	if b.registry != nil {
+		if registered, ok := b.registry.Get("skill"); ok {
+			if skill, ok := registered.(*tools.SkillTool); ok {
+				b.commandHandler.ConfigureSkillResolver(skill.HasUserSkill)
+			}
+		}
+	}
 
 	// Seal the boot phase — the handler is now immutable and will be shared
 	// across goroutines. Any later LoadFileCommands/LoadAliasesFromFile call
@@ -1311,6 +1334,12 @@ func (b *Builder) initManagers() error {
 	}
 	if len(fileAgentTypes) > 0 {
 		logging.Info("file agent types loaded", "count", len(fileAgentTypes))
+	}
+	if !b.cfg.Bare && !b.options.Bare {
+		b.agentTypeRegistry.ConfigureClaudePlugins(b.hooksManager)
+		for _, warning := range b.agentTypeRegistry.PluginWarnings() {
+			logging.Warn("plugin agent type", "warning", warning)
+		}
 	}
 	b.agentRunner.SetTypeRegistry(b.agentTypeRegistry)
 	logging.Debug("agent type registry initialized")
@@ -1824,6 +1853,9 @@ func (b *Builder) initIntegrations() error {
 	if err := b.initMCP(); err != nil {
 		return err
 	}
+	if err := b.initLSP(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -1911,10 +1943,14 @@ func resolveGLMKey(cfg *config.Config) *security.LoadedKey {
 // When `mcp.enabled: false` (the default) this is a no-op and `b.mcpManager`
 // stays nil; `commands/mcp.go` checks for that and surfaces the disabled hint.
 func (b *Builder) initMCP() error {
-	if b.options.Bare {
+	if b.options.Bare || b.cfg.Bare {
 		return nil
 	}
+	b.wireMCPAdminTool()
 	servers := b.cfg.MCP.Servers
+	if !b.cfg.MCP.Enabled {
+		servers = nil
+	}
 	glmAdded := false
 	// web.glm_search: one-flag enable for the GLM Coding Plan web search MCP
 	// server, wired to the stored GLM key. The flag IS the opt-in, so it works
@@ -1928,7 +1964,20 @@ func (b *Builder) initMCP() error {
 		}
 	}
 
-	if !b.cfg.MCP.Enabled && !glmAdded {
+	pluginConfigs, err := mcp.LoadClaudePluginServers(b.hooksManager, b.workDir, b.cfg.MCP.Enabled)
+	if err != nil {
+		return fmt.Errorf("load plugin MCP servers: %w", err)
+	}
+	if !b.cfg.MCP.Enabled {
+		active := pluginConfigs[:0]
+		for _, cfg := range pluginConfigs {
+			if cfg.PluginExplicitlyEnabled() {
+				active = append(active, cfg)
+			}
+		}
+		pluginConfigs = active
+	}
+	if !b.cfg.MCP.Enabled && !glmAdded && len(pluginConfigs) == 0 {
 		return nil
 	}
 
@@ -1954,12 +2003,24 @@ func (b *Builder) initMCP() error {
 		})
 		permLevels[s.Name] = s.PermissionLevel
 	}
+	for _, cfg := range pluginConfigs {
+		for _, existing := range mcpConfigs {
+			if existing.Name == cfg.Name {
+				return fmt.Errorf("plugin MCP server %q conflicts with a native server", cfg.Name)
+			}
+		}
+		mcpConfigs = append(mcpConfigs, cfg)
+		permLevels[cfg.Name] = cfg.PermissionLevel
+	}
 
 	b.mcpManager = mcp.NewManager(mcpConfigs)
 	// Install the tools-changed dispatcher BEFORE ConnectAll so that any
 	// notification arriving during initial connect handshakes is captured
 	// (queued if App not yet ready, delivered otherwise).
 	b.mcpManager.SetToolsChangedCallback(b.dispatchMCPToolsChanged)
+	if len(pluginConfigs) > 0 {
+		b.mcpManager.StartPluginPolicyWatch(b.ctx, b.hooksManager, b.workDir, b.cfg.MCP.Enabled)
+	}
 
 	autoCount := 0
 	for _, cfg := range mcpConfigs {
@@ -2021,7 +2082,7 @@ func (b *Builder) initMCP() error {
 	b.wireMCPAdminTool()
 
 	logging.Debug("MCP initialized",
-		"servers", len(b.cfg.MCP.Servers),
+		"servers", len(mcpConfigs),
 		"tools", toolCount)
 
 	return nil
@@ -2095,26 +2156,32 @@ func (b *Builder) wireMCPAdminTool() {
 	if !ok {
 		return
 	}
+	currentManager := func() *mcp.Manager {
+		if app := b.cachedApp; app != nil {
+			return app.GetMCPManager()
+		}
+		return b.mcpManager
+	}
 	admin.SetCallbacks(
 		func() string {
-			return mcp.FormatList(b.mcpManager)
+			return mcp.FormatList(currentManager())
 		},
 		func(name string) string {
-			return mcp.FormatStatus(b.mcpManager, name)
+			return mcp.FormatStatus(currentManager(), name)
 		},
 		func() bool {
-			return b.mcpManager != nil
+			return currentManager() != nil
 		},
 	)
 	admin.SetMutationCallbacks(
 		func(ctx context.Context, params tools.MCPAddParams) (string, error) {
 			if app := b.cachedApp; app != nil {
-				return commands.MCPAddForApp(ctx, b.mcpManager, app, commands.MCPAddParams{
+				return commands.MCPAddForApp(ctx, currentManager(), app, commands.MCPAddParams{
 					Name: params.Name, Transport: params.Transport, Command: params.Command,
 					Args: append([]string(nil), params.Args...), URL: params.URL,
 				})
 			}
-			return commands.MCPAddCore(ctx, b.mcpManager, b.cfg, b.registry, b.mainClient, commands.MCPAddParams{
+			return commands.MCPAddCore(ctx, currentManager(), b.cfg, b.registry, b.mainClient, commands.MCPAddParams{
 				Name:      params.Name,
 				Transport: params.Transport,
 				Command:   params.Command,
@@ -2124,9 +2191,9 @@ func (b *Builder) wireMCPAdminTool() {
 		},
 		func(name string) (string, error) {
 			if app := b.cachedApp; app != nil {
-				return commands.MCPRemoveForApp(b.mcpManager, app, name)
+				return commands.MCPRemoveForApp(currentManager(), app, name)
 			}
-			return commands.MCPRemoveCore(b.mcpManager, b.cfg, b.registry, b.mainClient, name)
+			return commands.MCPRemoveCore(currentManager(), b.cfg, b.registry, b.mainClient, name)
 		},
 	)
 	admin.SetControlCallbacks(
@@ -2142,15 +2209,15 @@ func (b *Builder) wireMCPAdminTool() {
 		func(name string, paused bool) (string, error) {
 			if app := b.cachedApp; app != nil {
 				if paused {
-					return commands.MCPPauseForApp(context.Background(), b.mcpManager, app, name)
+					return commands.MCPPauseForApp(context.Background(), currentManager(), app, name)
 				}
-				return commands.MCPResumeForApp(context.Background(), b.mcpManager, app, name)
+				return commands.MCPResumeForApp(context.Background(), currentManager(), app, name)
 			}
 			return "", fmt.Errorf("app not initialised")
 		},
 		func(ctx context.Context, params tools.MCPAddParams) (string, error) {
 			if app := b.cachedApp; app != nil {
-				return commands.MCPEditForApp(ctx, b.mcpManager, app, params.Name, commands.MCPAddParams{
+				return commands.MCPEditForApp(ctx, currentManager(), app, params.Name, commands.MCPAddParams{
 					Transport: params.Transport, Command: params.Command,
 					Args: append([]string(nil), params.Args...), URL: params.URL,
 				})
@@ -2159,20 +2226,21 @@ func (b *Builder) wireMCPAdminTool() {
 		},
 		func(presetName string) (string, error) {
 			if app := b.cachedApp; app != nil {
-				return commands.MCPPresetAddForApp(context.Background(), b.mcpManager, app, presetName)
+				return commands.MCPPresetAddForApp(context.Background(), currentManager(), app, presetName)
 			}
 			return "", fmt.Errorf("app not initialised")
 		},
 	)
 	admin.SetResourceCallbacks(
 		func() string {
-			return mcp.FormatResources(b.mcpManager)
+			return mcp.FormatResources(currentManager())
 		},
 		func(ctx context.Context, uri string) (string, error) {
-			if b.mcpManager == nil {
+			manager := currentManager()
+			if manager == nil {
 				return "", fmt.Errorf("MCP is not initialised")
 			}
-			text, server, err := b.mcpManager.ReadResource(ctx, uri)
+			text, server, err := manager.ReadResource(ctx, uri)
 			if err != nil {
 				return "", err
 			}
@@ -2184,13 +2252,14 @@ func (b *Builder) wireMCPAdminTool() {
 	)
 	admin.SetPromptCallbacks(
 		func() string {
-			return mcp.FormatPrompts(b.mcpManager)
+			return mcp.FormatPrompts(currentManager())
 		},
 		func(ctx context.Context, name string, arguments map[string]any) (string, error) {
-			if b.mcpManager == nil {
+			manager := currentManager()
+			if manager == nil {
 				return "", fmt.Errorf("MCP is not initialised")
 			}
-			text, server, err := b.mcpManager.GetPrompt(ctx, name, arguments)
+			text, server, err := manager.GetPrompt(ctx, name, arguments)
 			if err != nil {
 				return "", err
 			}
@@ -2206,6 +2275,7 @@ func (b *Builder) wireMCPAdminTool() {
 // initUI creates and configures the TUI model.
 func (b *Builder) initUI() error {
 	b.tuiModel = ui.NewModel()
+	b.tuiModel.SetKeyboardProfile(b.cfg.UI.Keybindings)
 	b.tuiModel.SetShowTokens(b.cfg.UI.ShowTokenUsage)
 	b.tuiModel.SetReducedMotion(b.cfg.UI.ReducedMotion)
 
@@ -2275,6 +2345,7 @@ func (b *Builder) wireDependencies() error {
 	// before the boot turn-context push below, so the model's first turn already
 	// knows which directories it can reach.
 	app.applyGrantedDirsToTools()
+	app.ensureSDKRootBaseline()
 
 	if app.promptBuilder != nil {
 		app.promptBuilder.SetGlobalMemoryEnabled(b.cfg.Memory.AllowGlobal)
@@ -2434,6 +2505,7 @@ func (b *Builder) wireDependencies() error {
 
 	// Set up cancel callback for ESC interrupt
 	b.tuiModel.SetCancelCallback(app.CancelProcessing)
+	b.tuiModel.SetIdleAsyncHookCancelCallback(app.cancelIdleAsyncHooks)
 
 	// Set up plan approval with feedback callback
 	b.tuiModel.SetPlanApprovalWithFeedbackCallbackWithID(app.handlePlanApprovalWithFeedback)
@@ -2563,7 +2635,7 @@ func (b *Builder) wireDependencies() error {
 		}
 
 		// Inject completion notification for model awareness
-		if result != nil && result.Completed {
+		if result != nil {
 			var msg string
 			switch result.Status {
 			case agent.AgentStatusCompleted:
@@ -2576,9 +2648,12 @@ func (b *Builder) wireDependencies() error {
 			case agent.AgentStatusFailed:
 				msg = fmt.Sprintf("Background agent %s (%s) failed: %s",
 					id, result.Type, result.Error)
+			case agent.AgentStatusCancelled:
+				msg = fmt.Sprintf("Background agent %s (%s) was cancelled", id, result.Type)
 			}
 			if msg != "" {
 				app.executor.AddPendingNotification(msg)
+				app.goalBackgroundCompleted("agent:"+id, msg)
 			}
 		}
 	})
@@ -2647,9 +2722,12 @@ func (b *Builder) wireDependencies() error {
 		} else if info.Status == "failed" {
 			msg = fmt.Sprintf("Background shell task %s failed (exit %d). Evidence: %s",
 				info.ID, info.ExitCode, evidence)
+		} else if info.Status == "cancelled" {
+			msg = fmt.Sprintf("Background shell task %s was cancelled. Evidence: %s", info.ID, evidence)
 		}
 		if msg != "" {
 			app.executor.AddPendingNotification(msg)
+			app.goalBackgroundCompleted("shell:"+info.ID, msg)
 		}
 	})
 
@@ -2848,6 +2926,7 @@ func (b *Builder) assembleApp() *App {
 		toolUsage:                     toolusage.NewLedger(filepath.Join(b.configDir, "tool_usage.json")),
 		fileWatcher:                   b.fileWatcher,
 		codeIntelProvider:             b.codeIntelProvider,
+		lspManager:                    b.lspManager,
 		replManager:                   b.replManager,
 		harnessStore:                  b.harnessStore,
 		deferredHybrid:                b.deferredHybrid,
@@ -2867,8 +2946,10 @@ func (b *Builder) assembleApp() *App {
 		treePlanner:         b.treePlanner,
 		planningModeEnabled: b.cfg.Plan.Enabled,
 		// MCP (Model Context Protocol)
-		mcpManager:        b.mcpManager,
-		mcpInitialSummary: b.mcpConnectSummary,
+		mcpManager:           b.mcpManager,
+		mcpInitialSummary:    strings.TrimSpace(b.pluginStartupSummary + "\n" + b.mcpConnectSummary),
+		pluginAutoUpdater:    b.pluginAutoUpdater,
+		pluginCommandUpdater: b.pluginCommandUpdater,
 		// Loops (autonomous recurring tasks). Wired here so the App
 		// has access from start; the background scheduler is started
 		// later by App.Run.
@@ -2885,6 +2966,9 @@ func (b *Builder) assembleApp() *App {
 		autoResumeCount:     make(map[string]int),
 		// Step rollback snapshots
 		stepRollbackSnapshots: make(map[string]*stepRollbackSnapshot),
+	}
+	if b.hooksManager != nil {
+		b.hooksManager.SetMCPHookInvoker(b.cachedApp.invokeMCPHook)
 	}
 	b.cachedApp.runtimeEngineMode.Store(encodeRuntimeEngineMode(b.cfg.Engine.Mode))
 	b.cachedApp.memoryAutoInject.Store(
@@ -2941,6 +3025,12 @@ func (b *Builder) assembleApp() *App {
 		}
 	}
 
+	if b.contextManager != nil {
+		b.contextManager.SetCompactionCommitter(b.cachedApp.commitRewindCompaction)
+	}
+	if b.session != nil && b.sessionManager.PersistenceEnabled() {
+		b.session.SetHistoryWindowHandler(b.cachedApp.flushHistoryWindowArchives)
+	}
 	return b.cachedApp
 }
 

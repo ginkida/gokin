@@ -205,6 +205,9 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 
 	// 1. Cancel all ongoing operations (this signals goroutines to stop)
 	a.beginShutdown()
+	a.closeAsyncHooks()
+	a.pluginAutoUpdater.waitForStop(ctx)
+	a.pluginCommandUpdater.waitForStop(ctx)
 
 	// 2. Cleanup signal handler
 	if a.signalCleanup != nil {
@@ -258,6 +261,13 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	// persisting terminal results. Shell and agent waits share the shutdown
 	// deadline and run concurrently so one slow group cannot starve the other.
 	a.waitForBackgroundFinalization(ctx, cancelledAgentIDs)
+	a.mu.Lock()
+	endReason := "other"
+	if a.quitFromPrompt {
+		endReason = "prompt_input_exit"
+	}
+	a.mu.Unlock()
+	a.EndSessionHooks(ctx, endReason)
 
 	// Persist the result of the lifecycle barrier before tearing down session
 	// dependencies. If foreground work finalized, its terminal transition has
@@ -275,9 +285,9 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 	}
 
 	// 5. Shutdown MCP servers
-	if a.mcpManager != nil {
+	if manager := a.GetMCPManager(); manager != nil {
 		logging.Debug("shutting down MCP servers")
-		if err := a.mcpManager.Shutdown(ctx); err != nil {
+		if err := manager.Shutdown(ctx); err != nil {
 			logging.Debug("error shutting down MCP", "error", err)
 		}
 	}
@@ -289,6 +299,12 @@ func (a *App) gracefulShutdown(ctx context.Context) {
 		if err := a.codeIntelProvider.Close(); err != nil {
 			logging.Warn("failed to shut down managed Go intelligence", "error", err)
 		}
+	}
+	a.mu.Lock()
+	languageServers := a.lspManager
+	a.mu.Unlock()
+	if languageServers != nil {
+		_ = languageServers.Close()
 	}
 
 	// 5c. Stop the session-scoped Python kernel. Close is idempotent and kills
@@ -519,6 +535,7 @@ func (a *App) beginShutdown() {
 	a.shuttingDown = true
 	a.dropSteerLeftovers = true
 	a.mu.Unlock()
+	a.stopGoalTimer()
 
 	// Close is idempotent. Call it on every entry so concurrent quit/signal
 	// paths cannot observe shuttingDown=true before the first caller has sealed
@@ -546,6 +563,12 @@ func (a *App) beginShutdown() {
 // sees what was lost.
 func (a *App) saveSessionHistory() {
 	if a.session == nil {
+		return
+	}
+	// Disabled persistence intentionally leaves sessionManager nil. Do not
+	// mistake an ephemeral conversation for a failed manager initialization
+	// and write its contents through the shutdown fallback.
+	if a.config != nil && !a.config.Session.Enabled {
 		return
 	}
 

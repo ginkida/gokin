@@ -78,8 +78,8 @@ func (m Model) renderWelcomePanel() string {
 			title += versionStyle.Render(" " + version)
 		}
 		mode := m.welcomeCompactModeHint()
-		compactKeys := kbdStyle.Render("Ctrl+P") + tipStyle.Render(" · ") + kbdStyle.Render("?")
-		actions := kbdStyle.Render("Ctrl+P") + tipStyle.Render(" actions")
+		compactKeys := kbdStyle.Render(m.keyLabel("Ctrl+P")) + tipStyle.Render(" · ") + kbdStyle.Render("?")
+		actions := kbdStyle.Render(m.keyLabel("Ctrl+P")) + tipStyle.Render(" actions")
 		shortcuts := kbdStyle.Render("?") + tipStyle.Render(" shortcuts (empty)")
 
 		var lines []string
@@ -131,7 +131,7 @@ func (m Model) renderWelcomePanel() string {
 		}
 		lines = append(lines,
 			tipStyle.Render("Type a question or paste an error"),
-			kbdStyle.Render("Ctrl+P")+tipStyle.Render(" actions · ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts (empty)"),
+			kbdStyle.Render(m.keyLabel("Ctrl+P"))+tipStyle.Render(" actions · ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts (empty)"),
 			kbdStyle.Render("/")+tipStyle.Render(" commands · ")+kbdStyle.Render("@")+tipStyle.Render(" files · ")+kbdStyle.Render("/quickstart"),
 			kbdStyle.Render("Shift+Tab")+tipStyle.Render(" cycles modes"),
 		)
@@ -160,7 +160,7 @@ func (m Model) renderWelcomePanel() string {
 		headerStyle.Render("  tips"),
 		tipStyle.Render("    type a question, or paste a stack trace"),
 		tipStyle.Render("    ")+kbdStyle.Render("/")+tipStyle.Render(" for slash commands · ")+kbdStyle.Render("@")+tipStyle.Render(" to pin a file"),
-		tipStyle.Render("    ")+kbdStyle.Render("Ctrl+P")+tipStyle.Render(" all actions · ")+kbdStyle.Render("Ctrl+S")+tipStyle.Render(" settings · ")+kbdStyle.Render("Ctrl+K")+tipStyle.Render(" model"),
+		tipStyle.Render("    ")+kbdStyle.Render(m.keyLabel("Ctrl+P"))+tipStyle.Render(" all actions · ")+kbdStyle.Render(m.keyLabel("Ctrl+S"))+tipStyle.Render(" settings · ")+kbdStyle.Render(m.keyLabel("Ctrl+K"))+tipStyle.Render(" model"),
 		tipStyle.Render("    ")+kbdStyle.Render("?")+tipStyle.Render(" shortcuts (empty) · ")+kbdStyle.Render("Shift+Tab")+tipStyle.Render(" cycles Normal/Plan/YOLO"),
 		tipStyle.Render("    ")+kbdStyle.Render("/quickstart")+tipStyle.Render(" guided examples"),
 	)

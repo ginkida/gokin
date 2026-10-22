@@ -11,9 +11,9 @@ import (
 
 // Once finishForegroundProcessing removes the FIFO head, that request is
 // accepted foreground work. Cancellation in the handoff must therefore either
-// cancel it or prevent it from starting. At present ownership is transferred
-// under a.mu, but the new processingCancel is installed only later by
-// startAcceptedSubmit, leaving Esc/Ctrl+C with no handle for either turn.
+// cancel it or prevent it from starting. The dequeue and new cancellation
+// owner are one a.mu-protected transition; the assertion must observe that
+// transition through the same lock used by CancelProcessing.
 func TestCancelDuringAcceptedFIFOForegroundHandoffDoesNotStartNextRequest(t *testing.T) {
 	queuedRan := make(chan struct{}, 1)
 	queued := &stubCommand{
@@ -37,8 +37,8 @@ func TestCancelDuringAcceptedFIFOForegroundHandoffDoesNotStartNextRequest(t *tes
 	}
 
 	// Hold Update so the finalizer blocks in its first Program.Send after it has
-	// dequeued/accepted /queued but before startAcceptedSubmit installs a new
-	// processingCancel. Deterministic gate — see occupyEventLoop for why the
+	// dequeued/accepted /queued but before startAcceptedSubmit launches it.
+	// Deterministic gate — see occupyEventLoop for why the
 	// old mu+Send idiom deadlocked on CI.
 	releaseLoop := occupyEventLoop(t, prog)
 
@@ -55,9 +55,15 @@ func TestCancelDuringAcceptedFIFOForegroundHandoffDoesNotStartNextRequest(t *tes
 	if a.pendingCount() != 0 {
 		t.Fatal("finalizer did not accept the FIFO head")
 	}
+	// pendingCount has its own lock and can see the dequeue while the finalizer
+	// still holds a.mu and is installing the owner. Esc cannot enter that state:
+	// it takes a.mu first. Inspect ownership at the same boundary, without
+	// waiting for an owner to appear (which would hide a real handoff regression).
+	a.mu.Lock()
 	a.processingMu.Lock()
 	hasCancelOwner := a.processingCancel != nil
 	a.processingMu.Unlock()
+	a.mu.Unlock()
 	if !hasCancelOwner {
 		t.Fatal("accepted FIFO head has no cancellation owner")
 	}

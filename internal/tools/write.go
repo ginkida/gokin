@@ -170,8 +170,9 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	// Read-before-overwrite guard: a full overwrite of an existing file the model
 	// hasn't read this session blindly discards everything it didn't see. New
 	// files and append-mode are exempt (nothing is lost).
-	if !isNew && !appendMode && t.requireReadBeforeOverwrite && t.readTracker != nil &&
-		!t.readTracker.HasBeenRead(filePath) {
+	readTracker := readTrackerForContext(ctx, t.readTracker)
+	if !isNew && !appendMode && t.requireReadBeforeOverwrite && readTracker != nil &&
+		!readTracker.HasBeenRead(filePath) {
 		return NewErrorResult(fmt.Sprintf(
 			"read-before-overwrite: call the read tool on %s before overwriting it — a full write replaces the entire file and would discard anything you haven't seen. Read it first, then write (or use edit for a targeted change, or append=true to add without overwriting).",
 			filePath,

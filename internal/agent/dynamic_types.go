@@ -5,16 +5,24 @@ import (
 	"sort"
 	"sync"
 
+	"gokin/internal/hooks"
 	"gokin/internal/tools"
 )
 
 // DynamicAgentType represents a user-defined agent type.
 type DynamicAgentType struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	AllowedTools []string `json:"allowed_tools"`
-	SystemPrompt string   `json:"system_prompt"`
-	Priority     int      `json:"priority"` // Higher = evaluated first
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	AllowedTools    []string `json:"allowed_tools"`
+	SystemPrompt    string   `json:"system_prompt"`
+	Priority        int      `json:"priority"` // Higher = evaluated first
+	Model           string   `json:"model,omitempty"`
+	Effort          string   `json:"effort,omitempty"`
+	MaxTurns        int      `json:"max_turns,omitempty"`
+	DisallowedTools []string `json:"disallowed_tools,omitempty"`
+	ToolsSpecified  bool     `json:"tools_specified,omitempty"`
+	plugin          *hooks.ClaudePlugin
+	pluginManager   *hooks.Manager
 
 	// Source records where the type was defined: "runtime"
 	// (/register-agent-type), "project" (<workDir>/.gokin/agents/*.md) or
@@ -24,10 +32,15 @@ type DynamicAgentType struct {
 
 // AgentTypeRegistry manages both built-in and dynamic agent types.
 type AgentTypeRegistry struct {
-	builtin  map[AgentType]bool
-	dynamic  map[string]*DynamicAgentType
-	revision uint64
-	mu       sync.RWMutex
+	builtin           map[AgentType]bool
+	dynamic           map[string]*DynamicAgentType
+	revision          uint64
+	mu                sync.RWMutex
+	pluginMu          sync.Mutex
+	pluginManager     *hooks.Manager
+	pluginTypes       map[string]*DynamicAgentType
+	pluginFingerprint string
+	pluginWarnings    []string
 }
 
 // NewAgentTypeRegistry creates a new registry with built-in types.
@@ -99,6 +112,7 @@ func (r *AgentTypeRegistry) UnregisterDynamic(name string) error {
 
 // AgentTypeRevision is a cache coherency token for TaskTool declarations.
 func (r *AgentTypeRegistry) AgentTypeRevision() uint64 {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	revision := r.revision
 	r.mu.RUnlock()
@@ -107,10 +121,14 @@ func (r *AgentTypeRegistry) AgentTypeRevision() uint64 {
 
 // GetDynamic returns a dynamic agent type by name.
 func (r *AgentTypeRegistry) GetDynamic(name string) (*DynamicAgentType, bool) {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	dt, ok := r.dynamic[name]
+	if !ok {
+		dt, ok = r.pluginTypes[name]
+	}
 	return cloneDynamicAgentType(dt), ok
 }
 
@@ -123,21 +141,23 @@ func (r *AgentTypeRegistry) IsBuiltin(name string) bool {
 
 // IsDynamic checks if a type is a dynamic type.
 func (r *AgentTypeRegistry) IsDynamic(name string) bool {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.dynamic[name]
-	return ok
+	return r.dynamic[name] != nil || r.pluginTypes[name] != nil
 }
 
 // Exists checks if a type (built-in or dynamic) exists.
 func (r *AgentTypeRegistry) Exists(name string) bool {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.builtin[AgentType(name)] || r.dynamic[name] != nil
+	return r.builtin[AgentType(name)] || r.dynamic[name] != nil || r.pluginTypes[name] != nil
 }
 
 // ListDynamic returns all dynamic agent types.
 func (r *AgentTypeRegistry) ListDynamic() []*DynamicAgentType {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -145,12 +165,18 @@ func (r *AgentTypeRegistry) ListDynamic() []*DynamicAgentType {
 	for _, dt := range r.dynamic {
 		types = append(types, cloneDynamicAgentType(dt))
 	}
+	for name, dt := range r.pluginTypes {
+		if r.dynamic[name] == nil {
+			types = append(types, cloneDynamicAgentType(dt))
+		}
+	}
 	sort.Slice(types, func(i, j int) bool { return types[i].Name < types[j].Name })
 	return types
 }
 
 // ListAll returns all agent type names (both built-in and dynamic).
 func (r *AgentTypeRegistry) ListAll() []string {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -162,6 +188,11 @@ func (r *AgentTypeRegistry) ListAll() []string {
 	for name := range r.dynamic {
 		names = append(names, name)
 	}
+	for name := range r.pluginTypes {
+		if r.dynamic[name] == nil {
+			names = append(names, name)
+		}
+	}
 
 	sort.Strings(names)
 	return names
@@ -172,6 +203,7 @@ func (r *AgentTypeRegistry) ListAll() []string {
 // and descriptions prevents a concurrent registration from producing a mixed
 // declaration (for example, an enum entry with an empty description).
 func (r *AgentTypeRegistry) SnapshotAgentTypes() []tools.AgentTypeDefinition {
+	r.refreshPluginAgents()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -187,6 +219,11 @@ func (r *AgentTypeRegistry) SnapshotAgentTypes() []tools.AgentTypeDefinition {
 			Name:        dynamicType.Name,
 			Description: dynamicType.Description,
 		})
+	}
+	for name, dt := range r.pluginTypes {
+		if r.dynamic[name] == nil {
+			types = append(types, tools.AgentTypeDefinition{Name: dt.Name, Description: dt.Description, Model: dt.Model, MaxTurns: dt.MaxTurns})
+		}
 	}
 	sort.Slice(types, func(i, j int) bool { return types[i].Name < types[j].Name })
 	return types
@@ -243,5 +280,6 @@ func cloneDynamicAgentType(dt *DynamicAgentType) *DynamicAgentType {
 	}
 	clone := *dt
 	clone.AllowedTools = append([]string(nil), dt.AllowedTools...)
+	clone.DisallowedTools = append([]string(nil), dt.DisallowedTools...)
 	return &clone
 }

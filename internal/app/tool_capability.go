@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -226,4 +227,16 @@ func intersectCapabilityNames(left, right []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// SkillInvocationContext binds explicit /skill context rendering to the same
+// executor and capability ceiling as foreground tool execution.
+func (a *App) SkillInvocationContext(ctx context.Context) context.Context {
+	if ceiling, restricted := a.toolCapabilitySnapshot(); restricted {
+		if inherited, ok := tools.ToolCapabilityCeilingFromContext(ctx); ok {
+			ceiling = intersectCapabilityNames(ceiling, inherited)
+		}
+		ctx = tools.ContextWithToolCapabilityCeiling(ctx, ceiling)
+	}
+	return a.executor.SkillInvocationContext(ctx)
 }

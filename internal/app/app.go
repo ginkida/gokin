@@ -27,17 +27,20 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/git"
+	"gokin/internal/goals"
 	"gokin/internal/harness"
 	"gokin/internal/hooks"
 	"gokin/internal/hybrid"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
+	"gokin/internal/lsp"
 	"gokin/internal/mcp"
 	"gokin/internal/memory"
 	"gokin/internal/permission"
 	"gokin/internal/plan"
 	"gokin/internal/ratelimit"
 	"gokin/internal/repl"
+	"gokin/internal/rewind"
 	"gokin/internal/router"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
@@ -306,13 +309,28 @@ type App struct {
 	planReqSeq    atomic.Int64
 
 	// Hooks management
-	hooksManager *hooks.Manager
+	hooksManager         *hooks.Manager
+	asyncHooksMu         sync.Mutex
+	asyncHooksScope      *hooks.AsyncScope
+	asyncHooksLineage    conversationLineage
+	lastSessionEnd       conversationLineage // sessionLeaseMu
+	hasSessionEnd        bool                // sessionLeaseMu
+	quitFromPrompt       bool                // mu
+	sessionStartMu       sync.Mutex
+	sessionStart         *sessionStartOwner
+	sessionStartSource   string
+	sessionStartWaitID   uint64 // sessionStartMu
+	pluginAutoUpdater    *pluginAutoUpdater
+	pluginCommandUpdater *pluginAutoUpdater
 
 	// Task management
 	taskManager *tasks.Manager
 
 	// Undo management
-	undoManager *undo.Manager
+	undoManager     *undo.Manager
+	rewindMu        sync.Mutex
+	rewindStore     *rewind.Store
+	rewindSessionID string
 
 	// Agent management
 	agentRunner *agent.Runner
@@ -342,8 +360,11 @@ type App struct {
 	// old state is synchronously flushed and the target state is restored.
 	// Callers must not enter these methods while holding a.mu; the switch may
 	// briefly take a.mu to publish session-derived scratchpad state.
-	sessionLeaseMu sync.Mutex
-	sessionLease   *chat.SessionWriterLease
+	sessionLeaseMu         sync.Mutex
+	sessionLease           *chat.SessionWriterLease
+	previousClearSessionID string                   // process-only rewind entry; sessionLeaseMu
+	previousClearState     *chat.SessionState       // ephemeral sessions only; sessionLeaseMu
+	previousClearLease     *chat.SessionWriterLease // retention and writer ownership; sessionLeaseMu
 
 	// New feature integrations
 	searchCache *cache.SearchCache
@@ -357,6 +378,7 @@ type App struct {
 	// codeIntelProvider owns the lazy, workspace-scoped gopls process. It is
 	// separate from user MCP servers and must be closed explicitly.
 	codeIntelProvider codeintel.ReadOnlyProvider
+	lspManager        *lsp.Manager
 	// replManager owns the foreground session's isolated Python kernel. It is
 	// never shared with cloned sub-agent registries.
 	replManager hybridRuntime
@@ -411,6 +433,12 @@ type App struct {
 	// in case the loop subsystem is disabled or not yet wired.
 	loopManager *loops.Manager
 	loopRunner  *loops.Runner
+	goalMu      sync.Mutex
+	goalNext    *goalContinuation
+	goalWaiting *goalBackgroundWait
+	goalTimer   *goalScheduledAction // goalMu; mutations also hold sessionLeaseMu
+	goalIntent  atomic.Uint64
+	goalUsage   *goalUsageAccount   // sessionLeaseMu; owns descendant token usage
 	loopMemory  *loops.MemoryWriter // human-readable per-loop markdown
 
 	// headlessDirect makes processMessageWithContext execute through the
@@ -485,8 +513,8 @@ type App struct {
 	presenter agentPresenter
 
 	// stopHookActive marks the next turn as a Stop-hook-driven continuation:
-	// stop hooks are skipped at that turn's end so a hook that always fails
-	// cannot loop the agent forever (one continuation per user turn).
+	// the gate is checked again at that turn's end, with no further automatic
+	// continuation if it still fails (one continuation per user turn).
 	// Guarded by a.mu.
 	stopHookActive bool
 
@@ -561,8 +589,12 @@ type App struct {
 	// Session-only directory grants (Claude-Code-style /add-dir + ask-on-access).
 	// NOT persisted unless the user passes --persist (then also in
 	// config.Tools.AllowedDirs). Reset on /clear. Guarded by grantedDirsMu.
-	grantedDirs   []string
-	grantedDirsMu sync.Mutex
+	grantedDirs         []string
+	grantedDirsMu       sync.Mutex
+	directoryGrantMu    sync.Mutex // serializes grant publication, propagation and revocation
+	sdkRootBaselineOnce sync.Once
+	sdkRootBaseline     []string // immutable after sdkRootBaselineOnce
+	sdkRootsApplied     bool     // sessionLeaseMu; reset discovery after the old SessionEnd
 	// dirCtxSnapshot is the effective allowed-dir list (config + session grants)
 	// cached for the model's turn-context block. Read by directoryAccessContext
 	// under grantedDirsMu ONLY — never a.mu — so it can be assembled even when a
@@ -801,7 +833,7 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 			logging.Warn("session auto-resume skipped: LoadLast exceeded 5s")
 			err = context.DeadlineExceeded
 		}
-		if err == nil && state != nil && len(state.History) > 0 {
+		if err == nil && state != nil && (len(state.History) > 0 || state.Goal.Current != nil && state.Goal.Current.Status == goals.Active) {
 			age := time.Since(info.LastActive)
 			// Cross-provider guard: a session tagged with a different
 			// provider than the current active one will 400 on first
@@ -867,6 +899,7 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 	if sessionRestored {
 		// Restored session: clean up legacy system prompt messages from history
 		a.stripLegacySystemMessages()
+		a.publishSessionConversation()
 	}
 	// Plan mode and run-scoped customization rebuild the current canonical
 	// prompt; an ordinary resume keeps its saved prompt for compatibility.
@@ -990,6 +1023,11 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 	// Create and run the program. Publish the program reference under
 	// programMu (not a.mu) so safeSendToProgram can observe it from
 	// goroutines that may already hold a.mu (e.g., ApplyConfig).
+	if initialPrompt == "" {
+		if goal := a.session.GoalState().Current; goal != nil && goal.Status == goals.Active && !goal.Suspended {
+			initialPrompt = "/goal " + goal.Condition
+		}
+	}
 	a.tui.SetInitialPrompt(initialPrompt)
 	a.programMu.Lock()
 	a.program = a.tui.GetProgram()
@@ -1002,6 +1040,7 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 	// published. Resume durable scheduled retries with their exact checkpoint
 	// lineage; claimed entries remain fail-closed for manual inspection.
 	a.resumePersistedRecoveries(true)
+	a.ensureSessionStartHooks()
 
 	// === PHASE 4: Initialize UI Auto-Update System ===
 	a.initializeUIUpdateSystem()
@@ -1048,6 +1087,8 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 
 	// Set up signal handling for graceful shutdown
 	a.signalCleanup = a.setupSignalHandler()
+
+	a.startPluginCommandRefresh()
 
 	// Start periodic task cleanup goroutine
 	a.safeGo("periodic-cleanup", func() {
@@ -1179,12 +1220,18 @@ func (a *App) handleSubmit(message string) {
 // queued with provenance instead of reopening the gate; a late timer/resubmit
 // remains blocked by that cancellation boundary.
 func (a *App) handleSubmitWithIntent(message string, explicitUser bool) {
+	if explicitUser && strings.TrimSpace(message) != "" {
+		a.startPluginAutoUpdates()
+	}
 	if explicitUser {
 		// A REAL user message resets the tool-budget auto-continue streak —
 		// the cap is per user request, not per session.
 		a.resetBudgetAutoContinueOnUserInput(message)
 	}
 	a.sessionLeaseMu.Lock()
+	if explicitUser {
+		a.invalidateGoalUserInputLocked(message)
+	}
 	a.mu.Lock()
 	if a.shuttingDown {
 		a.mu.Unlock()
@@ -1517,6 +1564,24 @@ func (a *App) runAcceptedSubmitWithRecoveryIdentity(
 		a.executeCommandCtx(ctx, name, args)
 		return
 	}
+	var submissionErr error
+	ctx, submissionErr = a.withPromptSubmission(ctx, message)
+	if submissionErr != nil {
+		pipelineStarted = true
+		a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), submissionErr)
+		a.finishMessageProcessing()
+		return
+	}
+	// A startup hook may have installed this slash workflow after admission
+	// classified the raw input. Resolve it again before treating it as model
+	// text. The accepted submission context keeps its hook gate exactly once.
+	if strings.HasPrefix(strings.TrimSpace(message), "/") && a.commandHandler != nil {
+		if command, values, recognized := a.commandHandler.Parse(message); recognized {
+			pipelineStarted = true
+			a.executeCommandCtx(commands.WithRawInvocation(ctx, message), command, values)
+			return
+		}
+	}
 
 	// Forgot-slash detection: if the message starts with a word that's
 	// a registered command AND the rest looks like args rather than a
@@ -1539,8 +1604,18 @@ func (a *App) runAcceptedSubmitWithRecoveryIdentity(
 	// the display stays clean while the agent receives the referenced files.
 	// Best-effort: unchanged when there are no resolvable @refs.
 	isRecovery := recoveryID != "" || recoverySessionID != "" || len(recovery) > 0
+	preservePayload := isRecovery
+	if submission, ok := ctx.Value(promptSubmissionKey{}).(*promptSubmission); ok && ctx.Value(promptExpansionKey{}) == true {
+		preservePayload = true
+		if recoveryMemoryQuery == "" {
+			recoveryMemoryQuery = submission.raw
+		}
+	}
+	if actor, automatic := ctx.Value(goalContinuationKey{}).(*goalContinuation); automatic && actor.generated {
+		preservePayload = true
+	}
 	agentMessage, memoryQuery := a.prepareAgentMessageForSubmit(
-		message, recoveryMemoryQuery, isRecovery)
+		message, recoveryMemoryQuery, preservePayload)
 
 	// Process message normally (coordinator is now integrated in agent system).
 	if isRecovery && a.recoveryEpoch.Load() != recoveryEpoch {
@@ -1805,6 +1880,21 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 	if ctx.Err() != nil {
 		return
 	}
+	var submissionErr error
+	raw := commands.RawInvocation(ctx)
+	if raw == "" {
+		raw = "/" + name
+		if len(args) > 0 {
+			raw += " " + strings.Join(args, " ")
+		}
+	}
+	if a.commandHandler.IsPromptCommand(name, args) {
+		ctx, submissionErr = a.withPromptSubmission(ctx, raw)
+	}
+	if submissionErr != nil {
+		a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), submissionErr)
+		return
+	}
 
 	a.mu.Lock()
 	a.diffBatchDecision = ui.DiffPending
@@ -1837,6 +1927,14 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 		}
 	}
 
+	// Undo/redo after resume belongs to the selected session's persistent
+	// timeline, even before that session receives another user prompt.
+	if (name == "undo" || name == "redo") && a.sessionManager != nil {
+		if _, err := a.turnRewindStore(); err != nil {
+			a.safeSendToProgram(ui.ErrorMsg(err))
+			return
+		}
+	}
 	result, err := a.commandHandler.Execute(ctx, name, args, a)
 
 	if err != nil {
@@ -1888,13 +1986,20 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 			// work after the authoritative queue drain.
 			a.processingMu.Lock()
 			if ctx.Err() == nil {
-				a.prependPending(prompt)
+				submission, _ := ctx.Value(promptSubmissionKey{}).(*promptSubmission)
+				if name == "goal" {
+					a.prependInitialGoal(prompt, submission)
+				} else {
+					a.prependPending(prompt, submission)
+				}
 			} else {
 				// A cancelled /skill command may have prepared one-shot tool
-				// rules for this exact continuation. If the handoff is not
-				// queued, discard them so a later unrelated prompt cannot
-				// inherit an abandoned grant or denial.
-				tools.ResetSkillPermissionGrants(a.registry)
+				// rules and model settings for this exact continuation. Discard
+				// pending state so a later prompt cannot inherit it; the active
+				// request keeps its model identity for terminal usage accounting.
+				if a.registry != nil {
+					tools.DiscardPendingSkillTurn(a.registry)
+				}
 			}
 			a.processingMu.Unlock()
 		} else {
@@ -1908,6 +2013,9 @@ func (a *App) executeCommandCtx(ctx context.Context, name string, args []string)
 
 // handleQuit handles quit request.
 func (a *App) handleQuit() {
+	a.mu.Lock()
+	a.quitFromPrompt = true
+	a.mu.Unlock()
 	a.journalEvent("app_quit", nil)
 	a.beginShutdown()
 }
@@ -1926,6 +2034,8 @@ func (a *App) GetTreePlanner() *agent.TreePlanner {
 
 // GetMCPManager returns the MCP manager (may be nil when MCP is disabled).
 func (a *App) GetMCPManager() *mcp.Manager {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.mcpManager
 }
 
@@ -2142,6 +2252,24 @@ func (a *App) GetHooksManager() *hooks.Manager {
 	return a.hooksManager
 }
 
+func (a *App) GetSkillHooks() []*hooks.Hook {
+	if a.registry == nil {
+		return nil
+	}
+	_ = a.GetSkillHookRestoreError()
+	return tools.SkillHooks(a.registry)
+}
+
+func (a *App) GetSkillHookRestoreError() error {
+	if a.session != nil {
+		tools.BindSkillInvocationLedger(a.registry, a.session.InvocationLedger())
+	}
+	if err := tools.RestoreSkillHooks(a.registry, a.hooksManager); err != nil {
+		return err
+	}
+	return tools.SkillHooksError(tools.ContextWithSkillHooks(context.Background(), a.registry, a.hooksManager))
+}
+
 // SyncMCPToolsForServer reconciles the tool registry against the current
 // state of the named MCP server in a.mcpManager. Called from the MCP
 // tools-changed callback when a server emits notifications/tools/list_changed
@@ -2152,13 +2280,17 @@ func (a *App) GetHooksManager() *hooks.Manager {
 // tools; re-apply the per-server permission override; push the refreshed
 // declaration set to the main client so the LLM sees the change.
 func (a *App) SyncMCPToolsForServer(serverName string) {
-	if a == nil || a.mcpManager == nil || a.registry == nil {
+	if a == nil || a.registry == nil {
+		return
+	}
+	manager := a.GetMCPManager()
+	if manager == nil {
 		return
 	}
 
 	// Snapshot the current live tool set from the manager.
 	live := make(map[string]*mcp.MCPTool)
-	for _, t := range a.mcpManager.GetTools() {
+	for _, t := range manager.GetTools() {
 		if mt, ok := t.(*mcp.MCPTool); ok && mt.GetServerName() == serverName {
 			live[mt.Name()] = mt
 		}
@@ -2183,18 +2315,27 @@ func (a *App) SyncMCPToolsForServer(serverName string) {
 	// a.config.MCP.Servers is a plain slice that /mcp add/remove may be
 	// mutating concurrently, which would race with iteration here.
 	var permLevel string
-	if cfg, ok := a.mcpManager.GetServerConfig(serverName); ok && cfg != nil {
+	if cfg, ok := manager.GetServerConfig(serverName); ok && cfg != nil {
 		permLevel = cfg.PermissionLevel
 	}
 	level := permission.ParseRiskLevel(permLevel)
 	for name, t := range live {
+		if old, ok := a.registry.Get(name); ok {
+			if previous, ok := old.(*mcp.MCPTool); ok && previous.GetServerName() == serverName && previous != t {
+				a.registry.Unregister(name)
+			}
+		}
 		if err := a.registry.Register(t); err == nil {
 			permission.SetToolRiskOverride(name, level)
 			continue
 		}
 		// Already registered — still refresh the override in case server's
 		// trust level was changed in config.
-		permission.SetToolRiskOverride(name, level)
+		if old, ok := a.registry.Get(name); ok {
+			if previous, ok := old.(*mcp.MCPTool); ok && previous.GetServerName() == serverName {
+				permission.SetToolRiskOverride(name, level)
+			}
+		}
 	}
 
 	// The registry just changed shape. Recompute the capability ceiling before
@@ -2485,6 +2626,7 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 	// class). Snapshot the pointer under the lock; cfg is immutable post-publish.
 	a.mu.Lock()
 	cfg := a.config
+	mcpManager := a.mcpManager
 	a.mu.Unlock()
 	if cfg != nil {
 		out.Provider = runtimeProviderForConfig(cfg)
@@ -2524,11 +2666,24 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 		}
 	}
 
-	// MCP health for the status-bar badge. mcpManager is boot-set (builder,
-	// never reassigned); GetServerStatus locks internally and is cheap
-	// (in-memory snapshot, no network).
-	if a.mcpManager != nil {
-		for _, s := range a.mcpManager.GetServerStatus() {
+	// MCP health uses the manager snapshotted under a.mu above; runtime
+	if a.session != nil {
+		if goal := a.session.GoalState().Current; goal != nil && goal.Status == goals.Active {
+			out.GoalActive, out.GoalPaused, out.GoalStarted = true, goal.Suspended && goal.RetryAt.IsZero(), goal.StartedAt
+			a.goalMu.Lock()
+			wait := a.goalWaiting
+			out.GoalWaiting = wait != nil && wait.source.goalID == goal.ID && wait.source.sessionID == a.session.GetID() && wait.source.epoch == a.recoveryEpoch.Load() && (!wait.source.scheduled || wait.source.intent == a.goalIntent.Load())
+			if action := a.goalTimer; action != nil && action.source.goalID == goal.ID && action.source.epoch == a.recoveryEpoch.Load() && action.source.intent == a.goalIntent.Load() {
+				out.GoalWaiting = true
+			}
+			a.goalMu.Unlock()
+		}
+	}
+
+	// MCP health uses the manager snapshotted under a.mu above; runtime
+	// enable/disable and plugin reload may replace it. No network I/O here.
+	if mcpManager != nil {
+		for _, s := range mcpManager.GetServerStatus() {
 			out.MCPTotal++
 			if s.Connected && s.Healthy {
 				out.MCPHealthy++
@@ -2935,7 +3090,7 @@ func (a *App) ResumeLastSession() error {
 	if err != nil {
 		return fmt.Errorf("failed to load last session: %w", err)
 	}
-	if state == nil || len(state.History) == 0 {
+	if state == nil || len(state.History) == 0 && (state.Goal.Current == nil || state.Goal.Current.Status != goals.Active) {
 		return fmt.Errorf("no previous session found")
 	}
 	return a.restoreLoadedSession(state, info, "previous session")
@@ -2963,9 +3118,10 @@ func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionI
 	if state == nil {
 		return fmt.Errorf("cannot restore an empty session state")
 	}
-	if len(state.History) == 0 {
+	if len(state.History) == 0 && (state.Goal.Current == nil || state.Goal.Current.Status != goals.Active) {
 		return fmt.Errorf("%s has no conversation history", label)
 	}
+	state.Goal = goals.Resume(state.Goal, time.Now())
 
 	// Cross-provider guard — mirrors the automatic startup auto-resume check
 	// in Run() (below). ResumeLastSession backs the --resume CLI flag
@@ -2985,8 +3141,19 @@ func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionI
 			label, state.Provider, currentProvider, state.Provider)
 	}
 
+	if err := tools.ValidateSkillHookRestore(a.registry, a.hooksManager, state.SkillHooks); err != nil {
+		return fmt.Errorf("failed to restore required skill hooks: %w", err)
+	}
+	previous := a.session.GetState()
 	if err := a.sessionManager.RestoreFromState(state); err != nil {
 		return fmt.Errorf("failed to restore session: %w", err)
+	}
+
+	tools.BindSkillInvocationLedger(a.registry, a.session.InvocationLedger())
+	if err := tools.RestoreSkillHooks(a.registry, a.hooksManager); err != nil {
+		rollbackErr := a.session.RestoreFromState(previous)
+		_ = tools.RestoreSkillHooks(a.registry, a.hooksManager)
+		return errors.Join(fmt.Errorf("failed to restore required skill hooks: %w", err), rollbackErr)
 	}
 
 	a.mu.Lock()
@@ -3010,6 +3177,7 @@ func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionI
 		loadedID = info.ID
 		messageCount = info.MessageCount
 	}
+	a.setSessionStartSource("resume")
 	logging.Info("pre-loaded session", "session_id", loadedID, "messages", messageCount)
 	return nil
 }
@@ -3360,11 +3528,15 @@ func (a *App) ClearConversation() {
 // an honest success result use this method through an optional interface;
 // ClearConversation remains for compatibility with embedded integrations.
 func (a *App) ClearConversationChecked() error {
+	return a.clearConversationChecked(a.clearConversationPersistenceBoundary)
+}
+
+func (a *App) clearConversationChecked(boundary func() (int, error)) error {
 	// Clear the executable retry lineage and persist that boundary synchronously
 	// while holding the same lease mutex as persist/claim/session switch. A
 	// periodic save is too late: a crash immediately after /clear must not
 	// resurrect and auto-run a scheduled mutation from the old conversation.
-	droppedRecoveries, clearPersistErr := a.clearConversationPersistenceBoundary()
+	droppedRecoveries, clearPersistErr := boundary()
 	if clearPersistErr != nil && !errors.Is(clearPersistErr, errRecoveryCommitUncertain) {
 		return fmt.Errorf("persist cleared recovery boundary: %w", clearPersistErr)
 	}
@@ -3495,7 +3667,7 @@ func (a *App) ClearConversationChecked() error {
 // timer/checkpoint generation can enter the approved plan context.
 func (a *App) CompactContextWithPlan(planSummary string) {
 	systemPrompt := a.buildDefaultSystemInstruction()
-	_, boundaryErr := a.replaceConversationPersistenceBoundary(func() {
+	_, boundaryErr := a.replacePlanConversationPersistenceBoundary(func() {
 		a.session.SetSystemInstruction(systemPrompt)
 
 		// Inject the plan summary as a user message for execution context.
@@ -4699,6 +4871,15 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	}
 
 	requestedPlanMode := cfg.Plan.Enabled
+	var candidateClaudeSettingsDir string
+	if a.hooksManager != nil && !cfg.Bare {
+		var resolveErr error
+		candidateClaudeSettingsDir, resolveErr = hooks.ClaudeUserSettingsDir()
+		if resolveErr != nil && cfg.Hooks.Enabled {
+			a.mu.Unlock()
+			return 0, fmt.Errorf("resolve Claude settings directory: %w", resolveErr)
+		}
+	}
 
 	// Validate/build the replacement client before committing the candidate to
 	// memory or disk. A failed rebuild must leave the previous authoritative
@@ -4733,6 +4914,20 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.config.Permission.DefaultPolicy != cfg.Permission.DefaultPolicy ||
 		!reflect.DeepEqual(a.config.Permission.Rules, cfg.Permission.Rules)
 	a.config = cfg
+	if a.hooksManager != nil && !cfg.Bare {
+		a.hooksManager.SetEnabled(cfg.Hooks.Enabled)
+		a.hooksManager.ConfigureClaudeSettings(a.workDir, candidateClaudeSettingsDir,
+			hooks.IsWorkspaceTrusted(a.workDir, cfg.Hooks.TrustedWorkspaces))
+		_ = a.hooksManager.RefreshClaudeSettings()
+		if a.registry != nil {
+			if registered, ok := a.registry.Get("skill"); ok {
+				if skillTool, ok := registered.(*tools.SkillTool); ok {
+					skillTool.SetWorkspaceTrusted(hooks.IsWorkspaceTrusted(a.workDir, cfg.Hooks.TrustedWorkspaces))
+					skillTool.SetShellExecutionDisabled(cfg.Tools.DisableSkillShellExecution)
+				}
+			}
+		}
+	}
 	memoryAutoInject := a.memoryStore != nil && cfg.Memory.Enabled && cfg.Memory.AutoInject
 	memoryAllowGlobal := a.memoryStore != nil && cfg.Memory.Enabled && cfg.Memory.AllowGlobal
 	a.memoryAutoInject.Store(memoryAutoInject)
@@ -4955,6 +5150,11 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	// 8c. Update UI state (model name, etc.)
 	if a.tui != nil {
 		a.tui.SetCurrentModel(a.config.Model.Name)
+		if a.hasProgram() {
+			a.safeSendToProgramAsync(ui.KeyboardProfileMsg{Profile: a.config.UI.Keybindings})
+		} else {
+			a.tui.SetKeyboardProfile(a.config.UI.Keybindings)
+		}
 		a.tui.SetShowTokens(a.config.UI.ShowTokenUsage)
 		a.tui.SetReducedMotion(a.config.UI.ReducedMotion)
 		a.tui.SetHintsEnabled(a.config.UI.HintsEnabled)
@@ -5393,6 +5593,7 @@ func (a *App) cancelProcessing() bool {
 	// therefore sees and cancels either side of the handoff, never a newly-owned
 	// retry that slipped between owner cancellation and the durable boundary.
 	a.sessionLeaseMu.Lock()
+	asyncCancelled := a.hasPendingAsyncHooks()
 	a.mu.Lock()
 	a.processingMu.Lock()
 	foregroundCancelled := a.processingCancel != nil
@@ -5403,10 +5604,25 @@ func (a *App) cancelProcessing() bool {
 	a.dropSteerLeftovers = true
 	a.processingMu.Unlock()
 	a.mu.Unlock()
+	goalWaitCancelled, goalCancelErr := a.cancelGoalBackgroundLocked(foregroundCancelled)
 	drained, remaining, released, releasedKeys, releaseErr := a.cancelPendingAtRecoveryBoundaryLocked()
+	if a.registry != nil && (foregroundCancelled || drained > 0) {
+		// Abandon the drained command's one-shot settings under the same
+		// foreground handoff barrier. Preserve the active scope so an aborted
+		// provider stream is still charged to its actual model.
+		a.processingMu.Lock()
+		tools.DiscardPendingSkillTurn(a.registry)
+		a.processingMu.Unlock()
+	}
 	a.sessionLeaseMu.Unlock()
 	a.finalizePendingRecoveryCancelBoundary(releasedKeys)
-	cancelledAny := foregroundCancelled
+	cancelledAny := foregroundCancelled || goalWaitCancelled || asyncCancelled
+	if goalWaitCancelled {
+		feedback = append(feedback, ui.StatusUpdateMsg{Type: ui.StatusInfo, Message: "Goal paused; send a message to continue"})
+	}
+	if goalCancelErr != nil {
+		feedback = append(feedback, ui.ErrorMsg(goalCancelErr))
+	}
 
 	// Close the executor's steering window after the authoritative drain. A
 	// callback that already extracted leftovers serializes its all-or-nothing
@@ -5475,6 +5691,10 @@ func (a *App) cancelProcessing() bool {
 // agentRunnerAdapter wraps agent.Runner to implement tools.AgentRunner interface.
 type agentRunnerAdapter struct {
 	runner *agent.Runner
+}
+
+func (a *agentRunnerAdapter) ResolveSkillModelSettings(model, effort string) (string, string, error) {
+	return a.runner.ResolveSkillModelSettings(model, effort)
 }
 
 func (a *agentRunnerAdapter) Spawn(ctx context.Context, agentType string, prompt string, maxTurns int, model string) (string, error) {

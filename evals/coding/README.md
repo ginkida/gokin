@@ -46,7 +46,7 @@ and explicit `hybrid` cohorts in one run:
 ```sh
 go build -o /tmp/gokin ./cmd/gokin
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
-  --provider glm --model glm-5.2 \
+  --provider glm --model glm-5.3 \
   --engine-mode tools --engine-mode auto --engine-mode hybrid \
   --repeat 3 \
   --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
@@ -145,6 +145,29 @@ go run ./cmd/gokin eval report \
   --fail-metric no_false_file_claims=100%
 ```
 
+For acceptance of the entire suite, add `--require-complete-suite` and point
+`--manifest` at the suite being accepted. This requires every manifest scenario
+to appear exactly once in each represented provider/model/engine/fault/trial
+cohort, and also requires every result to have executed and passed. A passing
+subset, duplicate rows, unknown scenarios, empty input, dry runs and setup
+failures cannot satisfy it. An unreadable manifest fails the command rather
+than silently skipping the check. JSON output includes `suite_coverage` with
+the exact missing, unknown and duplicate scenario IDs.
+
+```sh
+go run ./cmd/gokin eval report \
+  --input .gokin/evals/results.jsonl \
+  --manifest evals/coding/manifest.json \
+  --require-complete-suite \
+  --fail-metric verification_passed=100% \
+  --fail-metric no_false_file_claims=100%
+```
+
+This checks coverage and outcomes for the supplied results; it does not prove
+that they came from the current binary, a live provider, or a real end-user
+workflow. Keep the matching binary and run configuration with acceptance
+artifacts, and report provider access failures separately from model quality.
+
 The runner writes JSONL results and scores agent evidence from a private
 sibling runtime directory, including tool calls and per-tool counts, files
 read, files edited, verification commands, false file claims, invocation
@@ -167,14 +190,14 @@ Anthropic-compatible provider. Each profile injects one deterministic failure
 and then becomes transparent. This exercises the real client retry, app
 recovery, tool checkpoint, and verification paths instead of a mocked agent.
 
-For GLM 5.2, build the exact binary under test and point the proxy at Z.AI's
+For GLM-5.3, build the exact binary under test and point the proxy at Z.AI's
 Anthropic endpoint:
 
 ```sh
 go build -o /tmp/gokin ./cmd/gokin
 
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
-  --provider glm --model glm-5.2 \
+  --provider glm --model glm-5.3 \
   --fault-upstream https://api.z.ai/api/anthropic \
   --fault-profile after-tool-429-once \
   --fault-profile after-tool-connection-drop-once \
@@ -193,8 +216,9 @@ go run ./cmd/gokin eval report \
 
 Available profiles are shown by shell completion for `--fault-profile` and
 cover HTTP 408/429/500, connection drops, truncated streams, and empty streams.
-The `after-tool-*` forms wait until a request contains a tool result, making
-them the strongest exactly-once check. Such a run deliberately fails closed if
+The `after-tool-*` forms wait until a request contains a tool result, exercising
+continuation after actual tool execution. That first tool can be read-only;
+use the journal to establish which mutations actually ran. Such a run deliberately fails closed if
 the model never invokes a tool: the requested fault was not exercised, so there
 is no recovery evidence to score.
 
@@ -255,7 +279,7 @@ GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
 # glm defaults to glm-5.2 (the whole glm-5.x line aliases to it on Z.AI);
 # pin --model so the baseline stays reproducible if the default later moves.
 GOKIN_BIN=/tmp/gokin go run ./cmd/gokin eval run \
-  --provider glm --model glm-5.2 \
+  --provider glm --model glm-5.3 \
   --agent-command "$(pwd)/evals/coding/scripts/run-gokin-headless.sh" \
   --output evals/coding/baselines/glm.jsonl
 

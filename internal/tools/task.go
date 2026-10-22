@@ -57,6 +57,8 @@ type AgentResult struct {
 type AgentTypeDefinition struct {
 	Name        string
 	Description string
+	Model       string
+	MaxTurns    int
 }
 
 // AgentTypeProvider supplies one coherent catalog snapshot. Implementations
@@ -372,7 +374,26 @@ func (t *TaskTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	runInBackground := GetBoolDefault(args, "run_in_background", false)
 	maxTurns := GetIntDefault(args, "max_turns", 30)
 	model := GetStringDefault(args, "model", "")
+	definitionModel := ""
+	for _, definition := range agentTypes {
+		if definition.Name == agentType {
+			definitionModel = definition.Model
+			if _, explicit := args["max_turns"]; !explicit && definition.MaxTurns > 0 {
+				maxTurns = definition.MaxTurns
+			}
+			break
+		}
+	}
 	resume := GetStringDefault(args, "resume", "")
+	if model == "" && resume == "" && (definitionModel == "" || definitionModel == "inherit") {
+		if local, ok := ctx.Value(skillModelResolverKey{}).(skillModelResolver); ok && local.owner != nil && local.resolve != nil && SkillModelSettings(local.owner).Model != "" {
+			var err error
+			model, _, err = local.resolve("inherit", "")
+			if err != nil {
+				return NewErrorResult("delegated skill model: " + err.Error()), nil
+			}
+		}
+	}
 	thoroughnessStr := GetStringDefault(args, "thoroughness", "")
 	outputStyleStr := GetStringDefault(args, "output_style", "")
 

@@ -15,7 +15,7 @@ func TestThinkingCopyDescribesBehaviorAndCostNotDisplayOnly(t *testing.T) {
 		t.Fatalf("thinking description hides behavioral/cost effect: %q", command.Description())
 	}
 	examples := strings.ToLower(getCommandExample("thinking"))
-	for _, want := range []string{"force reasoning", "never reason", "budget"} {
+	for _, want := range []string{"force reasoning", "disable optional reasoning", "budget"} {
 		if !strings.Contains(examples, want) {
 			t.Fatalf("thinking examples missing %q:\n%s", want, examples)
 		}
@@ -32,7 +32,7 @@ func TestThinkingCopyDescribesBehaviorAndCostNotDisplayOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if config.ResolveThinkingMode(cfg.Model.ThinkingMode) != config.ThinkingModeOff || !strings.Contains(out, "never reasons") {
+	if config.ResolveThinkingMode(cfg.Model.ThinkingMode) != config.ThinkingModeOff || !strings.Contains(out, "effort: low") {
 		t.Fatalf("thinking off state=%q output=%q", cfg.Model.ThinkingMode, out)
 	}
 }

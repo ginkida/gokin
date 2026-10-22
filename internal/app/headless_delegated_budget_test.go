@@ -12,6 +12,7 @@ import (
 	"gokin/internal/chat"
 	"gokin/internal/client"
 	"gokin/internal/config"
+	contextmgr "gokin/internal/context"
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 
@@ -30,6 +31,8 @@ func (c *sharedBudgetTestClient) WithModel(string) client.Client {
 func TestHeadlessBudgetIsSharedAcrossForegroundTaskAndChildAgent(t *testing.T) {
 	model := &sharedBudgetTestClient{MockClient: testkit.NewMockClient()}
 	model.SetModel("glm-5.2")
+	counter := contextmgr.NewTokenCounter(nil, "glm-5.2", nil)
+	budget := counter.CalculateCost(0, 25_000) + counter.CalculateCost(0, 37_500)
 	model.EnqueueScript(testkit.ResponseScript{Chunks: []client.ResponseChunk{
 		{FunctionCalls: []*genai.FunctionCall{{
 			ID:   "task-1",
@@ -40,14 +43,14 @@ func TestHeadlessBudgetIsSharedAcrossForegroundTaskAndChildAgent(t *testing.T) {
 				"max_turns":     2,
 			},
 		}}},
-		// $0.40 at the maintained GLM-5.2 output rate.
+		// Foreground usage consumes 40% of the shared test budget.
 		{Done: true, OutputTokens: 25_000},
 	}})
 	model.EnqueueScript(testkit.ResponseScript{Chunks: []client.ResponseChunk{
 		{FunctionCalls: []*genai.FunctionCall{{
 			ID: "write-1", Name: "write", Args: map[string]any{"path": "x"},
 		}}},
-		// $0.60: the shared ledger reaches the exact $1 ceiling. Because this
+		// Child usage consumes the remaining 60% of the budget. Because this
 		// response requests a tool, the child must pair but not execute it.
 		{Done: true, OutputTokens: 37_500},
 	}})
@@ -76,7 +79,7 @@ func TestHeadlessBudgetIsSharedAcrossForegroundTaskAndChildAgent(t *testing.T) {
 
 	executor := tools.NewExecutor(registry, model, time.Second)
 	executor.SetCostCalculator(func(_, _ string, _, output, _ int) (float64, bool) {
-		return float64(output) * 16 / 1_000_000, true
+		return counter.CalculateCost(0, output), true
 	})
 	cfg := config.DefaultConfig()
 	cfg.Model.Provider = "glm"
@@ -104,7 +107,7 @@ func TestHeadlessBudgetIsSharedAcrossForegroundTaskAndChildAgent(t *testing.T) {
 			OutputFormat: HeadlessOutputJSON,
 			Stdout:       &stdout,
 			Stderr:       io.Discard,
-			MaxBudgetUSD: 1,
+			MaxBudgetUSD: budget,
 		},
 	)
 	if !errors.Is(err, tools.ErrBudgetExceeded) {
@@ -116,15 +119,15 @@ func TestHeadlessBudgetIsSharedAcrossForegroundTaskAndChildAgent(t *testing.T) {
 	if mutation.CallCount() != 0 {
 		t.Fatalf("delegated mutation ran %d times", mutation.CallCount())
 	}
-	if !result.Cost.Tracked || result.Cost.EstimatedUSD != 1 {
-		t.Fatalf("authoritative shared cost = %+v, want tracked $1", result.Cost)
+	if !result.Cost.Tracked || result.Cost.EstimatedUSD != budget {
+		t.Fatalf("authoritative shared cost = %+v, want tracked %v", result.Cost, budget)
 	}
 	if calls := model.Calls(); len(calls) != 2 {
 		t.Fatalf("provider calls = %d, want foreground + child only", len(calls))
 	}
 	decoded := decodeSingleHeadlessResult(t, stdout.Bytes())
 	if decoded.Error == nil || decoded.Error.Kind != "budget_exceeded" ||
-		decoded.Cost.EstimatedUSD != 1 {
+		decoded.Cost.EstimatedUSD != budget {
 		t.Fatalf("encoded terminal result = %+v", decoded)
 	}
 }

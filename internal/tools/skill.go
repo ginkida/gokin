@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"gokin/internal/client"
+	"gokin/internal/hooks"
+	"gokin/internal/permission"
 	"gokin/internal/security"
 	"gokin/internal/skills"
 
@@ -56,12 +60,26 @@ type SkillTool struct {
 	// frontmatter. They are deliberately separate from the durable invocation
 	// ledger: skill instructions survive compaction/session restore, while
 	// permission authority and restrictions never do.
-	grantMu                 sync.RWMutex
-	activePermissionGrants  map[string]struct{}
-	pendingPermissionGrants map[string]struct{}
-	activePermissionDenies  map[string]struct{}
-	pendingPermissionDenies map[string]struct{}
-	workspaceTrusted        bool
+	grantMu                  sync.RWMutex
+	activePermissionGrants   map[string]struct{}
+	pendingPermissionGrants  map[string]struct{}
+	activePermissionDenies   map[string]struct{}
+	pendingPermissionDenies  map[string]struct{}
+	activeModelSettings      client.RequestSettings
+	pendingModelSettings     client.RequestSettings
+	workspaceTrusted         bool
+	shellExecutionDisabled   bool
+	forkOnce                 sync.Once
+	forkGate                 chan struct{}
+	runningForks             map[string]string
+	hooksOnce                sync.Once
+	hookScope                *hooks.Scope
+	hookSyncMu               sync.Mutex
+	hookLedger               *skills.InvocationLedger
+	hookEpoch                uint64
+	hookSyncError            error
+	hookTrusted, hookEnabled bool
+	hookPolicyRevision       uint64
 }
 
 // NewSkillTool discovers native Gokin skills and Claude-compatible SKILL.md
@@ -118,6 +136,9 @@ func (t *SkillTool) SetWorkspaceTrusted(trusted bool) {
 	t.grantMu.Lock()
 	t.workspaceTrusted = trusted
 	t.grantMu.Unlock()
+	if !trusted {
+		t.revokeUntrustedHooks()
+	}
 }
 
 // WorkspaceTrusted reports the exact trust bit copied into agent-local clones.
@@ -126,6 +147,18 @@ func (t *SkillTool) WorkspaceTrusted() bool {
 	trusted := t.workspaceTrusted
 	t.grantMu.RUnlock()
 	return trusted
+}
+
+func (t *SkillTool) SetShellExecutionDisabled(disabled bool) {
+	t.grantMu.Lock()
+	t.shellExecutionDisabled = disabled
+	t.grantMu.Unlock()
+}
+
+func (t *SkillTool) ShellExecutionDisabled() bool {
+	t.grantMu.RLock()
+	defer t.grantMu.RUnlock()
+	return t.shellExecutionDisabled
 }
 
 // ResetActivePermissionGrants begins a new top-level request. Permission
@@ -137,6 +170,8 @@ func (t *SkillTool) ResetActivePermissionGrants() {
 	t.pendingPermissionGrants = make(map[string]struct{})
 	t.activePermissionDenies = make(map[string]struct{})
 	t.pendingPermissionDenies = make(map[string]struct{})
+	t.activeModelSettings = client.RequestSettings{}
+	t.pendingModelSettings = client.RequestSettings{}
 	t.grantMu.Unlock()
 }
 
@@ -155,6 +190,8 @@ func (t *SkillTool) BeginPermissionTurn() {
 		t.activePermissionDenies = make(map[string]struct{})
 	}
 	t.pendingPermissionDenies = make(map[string]struct{})
+	t.activeModelSettings = t.pendingModelSettings
+	t.pendingModelSettings = client.RequestSettings{}
 	t.grantMu.Unlock()
 }
 
@@ -212,6 +249,15 @@ func (t *SkillTool) ActivePermissionDenies() []string {
 // ResetSkillPermissionGrants resets the active SkillTool, if the registry
 // exposes one. It is shared by the foreground and sub-agent turn boundaries.
 func ResetSkillPermissionGrants(registry ToolRegistry) {
+	if skillTool := ownedSkillTool(registry); skillTool != nil {
+		skillTool.ResetActivePermissionGrants()
+	}
+}
+
+// DiscardPendingSkillTurn abandons a queued /skill continuation. Keep the
+// active scope until its request finishes: a cancelled stream still needs the
+// actual model identity for usage accounting.
+func DiscardPendingSkillTurn(registry ToolRegistry) {
 	if registry == nil {
 		return
 	}
@@ -220,7 +266,11 @@ func ResetSkillPermissionGrants(registry ToolRegistry) {
 		return
 	}
 	if skillTool, ok := tool.(*SkillTool); ok {
-		skillTool.ResetActivePermissionGrants()
+		skillTool.grantMu.Lock()
+		skillTool.pendingPermissionGrants = make(map[string]struct{})
+		skillTool.pendingPermissionDenies = make(map[string]struct{})
+		skillTool.pendingModelSettings = client.RequestSettings{}
+		skillTool.grantMu.Unlock()
 	}
 }
 
@@ -293,7 +343,7 @@ func (t *SkillTool) activatePermissionRules(skill skills.Skill, forUser bool) (g
 	if len(skill.AllowedTools) == 0 {
 		return false, ""
 	}
-	trustedSource := skill.Source == "global" || skill.Source == "claude-global"
+	trustedSource := skill.PersonalSource()
 	if !trustedSource && !t.workspaceTrusted {
 		return false, "workspace is not trusted for repository-owned executable configuration"
 	}
@@ -394,21 +444,25 @@ func (t *SkillTool) Validate(args map[string]any) error {
 	return nil
 }
 
-func (t *SkillTool) Execute(_ context.Context, args map[string]any) (ToolResult, error) {
-	return t.execute(args, false, nil)
+func (t *SkillTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+	return t.execute(ctx, args, false, nil)
 }
 
 // ExecuteForUser loads the same workflow through the /skill command. Unlike a
 // model tool call, this path may load skills explicitly marked
 // disable-model-invocation, but still respects user-invocable: false.
 func (t *SkillTool) ExecuteForUser(args map[string]any) (ToolResult, error) {
-	return t.execute(args, true, nil)
+	return t.execute(context.Background(), args, true, nil)
 }
 
 // ExecuteForUserArguments preserves the command tokenizer's positional
 // boundaries. Re-parsing strings.Join(values, " ") would split a quoted value
 // such as "hello world" into two arguments.
 func (t *SkillTool) ExecuteForUserArguments(name string, values []string) (ToolResult, error) {
+	return t.ExecuteForUserArgumentsContext(context.Background(), name, values)
+}
+
+func (t *SkillTool) ExecuteForUserArgumentsContext(ctx context.Context, name string, values []string) (ToolResult, error) {
 	args := map[string]any{"name": name}
 	if len(values) > 0 {
 		arguments, err := joinSkillArguments(values, maxSkillArgumentsBytes)
@@ -417,7 +471,7 @@ func (t *SkillTool) ExecuteForUserArguments(name string, values []string) (ToolR
 		}
 		args["arguments"] = arguments
 	}
-	return t.execute(args, true, append([]string(nil), values...))
+	return t.execute(ctx, args, true, append([]string(nil), values...))
 }
 
 // ExecuteForUserRawArguments keeps the exact command text for $ARGUMENTS while
@@ -425,6 +479,10 @@ func (t *SkillTool) ExecuteForUserArguments(name string, values []string) (ToolR
 // The generic slash-command tokenizer intentionally normalizes quotes and is
 // therefore not a lossless source for this one command.
 func (t *SkillTool) ExecuteForUserRawArguments(name, arguments string) (ToolResult, error) {
+	return t.ExecuteForUserRawArgumentsContext(context.Background(), name, arguments)
+}
+
+func (t *SkillTool) ExecuteForUserRawArgumentsContext(ctx context.Context, name, arguments string) (ToolResult, error) {
 	if len(arguments) > maxSkillArgumentsBytes {
 		return NewErrorResult(fmt.Sprintf("skill arguments exceed the %d-byte limit", maxSkillArgumentsBytes)), nil
 	}
@@ -432,10 +490,36 @@ func (t *SkillTool) ExecuteForUserRawArguments(name, arguments string) (ToolResu
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("parse skill arguments: %v", err)), nil
 	}
-	return t.execute(map[string]any{"name": name, "arguments": arguments}, true, values)
+	return t.execute(ctx, map[string]any{"name": name, "arguments": arguments}, true, values)
 }
 
-func (t *SkillTool) execute(args map[string]any, forUser bool, positionalOverride []string) (ToolResult, error) {
+// ReloadCatalog adopts skills and commands installed by SessionStart before
+// the first workflow is expanded or the model's tool schema is prepared.
+func (t *SkillTool) ReloadCatalog() []string {
+	return t.catalog.Reload()
+}
+
+func (t *SkillTool) SetAdditionalProjectRoots(directories []string) []string {
+	return t.catalog.SetAdditionalProjectRoots(directories)
+}
+
+func (t *SkillTool) UserSkillSnapshot() []skills.Skill {
+	var result []skills.Skill
+	for _, skill := range t.catalog.List() {
+		if skill.UserInvocable {
+			result = append(result, skill)
+		}
+	}
+	return result
+}
+
+func (t *SkillTool) execute(ctx context.Context, args map[string]any, forUser bool, positionalOverride []string) (ToolResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
 	// Pick up skill edits without restarting the session. The catalog publishes
 	// the replacement snapshot atomically for concurrent sub-agent calls.
 	warnings := t.catalog.Reload()
@@ -479,31 +563,85 @@ func (t *SkillTool) execute(args map[string]any, forUser bool, positionalOverrid
 		return NewErrorResult(fmt.Sprintf("skill %q is marked user-invocable: false", name)), nil
 	}
 
+	name = skill.Name // aliases retain the canonical durable invocation key
 	arguments, _ := GetString(args, "arguments")
 	if len(arguments) > maxSkillArgumentsBytes {
 		return NewErrorResult(fmt.Sprintf("skill arguments exceed the %d-byte limit", maxSkillArgumentsBytes)), nil
 	}
-	body, err := expandSkillArguments(skill, arguments, positionalOverride, t.workDir)
+	skill, err := expandSkillPermissionPaths(skill, t.workDir)
 	if err != nil {
-		return NewErrorResult(fmt.Sprintf("expand skill %q: %v", name, err)), nil
+		return NewErrorResult(fmt.Sprintf("expand skill permission rules: %v", err)), nil
+	}
+	if err := t.validateHooks(ctx, skill); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	if skill.Context == "fork" {
+		return t.executeFork(ctx, skill, arguments, positionalOverride)
+	}
+	settings, err := t.resolveInlineModelSettings(ctx, skill, forUser)
+	if err != nil {
+		return NewErrorResult("skill model settings: " + err.Error()), nil
+	}
+	var registration *hooks.Registration
+	ledger := t.InvocationLedger()
+	_, hookEpoch := ledger.HookActivations()
+	var activation *skills.HookActivation
+	if len(skill.Hooks) > 0 {
+		created, createErr := skills.NewHookActivation(name, skill.Source, skill.Path, skill.Hooks)
+		if createErr != nil {
+			return NewErrorResult("skill hooks: " + createErr.Error()), nil
+		}
+		activation = &created
+	}
+	if len(skill.Hooks) > 0 || t.HookScope().HasSource(skill.Path) {
+		registration, err = t.HookScope().Prepare(skill.Path, skill.Hooks)
+		if err != nil {
+			return NewErrorResult("skill hooks: " + err.Error()), nil
+		}
+		defer registration.Cancel()
+	}
+	body, err := t.renderSkill(contextWithPreparedSkillHooks(ctx, registration), skill, arguments, positionalOverride)
+	if err != nil {
+		reason := skillPayloadRedactor.Redact(fmt.Sprintf("expand skill %q: %v", name, err))
+		if IsHookStopError(err) {
+			return NewHookStoppedResult(reason), nil
+		}
+		var blocked *skillRenderPolicyError
+		if errors.As(err, &blocked) {
+			return NewPolicyBlockedResult(blocked.kind, reason), nil
+		}
+		return NewErrorResult(reason), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return NewErrorResult(err.Error()), nil
 	}
 	content := fmt.Sprintf(
 		"Loaded skill %q (%s). Follow this workflow for the current task. It does not override system/user instructions, permissions, or sandbox boundaries.\nSource: %s\n\n---\n%s",
 		skill.Name, skill.Source, skill.Path, body,
 	)
 	content = skillPayloadRedactor.Redact(content)
+	if err := t.validateHooks(ctx, skill); err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
 	if len(content) > skills.MaxRenderedSkillBytes {
 		return NewErrorResult(fmt.Sprintf(
 			"rendered skill %q exceeds the %d-byte delivery limit; shorten SKILL.md or its path",
 			name, skills.MaxRenderedSkillBytes,
 		)), nil
 	}
-	invocation, changed, err := t.InvocationLedger().Record(name, content, skill.Source, skill.Path)
+	if activation != nil {
+		activation.Consumed = registration.Consumed()
+	}
+	invocation, changed, registered, err := ledger.RecordSkillActivation(name, content, skill.Source, skill.Path, activation, hookEpoch)
 	if err != nil {
 		// A load that cannot be retained would appear to work for one round and
 		// then silently disappear after compaction/retry. Fail closed instead.
 		return NewErrorResult(fmt.Sprintf("remember rendered skill %q: %v", name, err)), nil
 	}
+	if activation != nil {
+		observeHookConsumption(registration, ledger, registered, hookEpoch)
+	}
+	registration.Commit()
 	data := map[string]any{
 		"name":         name,
 		"display_name": skill.Name,
@@ -513,6 +651,15 @@ func (t *SkillTool) execute(args map[string]any, forUser bool, positionalOverrid
 		"render_hash":  invocation.RenderHash,
 		"sequence":     invocation.Sequence,
 		"changed":      changed,
+	}
+	if skill.Model != "" || skill.Effort != "" {
+		t.activateModelSettings(settings, forUser)
+		if settings.Model != "" {
+			data["requested_model"] = settings.Model
+		}
+		if settings.Effort != "" {
+			data["effort"] = settings.Effort
+		}
 	}
 	var grantsActive bool
 	var ignoredReason string
@@ -592,30 +739,46 @@ func (t *SkillTool) catalogText(includeSource bool, query string, forUser bool) 
 }
 
 func expandSkillArguments(skill skills.Skill, arguments string, positionalOverride []string, projectDir string) (string, error) {
+	body, used, err := expandSkillArgumentFragment(skill, arguments, positionalOverride, projectDir)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(arguments) != "" && !used {
+		var builder strings.Builder
+		builder.WriteString(body)
+		if err := appendSkillExpansion(&builder, "\n\nARGUMENTS: "+arguments); err != nil {
+			return "", err
+		}
+		body = builder.String()
+	}
+	return body, nil
+}
+
+func expandSkillArgumentFragment(skill skills.Skill, arguments string, positionalOverride []string, projectDir string) (rendered string, used bool, err error) {
 	if len(arguments) > maxSkillArgumentsBytes {
-		return "", fmt.Errorf("arguments exceed the %d-byte limit", maxSkillArgumentsBytes)
+		return "", false, fmt.Errorf("arguments exceed the %d-byte limit", maxSkillArgumentsBytes)
 	}
 	if !utf8.ValidString(arguments) {
-		return "", fmt.Errorf("arguments must be valid UTF-8")
+		return "", false, fmt.Errorf("arguments must be valid UTF-8")
 	}
 	for _, variable := range []string{"${CLAUDE_SESSION_ID}", "${CLAUDE_EFFORT}"} {
 		if containsUnescapedSkillToken(skill.Body, variable) {
-			return "", fmt.Errorf("runtime variable %s is recognized but unsupported", variable)
+			return "", false, fmt.Errorf("runtime variable %s is recognized but unsupported", variable)
 		}
 	}
 	if (projectDir == "" || projectDir == ".") && containsUnescapedSkillToken(skill.Body, "${CLAUDE_PROJECT_DIR}") {
-		return "", fmt.Errorf("runtime variable ${CLAUDE_PROJECT_DIR} requires a workDir-bound skill tool")
+		return "", false, fmt.Errorf("runtime variable ${CLAUDE_PROJECT_DIR} requires a workDir-bound skill tool")
 	}
 	values := positionalOverride
 	if values == nil {
 		var err error
 		values, err = splitSkillArguments(arguments)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	if len(values) > maxSkillArgumentCount {
-		return "", fmt.Errorf("arguments exceed the %d-value limit", maxSkillArgumentCount)
+		return "", false, fmt.Errorf("arguments exceed the %d-value limit", maxSkillArgumentCount)
 	}
 	named := make(map[string]string, len(skill.Arguments))
 	for i, name := range skill.Arguments {
@@ -628,7 +791,7 @@ func expandSkillArguments(skill skills.Skill, arguments string, positionalOverri
 
 	var builder strings.Builder
 	if len(skill.Body) > skills.MaxSkillBytes {
-		return "", fmt.Errorf("expanded workflow exceeds the %d-byte limit", skills.MaxSkillBytes)
+		return "", false, fmt.Errorf("expanded workflow exceeds the %d-byte limit", skills.MaxSkillBytes)
 	}
 	builder.Grow(len(skill.Body))
 	usedArguments := false
@@ -642,22 +805,36 @@ func expandSkillArguments(skill skills.Skill, arguments string, positionalOverri
 				_, end, _, recognized := resolveSkillPlaceholder(skill.Body, i, arguments, values, named, skill, projectDir)
 				if recognized && i-start == 1 {
 					if err := appendSkillExpansion(&builder, skill.Body[i:end]); err != nil {
-						return "", err
+						return "", false, err
 					}
 					i = end
 					continue
 				}
 			}
 			if err := appendSkillExpansion(&builder, skill.Body[start:i]); err != nil {
-				return "", err
+				return "", false, err
 			}
 			continue
 		}
 		if skill.Body[i] == '$' {
+			if strings.HasPrefix(skill.Body[i:], "${") {
+				if end := strings.IndexByte(skill.Body[i:], '}'); end >= 0 {
+					if _, err := skill.ExpandPluginVariables(skill.Body[i : i+end+1]); err != nil {
+						return "", false, err
+					}
+				}
+			}
 			replacement, end, argumentPlaceholder, recognized := resolveSkillPlaceholder(skill.Body, i, arguments, values, named, skill, projectDir)
 			if recognized {
+				if argumentPlaceholder && strings.HasPrefix(skill.Source, "claude-") {
+					var err error
+					replacement, err = expandSkillRuntimePaths(replacement, skill, projectDir)
+					if err != nil {
+						return "", false, err
+					}
+				}
 				if err := appendSkillExpansion(&builder, replacement); err != nil {
-					return "", err
+					return "", false, err
 				}
 				usedArguments = usedArguments || argumentPlaceholder
 				i = end
@@ -665,16 +842,55 @@ func expandSkillArguments(skill skills.Skill, arguments string, positionalOverri
 			}
 		}
 		if err := appendSkillExpansion(&builder, skill.Body[i:i+1]); err != nil {
-			return "", err
+			return "", false, err
 		}
 		i++
 	}
-	if strings.TrimSpace(arguments) != "" && !usedArguments {
-		if err := appendSkillExpansion(&builder, "\n\nARGUMENTS: "+arguments); err != nil {
-			return "", err
+	return builder.String(), usedArguments, nil
+}
+
+func expandSkillRuntimePaths(value string, skill skills.Skill, projectDir string) (string, error) {
+	for _, variable := range []string{"${CLAUDE_SESSION_ID}", "${CLAUDE_EFFORT}"} {
+		if containsUnescapedSkillToken(value, variable) {
+			return "", fmt.Errorf("runtime variable %s is recognized but unsupported", variable)
 		}
 	}
-	return builder.String(), nil
+	if containsUnescapedSkillToken(value, "${CLAUDE_PROJECT_DIR}") && (projectDir == "" || projectDir == ".") {
+		return "", fmt.Errorf("runtime variable ${CLAUDE_PROJECT_DIR} requires a workDir-bound skill tool")
+	}
+	expanded := strings.NewReplacer(
+		"${CLAUDE_SKILL_DIR}", filepath.Dir(skill.Path),
+		"${CLAUDE_PROJECT_DIR}", projectDir,
+	).Replace(value)
+	return skill.ExpandPluginVariables(expanded)
+}
+
+func expandSkillPermissionPaths(skill skills.Skill, projectDir string) (skills.Skill, error) {
+	expand := func(rules []string) ([]string, error) {
+		result := make([]string, len(rules))
+		for i, rule := range rules {
+			expanded, err := expandSkillRuntimePaths(rule, skill, projectDir)
+			if err != nil {
+				return nil, err
+			}
+			result[i] = expanded
+		}
+		return result, nil
+	}
+	grants, err := expand(skill.AllowedTools)
+	if err != nil {
+		return skill, err
+	}
+	skill.AllowedTools, err = permission.CanonicalizeTemporaryToolGrants(grants)
+	if err != nil {
+		return skill, err
+	}
+	denies, err := expand(skill.DisallowedTools)
+	if err != nil {
+		return skill, err
+	}
+	skill.DisallowedTools, err = permission.CanonicalizeTemporaryToolDenies(denies)
+	return skill, err
 }
 
 func containsUnescapedSkillToken(body, token string) bool {
@@ -713,6 +929,13 @@ func resolveSkillPlaceholder(
 	skill skills.Skill,
 	projectDir string,
 ) (replacement string, end int, argumentPlaceholder bool, recognized bool) {
+	if strings.HasPrefix(body[start:], "${") {
+		if close := strings.IndexByte(body[start:], '}'); close >= 0 {
+			if value, ok := skill.PluginVariable(body[start : start+close+1]); ok {
+				return value, start + close + 1, false, true
+			}
+		}
+	}
 	if strings.HasPrefix(body[start:], "${CLAUDE_SKILL_DIR}") {
 		return filepath.Dir(skill.Path), start + len("${CLAUDE_SKILL_DIR}"), false, true
 	}
@@ -738,6 +961,9 @@ func resolveSkillPlaceholder(
 				closeIndex := end + 1 + closeOffset
 				indexText := body[end+1 : closeIndex]
 				if index, err := strconv.Atoi(indexText); err == nil && index >= 0 {
+					if strings.HasPrefix(skill.Source, "claude-") && index >= len(values) {
+						return body[start : closeIndex+1], closeIndex + 1, false, true
+					}
 					return skillArgumentAt(values, index), closeIndex + 1, true, true
 				}
 			}
@@ -753,11 +979,14 @@ func resolveSkillPlaceholder(
 			end++
 		}
 		index, err := strconv.Atoi(body[start+1 : end])
+		if strings.HasPrefix(skill.Source, "claude-") {
+			if err != nil || index >= len(values) {
+				return body[start:end], end, false, true
+			}
+			return skillArgumentAt(values, index), end, true, true
+		}
+		// Native skills keep the existing $1 = first argument convention.
 		if err != nil || index < 1 {
-			// $0 is not a positional argument. The model-facing contract is
-			// $1..$9, ONE-based — matching file commands ($1 = first arg) and
-			// Claude-compatible skills. Zero-based resolution here silently
-			// dropped a single argument passed to a body using $1 (v0.100.90).
 			return "", start, false, false
 		}
 		return skillArgumentAt(values, index-1), end, true, true
@@ -900,4 +1129,16 @@ func joinSkillArguments(values []string, maxBytes int) (string, error) {
 		encodedBytes += len(encoded[i]) + separatorBytes
 	}
 	return strings.Join(encoded, " "), nil
+}
+
+// ConfigureClaudePlugins binds the catalog to the same live plugin policy used
+// by tool hooks. Cloned skill tools share the catalog, not mutable hook scopes.
+func (t *SkillTool) ConfigureClaudePlugins(manager *hooks.Manager) {
+	t.catalog.ConfigureClaudePlugins(manager)
+}
+
+func (t *SkillTool) HasUserSkill(name string) bool {
+	t.catalog.ReloadIfChanged()
+	skill, ok := t.catalog.Get(name)
+	return ok && skill.UserInvocable
 }

@@ -120,6 +120,11 @@ func NewClient(ctx context.Context, cfg *config.Config, modelID string) (Client,
 	if provider == "" {
 		provider = strings.ToLower(strings.TrimSpace(cfg.API.GetActiveProvider()))
 	}
+	resolvedModel, err := config.ResolveModelAlias(provider, cfg.Model.Name, modelID)
+	if err != nil {
+		return nil, err
+	}
+	modelID = resolvedModel
 
 	// If fallback providers are configured, build a FallbackClient
 	if len(cfg.Model.FallbackProviders) > 0 {
@@ -280,7 +285,7 @@ func clientConfigFingerprint(cfg *config.Config, provider, modelID string) strin
 	}
 	override := cfg.API.Retry.Providers[provider]
 	identity := fmt.Sprintf(
-		"provider=%q\x00model=%q\x00custom_base=%q\x00ollama_base=%q\x00key=%q\x00temp=%g\x00max=%d\x00thinking=%t/%d\x00retry=%d/%d/%d\x00provider_retry=%d/%d",
+		"provider=%q\x00model=%q\x00custom_base=%q\x00ollama_base=%q\x00key=%q\x00temp=%g\x00max=%d\x00thinking=%t/%d\x00effort=%q\x00retry=%d/%d/%d\x00provider_retry=%d/%d",
 		provider,
 		modelID,
 		cfg.Model.CustomBaseURL,
@@ -290,6 +295,7 @@ func clientConfigFingerprint(cfg *config.Config, provider, modelID string) strin
 		cfg.Model.MaxOutputTokens,
 		cfg.Model.EnableThinking,
 		cfg.Model.ThinkingBudget,
+		cfg.Model.ReasoningEffort,
 		cfg.API.Retry.RetryDelay,
 		cfg.API.Retry.HTTPTimeout,
 		cfg.API.Retry.StreamIdleTimeout,
@@ -395,6 +401,9 @@ func EffectiveProviderTimeouts(cfg *config.Config, provider string) ProviderTime
 // newGLMClient creates a GLM client using Z.AI's Anthropic-compatible API.
 func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	// Load API key from environment or config via registry
+	if err := config.ValidateReasoningEffort(cfg.Model.ReasoningEffort); err != nil {
+		return nil, err
+	}
 	p := config.GetProvider("glm")
 	if p == nil {
 		return nil, fmt.Errorf("provider registry missing entry for glm")
@@ -430,16 +439,27 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	timeouts := EffectiveProviderTimeouts(cfg, "glm")
 
 	// GLM 4.7+ supports extended thinking — enable by default if the user
-	// hasn't explicitly configured it. This includes the default GLM-5.2.
+	// hasn't explicitly configured it. This includes the default GLM-5.3-Flash.
+	defaultBudget := int32(defaultGLMThinkingBudget)
+	if config.GLMAlwaysOnReasoning(modelID) {
+		defaultBudget = 16384 // max effort for coding by default
+	}
 	enableThinking := cfg.Model.EnableThinking
 	thinkingBudget := cfg.Model.ThinkingBudget
 	if !enableThinking && thinkingBudget == 0 && supportsGLMThinking(modelID) {
 		enableThinking = true
-		thinkingBudget = defaultGLMThinkingBudget
+		thinkingBudget = defaultBudget
 	}
 	// Repair out-of-range budgets (hand-edited config typos) when active.
 	if enableThinking {
-		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultGLMThinkingBudget)
+		thinkingBudget = normalizeThinkingBudget(thinkingBudget, defaultBudget)
+	}
+
+	if config.GLMAlwaysOnReasoning(modelID) {
+		if config.ResolveThinkingMode(cfg.Model.ThinkingMode) == config.ThinkingModeOff {
+			thinkingBudget = 0 // lowest effort; reasoning cannot be disabled
+		}
+		enableThinking = true
 	}
 
 	anthropicConfig := AnthropicConfig{
@@ -451,6 +471,7 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 		StreamEnabled:     true,
 		EnableThinking:    enableThinking,
 		ThinkingBudget:    thinkingBudget,
+		ReasoningEffort:   cfg.Model.ReasoningEffort,
 		StreamIdleTimeout: timeouts.StreamIdleTimeout,
 		// Request retries are orchestrated at App layer.
 		MaxRetries:  0,

@@ -17,9 +17,10 @@ type Manager struct {
 	tracker     *Tracker
 	undone      []FileChange // stack of undone changes for redo
 	maxRedo     int
-	activeGroup string // Current group ID stamped on all recorded changes
-	recordCount uint64 // successful external Record calls
-	mutations   uint64 // all successful history mutations
+	activeGroup string            // Current group ID stamped on all recorded changes
+	recordCount uint64            // successful external Record calls
+	mutations   uint64            // all successful history mutations
+	observer    func([]Operation) // receives committed changes while mu is held
 	mu          sync.Mutex
 }
 
@@ -75,6 +76,7 @@ func (m *Manager) Record(change FileChange) bool {
 	// check the return value and disclose it; the log is the backstop for the
 	// rest, because a snapshot that was never taken must never be silent.
 	if SnapshotTooLarge(change.OldContent, change.NewContent) {
+		m.MarkUntracked(change.FilePath, "file exceeds the snapshot limit")
 		logging.Warn("undo: change not recorded, content exceeds the snapshot limit",
 			"path", change.FilePath, "tool", change.Tool,
 			"bytes", len(change.OldContent)+len(change.NewContent), "limit", MaxSnapshotBytes)
@@ -92,6 +94,7 @@ func (m *Manager) Record(change FileChange) bool {
 	m.undone = make([]FileChange, 0)
 	m.recordCount++
 	m.mutations++
+	m.observe([]Operation{{Change: change}})
 	return true
 }
 
@@ -118,6 +121,7 @@ func (m *Manager) Undo() (*FileChange, error) {
 	}
 	m.undone = append(m.undone, *change)
 	m.mutations++
+	m.observe([]Operation{{Change: *change, Undo: true}})
 
 	return change, nil
 }
@@ -145,6 +149,7 @@ func (m *Manager) Redo() (*FileChange, error) {
 	// Add back to tracker
 	m.tracker.Record(change)
 	m.mutations++
+	m.observe([]Operation{{Change: change}})
 
 	return &change, nil
 }
@@ -174,6 +179,7 @@ func (m *Manager) RedoLastGroup() ([]*FileChange, error) {
 		}
 		m.tracker.Record(change)
 		m.mutations++
+		m.observe([]Operation{{Change: change}})
 		return []*FileChange{&change}, nil
 	}
 
@@ -248,6 +254,7 @@ func (m *Manager) redoGroupLocked(groupID string) ([]*FileChange, error) {
 		m.tracker.Record(*change)
 	}
 	m.mutations++
+	m.observeChanges(applied, false)
 
 	return applied, nil
 }
@@ -354,6 +361,7 @@ func (m *Manager) UndoChanges(ids []string) ([]*FileChange, error) {
 		m.undone = append(m.undone, *change)
 	}
 	m.mutations++
+	m.observeChanges(reverted, true)
 
 	return reverted, nil
 }
@@ -431,6 +439,7 @@ func (m *Manager) RedoChanges(ids []string) ([]*FileChange, error) {
 		m.tracker.RecordUnlocked(*change)
 	}
 	m.mutations++
+	m.observeChanges(applied, false)
 
 	return applied, nil
 }
@@ -461,6 +470,7 @@ func (m *Manager) UndoLastGroup() ([]*FileChange, error) {
 		}
 		m.undone = append(m.undone, *change)
 		m.mutations++
+		m.observe([]Operation{{Change: *change, Undo: true}})
 		return []*FileChange{change}, nil
 	}
 
@@ -542,6 +552,7 @@ func (m *Manager) undoGroupLocked(groupID string) ([]*FileChange, error) {
 		m.undone = append(m.undone, *change)
 	}
 	m.mutations++
+	m.observeChanges(reverted, true)
 
 	return reverted, nil
 }

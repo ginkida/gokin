@@ -76,6 +76,10 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 		}
 
 		if err := a.runDoneGateAutoFix(ctx, userMessage, results, attempt+1, policy.AutoFixAttempts); err != nil {
+			if ctx.Err() == nil && terminalInternalExchangeError(err) {
+				a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), err)
+				return false
+			}
 			logging.Warn("done-gate auto-fix failed", "attempt", attempt+1, "error", err)
 			autoFixErr = err
 			break
@@ -284,18 +288,21 @@ func (a *App) runDoneGateAutoFix(ctx context.Context, userMessage string, result
 	var err error
 	func() {
 		defer resumeSteering()
-		newHistory, _, err = a.executeTracked(
+		newHistory, _, err = a.executeTrackedContinuation(
 			ctx, history, fixPrompt, &usage)
 	}()
 	usage.commit(a)
+	if len(newHistory) >= len(history) {
+		a.session.SetHistory(newHistory)
+		a.applyToolOutputHygiene()
+	}
 	if err != nil {
+		a.syncToolCheckpoints()
 		a.safeSendToProgram(ui.StreamTextMsg(
 			fmt.Sprintf("   Auto-fix attempt %d failed: %s\n", attempt, err.Error())))
 		return err
 	}
 
-	a.session.SetHistory(newHistory)
-	a.applyToolOutputHygiene()
 	if a.sessionManager != nil {
 		_ = a.sessionManager.SaveAfterMessage()
 	}

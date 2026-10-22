@@ -189,11 +189,11 @@ func TestDefaultConfig(t *testing.T) {
 
 	// v0.100.31 switched the default to GLM (Z.AI) — the project's primary
 	// provider (1M ctx, verified implicit caching + thinking).
-	if cfg.Model.Name != "glm-5.2" {
-		t.Errorf("Model.Name = %q, want glm-5.2", cfg.Model.Name)
+	if cfg.Model.Name != "glm-5.3-flash" {
+		t.Errorf("Model.Name = %q, want glm-5.3-flash", cfg.Model.Name)
 	}
-	if cfg.Model.Temperature != 0.6 {
-		t.Errorf("Model.Temperature = %v, want 0.6", cfg.Model.Temperature)
+	if cfg.Model.Temperature != 1.0 {
+		t.Errorf("Model.Temperature = %v, want 1.0", cfg.Model.Temperature)
 	}
 	if cfg.Model.MaxOutputTokens != 65536 {
 		t.Errorf("Model.MaxOutputTokens = %v, want 65536", cfg.Model.MaxOutputTokens)

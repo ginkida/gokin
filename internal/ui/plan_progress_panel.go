@@ -52,6 +52,7 @@ type ActivityEntry struct {
 
 // PlanProgressPanel displays detailed plan execution progress.
 type PlanProgressPanel struct {
+	claudeKeys    bool
 	visible       bool
 	planID        string
 	planTitle     string
@@ -606,7 +607,7 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 			shown = 1
 		}
 		hidden := len(p.steps) - shown
-		action := "Ctrl+X to expand"
+		action := profileKeyText("Ctrl+X to expand", p.claudeKeys)
 		if autoCompact {
 			action = "resize to expand"
 		}
@@ -647,7 +648,7 @@ func (p *PlanProgressPanel) View(width int, heights ...int) string {
 		p.writePlanLine(&content, borderStyle, resumeStyle.Render("/resume-plan")+" "+mutedStyle.Render("Continue execution"), innerWidth)
 	}
 	if !effectiveCollapsed {
-		p.writePlanLine(&content, borderStyle, dimStyle.Render("Ctrl+X  Collapse"), innerWidth)
+		p.writePlanLine(&content, borderStyle, dimStyle.Render(profileKeyText("Ctrl+X  Collapse", p.claudeKeys)), innerWidth)
 	}
 	content.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 	return content.String()

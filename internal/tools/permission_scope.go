@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"reflect"
 	"sort"
+
+	"gokin/internal/hooks"
 )
 
 type bashSessionSnapshot struct {
@@ -243,7 +245,7 @@ func (t *BashTool) executeWithPermissionScope(ctx context.Context, args map[stri
 	t.policyMu.RUnlock()
 
 	result, err := view.executeLocked(ctx, args)
-	t.commitExecutionSession(view, revision)
+	t.commitExecutionSessionWithContext(ctx, view, revision)
 	return result, err
 }
 
@@ -303,15 +305,22 @@ func (t *BashTool) executionViewForSessionLocked(session bashSessionSnapshot) (*
 // is still the one under which the invocation started. A sandbox/workspace
 // toggle wins over stale shell state from an older in-flight command.
 func (t *BashTool) commitExecutionSession(view *BashTool, revision uint64) {
+	t.commitExecutionSessionWithContext(context.Background(), view, revision)
+}
+
+func (t *BashTool) commitExecutionSessionWithContext(ctx context.Context, view *BashTool, revision uint64) {
 	if view == nil || view.session == nil {
 		return
 	}
 	session := view.session.snapshot()
-
-	t.policyMu.Lock()
-	defer t.policyMu.Unlock()
-	if t.policyRevision != revision || t.session == nil {
-		return
-	}
-	t.session.replace(session)
+	hooks.CommitShellState(ctx, func() (string, string) {
+		t.policyMu.Lock()
+		defer t.policyMu.Unlock()
+		if ctx.Err() != nil || t.policyRevision != revision || t.session == nil {
+			return "", ""
+		}
+		oldCwd := t.session.WorkDir()
+		t.session.replace(session)
+		return oldCwd, session.workDir
+	})
 }

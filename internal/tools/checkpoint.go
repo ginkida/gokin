@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,9 +23,10 @@ type ToolCheckpoint struct {
 	Timestamp time.Time      `json:"timestamp"`
 }
 
-// CheckpointJournal is an append-only journal of tool executions within a single
-// executeLoop invocation. When the API call fails after tools have already executed,
-// the journal allows replaying cached results instead of re-executing side-effecting tools.
+// CheckpointJournal retains tool outcomes not yet acknowledged in conversation
+// history. When the API fails after tools execute, it replays their exact results
+// instead of repeating side effects. Once a complete call/result pair is retained
+// for the next request, that outcome is retired from the pending replay ledger.
 type CheckpointJournal struct {
 	mu             sync.Mutex
 	entries        []ToolCheckpoint
@@ -58,6 +60,10 @@ const (
 func (j *CheckpointJournal) BeginReplay() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	j.beginReplayLocked()
+}
+
+func (j *CheckpointJournal) beginReplayLocked() {
 	j.replayByCallID = cloneCheckpointIndex(j.byCallID)
 	j.replayBySignature = make(map[string][]int, len(j.bySignature))
 	for idx, entry := range j.entries {
@@ -69,6 +75,83 @@ func (j *CheckpointJournal) BeginReplay() {
 	}
 	j.replayConsumed = make(map[int]struct{}, len(j.entries))
 	j.replayRemaining = len(j.entries)
+}
+
+// AcknowledgeResults retires outcomes carried by trusted, retained conversation
+// history. The next request includes these results, so the model may correct a
+// failed edit or proceed to a different mutation instead of replaying old work.
+// A call without its exact result stays pending, including failures which may
+// have partially changed state. Callers must pass only newly retained history.
+func (j *CheckpointJournal) AcknowledgeResults(history []*genai.Content) int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	paired := make(map[string]*genai.FunctionCall)
+	acknowledged := make(map[int]bool)
+	for _, message := range history {
+		if message == nil {
+			continue
+		}
+		for _, part := range message.Parts {
+			if part == nil {
+				continue
+			}
+			if call := part.FunctionCall; message.Role == genai.RoleModel && call != nil && call.ID != "" {
+				paired[call.ID] = call
+			}
+			response := part.FunctionResponse
+			if message.Role != genai.RoleUser || response == nil || response.ID == "" {
+				continue
+			}
+			call := paired[response.ID]
+			if call == nil || response.Name != call.Name {
+				continue
+			}
+			delete(paired, response.ID)
+			signature := checkpointSignature(call.Name, call.Args)
+			encoded, err := json.Marshal(response.Response)
+			if err != nil || signature == "" {
+				continue
+			}
+			for idx, entry := range j.entries {
+				if acknowledged[idx] || entry.ToolName != call.Name || entry.Signature != signature {
+					continue
+				}
+				_, replayed := j.replayConsumed[idx]
+				if entry.CallID != call.ID && !replayed {
+					continue
+				}
+				expected, err := json.Marshal(entry.Result.ToMap())
+				if err == nil && bytes.Equal(encoded, expected) {
+					acknowledged[idx] = true
+					break
+				}
+			}
+		}
+	}
+	if len(acknowledged) == 0 {
+		return 0
+	}
+	replaying := j.replayConsumed != nil
+	remaining := make([]ToolCheckpoint, 0, len(j.entries)-len(acknowledged))
+	for idx, entry := range j.entries {
+		if !acknowledged[idx] {
+			remaining = append(remaining, entry)
+		}
+	}
+	j.entries = remaining
+	j.byCallID, j.bySignature = make(map[string]int), make(map[string]int)
+	for idx, entry := range remaining {
+		if entry.CallID != "" {
+			j.byCallID[entry.CallID] = idx
+		}
+		if entry.Signature != "" {
+			j.bySignature[entry.Signature] = idx
+		}
+	}
+	if replaying {
+		j.beginReplayLocked()
+	}
+	return len(acknowledged)
 }
 
 // EndReplay drops the one-shot recovery snapshot without clearing the durable

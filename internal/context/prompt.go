@@ -421,6 +421,24 @@ func (b *PromptBuilder) SetProjectMemory(memory *ProjectMemory) {
 	b.promptDirty = true
 }
 
+func (b *PromptBuilder) SetAdditionalInstructionRoots(roots []string) error {
+	b.mu.Lock()
+	if b.bareMode && len(roots) > 0 {
+		b.mu.Unlock()
+		return fmt.Errorf("instruction discovery is unavailable in bare mode")
+	}
+	if b.projectMemory == nil {
+		b.projectMemory = NewProjectMemory(b.workDir)
+	}
+	memory := b.projectMemory
+	b.mu.Unlock()
+	if err := memory.SetAdditionalRoots(roots); err != nil {
+		return err
+	}
+	b.Invalidate()
+	return nil
+}
+
 // SetProjectLearning sets durable project learning for prompt injection.
 func (b *PromptBuilder) SetProjectLearning(learning ProjectLearningProvider) {
 	b.mu.Lock()
@@ -859,8 +877,8 @@ func providerAddendum(provider string) string {
 	return ""
 }
 
-// glmOperatingRules adds GLM-specific guardrails. GLM 5.2 (default) is a strong
-// coding model that benefits from the same "plan-before-tools" discipline as Kimi,
+// glmOperatingRules adds GLM-specific guardrails. GLM-5.3 and Flash are strong
+// coding models that benefit from the same "plan-before-tools" discipline as Kimi,
 // plus explicit guidance on the architecture-first workflow for new features.
 const glmOperatingRules = `## Operating rules (GLM-specific)
 
@@ -873,14 +891,16 @@ Architecture-first: for any request that creates a new feature or module (even i
 This lets the user redirect before you commit to the wrong approach. If the user interrupts and gives new input, revise the sketch first, then continue.
 
 Read discipline:
-- Read a file before editing it. Do not edit from grep snippets alone.
+- Call Read on the exact file before its first Edit; auto-included related-file previews do not satisfy the read-before-edit check. Do not edit from grep snippets alone.
 - Batch independent Reads in parallel. Do not serialise Reads that don't depend on each other.
 - Do not re-read a file already loaded this session unless you changed it.
 - Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
+- Keep scratch/debug files inside the workspace; return short Bash output directly instead of redirecting it to /tmp.
 
 Edit discipline:
 - After each Edit, check for delta-check errors in the tool response. Fix those before the next Edit.
 - Prefer Edit over Write for existing files. Never write a whole file when only a section changes.
+- Apply related import and usage changes together in one Edit or edits array.
 
 Verification discipline:
 - After code changes: run the narrowest check (go build, targeted go test, etc.) before claiming done.

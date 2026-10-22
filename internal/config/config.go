@@ -140,6 +140,7 @@ func (c *Config) Clone() *Config {
 		return nil
 	}
 	clone := *c
+	clone.API.environmentCredentials = maps.Clone(c.API.environmentCredentials)
 	clone.API.Retry.Providers = maps.Clone(c.API.Retry.Providers)
 	clone.Model.FallbackProviders = slices.Clone(c.Model.FallbackProviders)
 	clone.Tools.AllowedDirs = slices.Clone(c.Tools.AllowedDirs)
@@ -184,6 +185,9 @@ type CompletionConfig struct {
 
 // APIConfig holds API-related settings.
 type APIConfig struct {
+	// Environment credentials are runtime overlays. Retain the underlying
+	// saved value so unrelated settings saves never copy the overlay to disk.
+	environmentCredentials map[string]environmentCredential
 	// Legacy field - for backwards compatibility
 	APIKey string `yaml:"api_key,omitempty"`
 
@@ -270,6 +274,8 @@ func (c *APIConfig) HasProvider(provider string) bool {
 func (c *APIConfig) SetProviderKey(provider, key string) {
 	if p := GetProvider(provider); p != nil {
 		p.SetKey(c, key)
+		c.environmentCredentials = maps.Clone(c.environmentCredentials)
+		delete(c.environmentCredentials, provider)
 	}
 }
 
@@ -312,9 +318,11 @@ type ModelConfig struct {
 	//                    decide from their type). This is the "applied during
 	//                    work, not in settings" behavior.
 	//   on            — force reasoning every turn (a floored budget).
-	//   off           — never reason.
+	//   off           — disable optional reasoning; GLM-5.3 uses low effort.
 	// Empty resolves to "auto" (see ResolveThinkingMode).
 	ThinkingMode string `yaml:"thinking_mode"`
+	// ReasoningEffort overrides adaptive budgets on GLM-5.3 models.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty"`
 
 	// Fallback providers to try when the primary provider fails
 	FallbackProviders []string `yaml:"fallback_providers"`
@@ -332,14 +340,17 @@ type ModelConfig struct {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
-	Timeout           time.Duration          `yaml:"timeout"`
-	ModelRoundTimeout time.Duration          `yaml:"model_round_timeout"` // Hard timeout for a single model round.
-	Bash              BashConfig             `yaml:"bash"`
-	DeltaCheck        DeltaCheckConfig       `yaml:"delta_check"`
-	SmartValidation   SmartValidationConfig  `yaml:"smart_validation"`
-	AllowedDirs       []string               `yaml:"allowed_dirs"`      // Additional allowed directories (besides workDir)
-	Formatters        map[string]string      `yaml:"formatters"`        // ext → command, e.g. {".py": "black"}
-	ProactiveContext  ProactiveContextConfig `yaml:"proactive_context"` // Auto-append related files to Read results.
+	// DisableSkillShellExecution renders a policy marker in place of dynamic
+	// SKILL.md shell context. Applied at startup and inherited by sub-agents.
+	DisableSkillShellExecution bool                   `yaml:"disable_skill_shell_execution,omitempty"`
+	Timeout                    time.Duration          `yaml:"timeout"`
+	ModelRoundTimeout          time.Duration          `yaml:"model_round_timeout"` // Hard timeout for a single model round.
+	Bash                       BashConfig             `yaml:"bash"`
+	DeltaCheck                 DeltaCheckConfig       `yaml:"delta_check"`
+	SmartValidation            SmartValidationConfig  `yaml:"smart_validation"`
+	AllowedDirs                []string               `yaml:"allowed_dirs"`      // Additional allowed directories (besides workDir)
+	Formatters                 map[string]string      `yaml:"formatters"`        // ext → command, e.g. {".py": "black"}
+	ProactiveContext           ProactiveContextConfig `yaml:"proactive_context"` // Auto-append related files to Read results.
 
 	// KimiToolBudget caps the number of tool calls a hosted model can issue per
 	// user turn before the executor synthesizes "budget reached" responses
@@ -388,6 +399,7 @@ type SmartValidationConfig struct {
 
 // UIConfig holds UI-related settings.
 type UIConfig struct {
+	Keybindings         string `yaml:"keybindings"`   // claude (default) or gokin (original shortcuts)
 	StreamOutput        bool   `yaml:"stream_output"` // Legacy/reserved; responses currently always stream
 	MarkdownRendering   bool   `yaml:"markdown_rendering"`
 	ShowToolCalls       bool   `yaml:"show_tool_calls"`
@@ -659,10 +671,9 @@ func ResolveThinkingMode(mode string) string {
 }
 
 // DefaultConfig returns the default configuration. GLM (Z.AI) is the default
-// provider — it's the project's primary target: glm-5.2 has a 1M context window,
-// verified implicit prefix caching (api.z.ai/api/anthropic, ~99% prefix
-// cache_read), and full extended-thinking support (enable/disable + preserved/
-// interleaved signed thinking blocks). The BaseURL is derived from the provider
+// provider — glm-5.3-flash has a 1M context window and always-on reasoning with
+// low/high/max effort. The client preserves unsigned thinking and stable
+// request prefixes for provider-managed caching. The BaseURL is derived from the provider
 // at client construction (DefaultGLMBaseURL). Users with Kimi/DeepSeek/MiniMax/
 // Ollama credentials can switch via /model or /provider at any time.
 func DefaultConfig() *Config {
@@ -675,8 +686,8 @@ func DefaultConfig() *Config {
 			},
 		},
 		Model: ModelConfig{
-			Name:            "glm-5.2", // Matches default backend "glm"
-			Temperature:     0.6,
+			Name:            DefaultGLMModel, // Matches default backend "glm"
+			Temperature:     1.0,
 			MaxOutputTokens: 65536,  // GLM headroom (profile max 131072) — avoids the max_tokens truncation a 32K cap caused
 			EnableThinking:  false,  // legacy static flag — overridden per-request by ThinkingMode/router
 			ThinkingBudget:  0,      // 0 = use the per-request/per-agent computed budget
@@ -718,6 +729,7 @@ func DefaultConfig() *Config {
 			RequireReadBeforeEdit: true,
 		},
 		UI: UIConfig{
+			Keybindings:       "claude",
 			StreamOutput:      true,
 			MarkdownRendering: true,
 			ShowToolCalls:     true,
@@ -778,7 +790,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Plan: PlanConfig{
-			Enabled:                      true,  // Enabled by default
+			Enabled:                      false, // Start in Normal mode; Shift+Tab enters Plan
 			RequireApproval:              true,  // Require approval when enabled
 			AutoDetect:                   true,  // Auto-trigger planning for complex tasks
 			ClearContext:                 true,  // Clear context before plan execution

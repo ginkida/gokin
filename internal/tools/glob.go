@@ -13,6 +13,7 @@ import (
 
 	"gokin/internal/cache"
 	"gokin/internal/git"
+	"gokin/internal/hooks"
 	"gokin/internal/security"
 )
 
@@ -157,7 +158,7 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	// Check cache first
 	var cacheKey string
-	if t.cache != nil {
+	if t.cache != nil && !hooks.AgentHookActive(ctx) {
 		cacheKey = cache.GlobKey(pattern, searchPath)
 		if cached, ok := t.cache.GetGlob(cacheKey); ok {
 			// Return cached results
@@ -248,7 +249,7 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	// Cache the results
-	if t.cache != nil && cacheKey != "" {
+	if t.cache != nil && cacheKey != "" && !hooks.AgentHookActive(ctx) {
 		filePaths := make([]string, len(files))
 		for i, f := range files {
 			filePaths[i] = f.path

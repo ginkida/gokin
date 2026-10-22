@@ -76,6 +76,7 @@ type EnhancedPaletteCommand struct {
 
 // CommandPalette provides quick access to commands via Ctrl+P.
 type CommandPalette struct {
+	shortcutLabel   string
 	visible         bool
 	query           string
 	commands        []EnhancedPaletteCommand
@@ -1118,7 +1119,7 @@ func (p *CommandPalette) View(width, height int) string {
 	// Header
 	content.WriteString(titleStyle.Render("Command Palette"))
 	content.WriteString("  ")
-	content.WriteString(subtitleStyle.Render("Ctrl+P"))
+	content.WriteString(subtitleStyle.Render(p.keyboardShortcutLabel()))
 	content.WriteString("\n\n")
 
 	// Search input
@@ -1776,4 +1777,11 @@ func itoa(n int) string {
 		result = append([]byte{'-'}, result...)
 	}
 	return string(result)
+}
+
+func (p *CommandPalette) keyboardShortcutLabel() string {
+	if p.shortcutLabel != "" {
+		return p.shortcutLabel
+	}
+	return "Ctrl+P"
 }

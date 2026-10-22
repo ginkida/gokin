@@ -29,7 +29,7 @@ func (c *ThinkingCommand) Usage() string {
 	return `/thinking           - Show status
 /thinking auto      - Reason when the task is hard, skip when easy (default)
 /thinking on        - Force reasoning every turn
-/thinking off       - Never reason
+/thinking off       - Disable optional reasoning (GLM-5.3 uses low effort)
 /thinking <tokens>  - Force on with an explicit budget (e.g. /thinking 16384)`
 }
 func (c *ThinkingCommand) GetMetadata() CommandMetadata {
@@ -108,6 +108,9 @@ func (c *ThinkingCommand) Execute(ctx context.Context, args []string, app AppInt
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed to save: %v", err), nil
 		}
+		if config.GLMAlwaysOnReasoning(cfg.Model.Name) {
+			return c.status(cfg), nil
+		}
 		return "✓ thinking: auto — reasons on hard tasks, skips easy ones (applied during work, not a manual setting)", nil
 
 	case "on", "true", "enable":
@@ -118,6 +121,9 @@ func (c *ThinkingCommand) Execute(ctx context.Context, args []string, app AppInt
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed to save: %v", err), nil
 		}
+		if config.GLMAlwaysOnReasoning(cfg.Model.Name) {
+			return c.status(cfg), nil
+		}
 		return fmt.Sprintf("✓ thinking: on — forced every turn (budget %d tokens)", cfg.Model.ThinkingBudget), nil
 
 	case "off", "false", "disable":
@@ -125,6 +131,9 @@ func (c *ThinkingCommand) Execute(ctx context.Context, args []string, app AppInt
 		applyThinkingMode(cfg, config.ThinkingModeOff, 0)
 		if err := app.ApplyConfig(cfg); err != nil {
 			return fmt.Sprintf("Failed to save: %v", err), nil
+		}
+		if config.GLMAlwaysOnReasoning(cfg.Model.Name) {
+			return c.status(cfg), nil
 		}
 		return "✓ thinking: off — never reasons", nil
 	}
@@ -146,6 +155,9 @@ func (c *ThinkingCommand) Execute(ctx context.Context, args []string, app AppInt
 	if err := app.ApplyConfig(cfg); err != nil {
 		return fmt.Sprintf("Failed to save: %v", err), nil
 	}
+	if config.GLMAlwaysOnReasoning(cfg.Model.Name) {
+		return c.status(cfg), nil
+	}
 	return fmt.Sprintf("✓ thinking: on — forced every turn (budget %d tokens)", cfg.Model.ThinkingBudget), nil
 }
 
@@ -159,6 +171,24 @@ func (c *ThinkingCommand) status(cfg *config.Config) string {
 	}
 
 	mode := config.ResolveThinkingMode(cfg.Model.ThinkingMode)
+	if config.GLMAlwaysOnReasoning(model) {
+		effort := strings.ToLower(strings.TrimSpace(cfg.Model.ReasoningEffort))
+		if effort == "" || effort == "auto" {
+			switch mode {
+			case config.ThinkingModeOff:
+				effort = "low"
+			case config.ThinkingModeOn:
+				budget := cfg.Model.ThinkingBudget
+				if budget == 0 {
+					budget = thinkingDefaultBudget
+				}
+				effort = config.GLMEffortForBudget(budget)
+			default:
+				effort = "auto (low/high/max per task)"
+			}
+		}
+		return fmt.Sprintf("thinking: always on — %s requires reasoning\n  effort: %s\n  policy: %s\n\nUse /effort low|high|max|auto. /thinking off selects low effort unless /effort explicitly overrides it.", model, effort, mode)
+	}
 	supported := modelSupportsThinking(model)
 	note := "✓ model supports extended thinking"
 	if !supported {

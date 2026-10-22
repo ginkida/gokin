@@ -136,23 +136,12 @@ func extractDiffPreviewLines(oldContent, newContent string, maxLines, lineWidth 
 // what the full-screen DiffPreviewModel would show. Cheap enough to call
 // on every diff-preview request even for moderately large files.
 func countDiffLines(oldContent, newContent string) (adds, dels int) {
-	dmp := diffmatchpatch.New()
-	a, b, lineArray := dmp.DiffLinesToChars(oldContent, newContent)
-	diffs := dmp.DiffMain(a, b, false)
-	diffs = dmp.DiffCharsToLines(diffs, lineArray)
-
-	for _, d := range diffs {
-		// Strip the trailing newline that DiffCharsToLines re-injects so a
-		// "single line, no trailing newline" chunk doesn't count as zero.
-		lines := strings.Split(strings.TrimSuffix(d.Text, "\n"), "\n")
-		if len(lines) == 1 && lines[0] == "" {
-			continue
-		}
-		switch d.Type {
+	for _, line := range reviewLines(oldContent, newContent) {
+		switch line.Type {
 		case diffmatchpatch.DiffInsert:
-			adds += len(lines)
+			adds++
 		case diffmatchpatch.DiffDelete:
-			dels += len(lines)
+			dels++
 		}
 	}
 	return adds, dels

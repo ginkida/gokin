@@ -27,24 +27,54 @@ func (c *HooksCommand) Execute(ctx context.Context, args []string, app AppInterf
 	if mgr == nil {
 		return "Hooks are unavailable in this build.", nil
 	}
+	if err := mgr.ClaudeSettingsError(); err != nil {
+		return "Claude settings hooks could not be loaded: " + err.Error(), nil
+	}
+	if provider, ok := app.(interface{ GetSkillHookRestoreError() error }); ok {
+		if err := provider.GetSkillHookRestoreError(); err != nil {
+			return "Required skill hooks are unavailable; tool execution is stopped: " + err.Error(), nil
+		}
+	}
 
 	all := mgr.GetHooks()
+	if provider, ok := app.(interface{ GetSkillHooks() []*hooks.Hook }); ok {
+		all = append(all, provider.GetSkillHooks()...)
+	}
 	if len(all) == 0 {
+		if mgr.ClaudeHooksDisabled() {
+			return "Hooks are disabled by disableAllHooks in Claude settings.", nil
+		}
+		if mgr.ManagedHooksOnly() {
+			return "Managed allowManagedHooksOnly policy is active; no managed hooks configured.", nil
+		}
 		return "No hooks configured.\n" +
-			"Add them under `hooks:` in ~/.config/gokin/config.yaml or in <project>/.gokin/hooks.yaml.\n" +
+			"Add them under `hooks:` in ~/.config/gokin/config.yaml, <project>/.gokin/hooks.yaml, or Claude settings.json/settings.local.json.\n" +
 			"Events: pre_tool (fail_on_error blocks the call), post_tool, on_error, stop (fail_on_error asks the agent to continue), on_start, on_exit.", nil
 	}
 
 	var sb strings.Builder
 	state := "enabled"
-	if !mgr.IsEnabled() {
+	if mgr.ClaudeHooksDisabled() && !mgr.IsEnabled() {
+		state = "DISABLED (disableAllHooks in Claude settings)"
+	} else if mgr.ManagedHooksOnly() {
+		state = "managed hooks only (allowManagedHooksOnly)"
+		if !mgr.IsEnabled() {
+			state += " · no active managed handlers"
+		}
+	} else if !mgr.IsEnabled() {
 		state = "DISABLED (hooks.enabled: false)"
+	} else if !mgr.SkillHooksAllowed() {
+		if mgr.ManagedHooksActive() {
+			state += " · managed hooks active; ordinary hooks disabled"
+		} else {
+			state += " · session plugin hooks active; automatic hooks disabled"
+		}
 	}
 	fmt.Fprintf(&sb, "Hooks: %d configured · system %s\n\n", len(all), state)
 
 	for _, h := range all {
 		marker := "●"
-		if !h.Enabled {
+		if !mgr.HookEnabled(h) {
 			marker = "○"
 		}
 		name := h.Name
@@ -52,6 +82,9 @@ func (c *HooksCommand) Execute(ctx context.Context, args []string, app AppInterf
 			name = "(unnamed)"
 		}
 		scope := h.ToolName
+		if h.Claude != nil {
+			scope = h.Claude.Matcher
+		}
 		if scope == "" {
 			scope = "*"
 		}
@@ -59,9 +92,33 @@ func (c *HooksCommand) Execute(ctx context.Context, args []string, app AppInterf
 		if source == "" {
 			source = "config"
 		}
-		fmt.Fprintf(&sb, "%s %s — %s on %s [%s]\n", marker, name, h.Type, scope, source)
-		fmt.Fprintf(&sb, "   %s\n", truncateHookCommand(h.Command))
+		event := string(h.Type)
+		if h.Claude != nil {
+			event = h.Claude.Event
+		}
+		fmt.Fprintf(&sb, "%s %s — %s on %s [%s]\n", marker, name, event, scope, source)
+		if h.Claude != nil && (h.Claude.Handler == "prompt" || h.Claude.Handler == "agent") {
+			model := h.Claude.Model
+			if model == "" {
+				model = "small fast model"
+			}
+			fmt.Fprintf(&sb, "   %s (%s): %s\n", h.Claude.Handler, model, truncateHookCommand(h.Claude.Prompt))
+		} else if h.Claude != nil && h.Claude.Handler == "http" {
+			sb.WriteString("   HTTP POST (headers and URL hidden)\n")
+		} else if h.Claude != nil && h.Claude.Handler == "mcp_tool" {
+			fmt.Fprintf(&sb, "   MCP %s / %s\n", h.Claude.MCPServer, h.Claude.MCPTool)
+		} else {
+			fmt.Fprintf(&sb, "   %s\n", truncateHookCommand(h.Command))
+		}
 		var notes []string
+		if h.Claude != nil && h.Claude.AsyncRewake {
+			notes = append(notes, "background; wakes on exit 2")
+		} else if h.Claude != nil && h.Claude.Async {
+			notes = append(notes, "background; timeout ignored")
+		}
+		if h.Claude != nil && h.Claude.Once {
+			notes = append(notes, "once after success")
+		}
 		if h.FailOnError {
 			switch h.Type {
 			case hooks.PreTool:

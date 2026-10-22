@@ -22,7 +22,7 @@ import (
 func TestStagnationRecovery_IdempotentToolsAreRecoverySafe(t *testing.T) {
 	// The reported tool + its adjacent idempotent state/query siblings.
 	recoverable := []string{
-		"memory", "memorize", "skill", "mcp_admin", "todo",
+		"memory", "memorize", "mcp_admin", "todo",
 		// Side-effect-free (IsParallelSafeTool) — sampled.
 		"read", "grep", "git_status", "go_search", "review_changes", "web_fetch",
 		// Idempotent inspection not in parallelSafeTools.
@@ -47,7 +47,7 @@ func TestStagnationRecovery_IdempotentToolsAreRecoverySafe(t *testing.T) {
 
 	// Genuine mutations keep the immediate hard abort (recovery could mask a
 	// broken mutating loop / a dishonest success claim).
-	for _, tool := range []string{"write", "delete", "move", "copy", "git_commit", "git_add", "ssh", "refactor", "batch"} {
+	for _, tool := range []string{"write", "delete", "move", "copy", "git_commit", "git_add", "ssh", "refactor", "batch", "skill"} {
 		if isStagnationRecoverySafe(tool) {
 			t.Errorf("%s must NOT be recovery-safe (genuine mutation)", tool)
 		}

@@ -48,7 +48,15 @@ func (c *AddDirCommand) Execute(ctx context.Context, args []string, app AppInter
 		return "", fmt.Errorf("usage: %s", c.Usage())
 	}
 
-	resolved, err := app.GrantAllowedDir(path, persist)
+	var resolved string
+	var err error
+	if runtime, ok := app.(interface {
+		GrantAllowedDirFromCommand(context.Context, string, bool) (string, error)
+	}); ok {
+		resolved, err = runtime.GrantAllowedDirFromCommand(ctx, path, persist)
+	} else {
+		resolved, err = app.GrantAllowedDir(path, persist)
+	}
 	if err != nil {
 		// A persistence-only failure still granted for the session — surface it
 		// as a soft message, not a hard error, so the grant isn't reported lost.

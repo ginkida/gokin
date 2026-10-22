@@ -27,6 +27,35 @@ func TestContextWithMaxTurnsIsInvocationScoped(t *testing.T) {
 	}
 }
 
+func TestExecutorMaxTurnsSharedAcrossContinuationAndRetry(t *testing.T) {
+	cl := &scriptedExecutorClient{
+		model: "glm-5.3",
+		responses: []*client.StreamingResponse{
+			buildExecutorTestTextStream("first answer"),
+			buildExecutorTestTextStream("continuation answer"),
+			buildExecutorTestTextStream("new invocation"),
+		},
+	}
+	executor := NewExecutor(NewRegistry(), cl, time.Second)
+	ctx := ContextWithMaxTurns(t.Context(), 2)
+	history, _, err := executor.Execute(ctx, nil, "start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, response, err := executor.ExecuteContinuation(ctx, history, "continue")
+	if err != nil || response != "continuation answer" {
+		t.Fatalf("allowed continuation=%q err=%v", response, err)
+	}
+	_, _, err = executor.Execute(ctx, history, "retry same invocation")
+	if !errors.Is(err, ErrMaxTurnsExceeded) || executor.GetLastModelTurns() != 0 {
+		t.Fatalf("re-entry regained turns: err=%v rounds=%d", err, executor.GetLastModelTurns())
+	}
+	_, response, err = executor.Execute(ContextWithMaxTurns(t.Context(), 1), nil, "new prompt")
+	if err != nil || response != "new invocation" {
+		t.Fatalf("cap leaked or consumed a refused provider call: response=%q err=%v", response, err)
+	}
+}
+
 func TestExecutorMaxTurnsFailsClosedAndDoesNotLeak(t *testing.T) {
 	registry := NewRegistry()
 	readTool := &scriptedReadTool{}

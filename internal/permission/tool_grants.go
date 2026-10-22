@@ -239,15 +239,18 @@ func (m *Manager) CheckWithTemporaryToolRules(
 	denies []string,
 ) (*Response, error) {
 	workDir := WorkDirFromContext(ctx)
-	if temporaryToolDenyMatchesAny(denies, toolName, args, workDir) {
+	if TemporaryToolRulesDenyWithIdentity(ctx, denies, toolName, args, workDir) {
 		return &Response{
 			Allowed:  false,
 			Decision: DecisionDeny,
 			Reason:   "Tool is denied by the active skill",
 		}, nil
 	}
+	if hookDecisionFor(ctx, toolName, args) == "allow" {
+		grants = append(append([]string(nil), grants...), toolName)
+	}
 	for _, grant := range grants {
-		if temporaryToolGrantMatches(grant, toolName, args, workDir) {
+		if temporaryToolGrantMatches(grant, toolName, args, workDir) || temporaryToolGrantMatches(grant, canonicalInvocationTool(ctx, toolName), args, workDir) {
 			scoped := m.WithPolicyOverrides(map[string]Level{toolName: LevelAllow})
 			// The grant is turn-scoped; a session decision the user makes at the
 			// confirmation floor is not. Share the parent's reusable authority so
@@ -304,6 +307,12 @@ func temporaryToolDenyMatchesAny(denies []string, toolName string, args map[stri
 		}
 	}
 	return false
+}
+
+// TemporaryToolRulesDeny applies explicit restrictions even in embedding
+// runtimes that have no interactive permission manager.
+func TemporaryToolRulesDeny(denies []string, toolName string, args map[string]any, workDir string) bool {
+	return temporaryToolDenyMatchesAny(denies, toolName, args, workDir)
 }
 
 // ToolDenyRuleMatchesName reports whether a bare (non-argument-scoped) deny

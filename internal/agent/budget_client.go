@@ -40,6 +40,15 @@ func newInvocationBudgetClient(base client.Client) client.Client {
 	return newInvocationBudgetClientWithCalculator(base, defaultInvocationCostCalculator)
 }
 
+// ClientWithInvocationLimits applies the same request leases and turn/cost
+// caps to auxiliary work initiated outside an Agent (for example compaction).
+func ClientWithInvocationLimits(base client.Client) client.Client {
+	if _, metered := base.(*invocationBudgetClient); metered {
+		return base
+	}
+	return newInvocationBudgetClient(base)
+}
+
 func newInvocationBudgetClientWithCalculator(
 	base client.Client,
 	calculator invocationCostCalculator,
@@ -100,13 +109,23 @@ func (c *invocationBudgetClient) preflight(ctx context.Context) (*tools.Invocati
 
 func (c *invocationBudgetClient) send(
 	ctx context.Context,
-	start func() (*client.StreamingResponse, error),
+	start func(context.Context) (*client.StreamingResponse, error),
 ) (*client.StreamingResponse, error) {
+	if tools.InvocationModelTurnClaimed(ctx) {
+		return start(ctx)
+	}
 	ledger, err := c.preflight(ctx)
 	if err != nil {
 		return nil, err
 	}
-	stream, err := start()
+	if !tools.ClaimInvocationModelTurn(ctx) {
+		if ledger != nil {
+			ledger.EndRound()
+		}
+		return nil, tools.ErrMaxTurnsExceeded
+	}
+	ctx = tools.ContextWithClaimedModelTurn(ctx)
+	stream, err := start(ctx)
 	if err != nil {
 		if ledger != nil {
 			ledger.EndRound()
@@ -270,8 +289,8 @@ func (c *invocationBudgetClient) SendMessage(
 	ctx context.Context,
 	message string,
 ) (*client.StreamingResponse, error) {
-	return c.send(ctx, func() (*client.StreamingResponse, error) {
-		return c.base.SendMessage(ctx, message)
+	return c.send(ctx, func(requestCtx context.Context) (*client.StreamingResponse, error) {
+		return c.base.SendMessage(requestCtx, message)
 	})
 }
 
@@ -280,8 +299,8 @@ func (c *invocationBudgetClient) SendMessageWithHistory(
 	history []*genai.Content,
 	message string,
 ) (*client.StreamingResponse, error) {
-	return c.send(ctx, func() (*client.StreamingResponse, error) {
-		return c.base.SendMessageWithHistory(ctx, history, message)
+	return c.send(ctx, func(requestCtx context.Context) (*client.StreamingResponse, error) {
+		return c.base.SendMessageWithHistory(requestCtx, history, message)
 	})
 }
 
@@ -290,8 +309,8 @@ func (c *invocationBudgetClient) SendFunctionResponse(
 	history []*genai.Content,
 	results []*genai.FunctionResponse,
 ) (*client.StreamingResponse, error) {
-	return c.send(ctx, func() (*client.StreamingResponse, error) {
-		return c.base.SendFunctionResponse(ctx, history, results)
+	return c.send(ctx, func(requestCtx context.Context) (*client.StreamingResponse, error) {
+		return c.base.SendFunctionResponse(requestCtx, history, results)
 	})
 }
 
@@ -348,12 +367,20 @@ func (c *invocationBudgetClient) GetModel() string {
 	return c.base.GetModel()
 }
 
+func (c *invocationBudgetClient) EffectiveReasoningEffort(ctx context.Context) string {
+	return client.EffectiveReasoningEffort(ctx, c.base)
+}
+
 func (c *invocationBudgetClient) SetModel(model string) {
 	c.base.SetModel(model)
 }
 
 func (c *invocationBudgetClient) WithModel(model string) client.Client {
 	return newInvocationBudgetClientWithCalculator(c.base.WithModel(model), c.calculator)
+}
+
+func (c *invocationBudgetClient) WithModelOnCurrentProvider(model string) client.Client {
+	return newInvocationBudgetClientWithCalculator(client.WithModelOnCurrentProvider(c.base, model), c.calculator)
 }
 
 // CloneForAuxiliaryClient preserves invocation-budget enforcement while
@@ -366,6 +393,14 @@ func (c *invocationBudgetClient) CloneForAuxiliaryClient() (client.Client, bool)
 		return nil, false
 	}
 	return newInvocationBudgetClientWithCalculator(baseClone, c.calculator), true
+}
+
+func (c *invocationBudgetClient) CloneForAuxiliaryModel(model string) (client.Client, bool, error) {
+	base, isolated, err := client.CloneForAuxiliaryWithModel(c.base, model)
+	if !isolated {
+		return nil, false, err
+	}
+	return newInvocationBudgetClientWithCalculator(base, c.calculator), true, err
 }
 
 func (c *invocationBudgetClient) GetRawClient() any {

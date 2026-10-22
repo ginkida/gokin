@@ -95,12 +95,12 @@ func (m Model) renderQuitConfirmationStatus() string {
 	if width == 0 {
 		return ""
 	}
-	label := "Ctrl+C again Quit · any other key Cancel"
+	label := m.quitHint()
 	switch {
 	case !m.quitConfirmationReadable():
 		label = "Resize"
 	case width < lipgloss.Width(label):
-		label = "Ctrl+C Quit"
+		label = m.quitKeyLabel() + " Quit"
 	}
 	return lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render(fitStatusText(label, width))
 }
@@ -448,15 +448,15 @@ func (m Model) statusBarHintSegments(compact bool) []string {
 		}
 		if m.activityFeed != nil && !m.activityFeed.IsVisible() && m.activityFeed.HasActiveEntries() {
 			if compact {
-				parts = append(parts, style.Render("C-o activity"))
+				parts = append(parts, style.Render(m.keyLabel("Ctrl+O")+" activity"))
 			} else {
-				parts = append(parts, style.Render("Ctrl+O activity"))
+				parts = append(parts, style.Render(m.keyLabel("Ctrl+O")+" activity"))
 			}
 		}
 	}
 
 	for _, hint := range m.contextualShortcutHintPairs() {
-		key := hint.key
+		key := m.keyLabel(hint.key)
 		if compact {
 			key = compactKeyLabel(key)
 		}
@@ -538,6 +538,18 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 	if m.planningModeEnabled {
 		planStyle := lipgloss.NewStyle().Foreground(ColorInfo).Bold(true)
 		parts = append(parts, planStyle.Render(MessageIcons["info"]+" plan mode"))
+	}
+
+	// Background tasks
+	if m.runtimeStatus.GoalActive {
+		label := "◎ /goal active"
+		if m.runtimeStatus.GoalPaused {
+			label = "◎ /goal paused"
+		}
+		if !m.runtimeStatus.GoalStarted.IsZero() {
+			label += " " + time.Since(m.runtimeStatus.GoalStarted).Round(time.Second).String()
+		}
+		parts = append(parts, dimStyle.Render(label))
 	}
 
 	// Background tasks

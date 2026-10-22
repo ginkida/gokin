@@ -74,6 +74,13 @@ func (e *CostUnavailableError) Unwrap() error {
 }
 
 type maxTurnsContextKey struct{}
+
+// Shared by all foreground exchanges in an invocation. A review or hook
+// continuation must not obtain a new allowance by re-entering Execute.
+type invocationTurnLedger struct {
+	mu          sync.Mutex
+	limit, used int
+}
 type maxBudgetUSDContextKey struct{}
 
 // InvocationBudgetLedger is shared by every retry and delegated agent that
@@ -191,7 +198,7 @@ func ContextWithMaxTurns(ctx context.Context, maxTurns int) context.Context {
 	if maxTurns < 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, maxTurnsContextKey{}, maxTurns)
+	return context.WithValue(ctx, maxTurnsContextKey{}, &invocationTurnLedger{limit: maxTurns})
 }
 
 // MaxTurnsFromContext returns an invocation override when present. Zero is a
@@ -200,8 +207,59 @@ func MaxTurnsFromContext(ctx context.Context) (int, bool) {
 	if ctx == nil {
 		return 0, false
 	}
-	maxTurns, ok := ctx.Value(maxTurnsContextKey{}).(int)
-	return maxTurns, ok && maxTurns >= 0
+	ledger, ok := ctx.Value(maxTurnsContextKey{}).(*invocationTurnLedger)
+	if !ok || ledger == nil {
+		return 0, false
+	}
+	return ledger.limit, true
+}
+
+func claimInvocationTurn(ctx context.Context) bool {
+	ledger, _ := ctx.Value(maxTurnsContextKey{}).(*invocationTurnLedger)
+	if ledger == nil {
+		return true
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if ledger.limit > 0 && ledger.used >= ledger.limit {
+		return false
+	}
+	ledger.used++
+	return true
+}
+
+// ClaimInvocationModelTurn shares the invocation cap with a tool-free internal
+// evaluator. Such a request must not obtain a fresh allowance between turns.
+func ClaimInvocationModelTurn(ctx context.Context) bool { return claimInvocationTurn(ctx) }
+
+func InvocationModelTurnsClaimed(ctx context.Context) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	ledger, _ := ctx.Value(maxTurnsContextKey{}).(*invocationTurnLedger)
+	if ledger == nil {
+		return 0, false
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	return ledger.used, true
+}
+
+type claimedModelTurnContextKey struct{}
+
+// ContextWithClaimedModelTurn marks one provider request whose caller already
+// owns the invocation round and cost lease. It must not replace the parent
+// context used for later tool execution or subsequent model rounds.
+func ContextWithClaimedModelTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, claimedModelTurnContextKey{}, true)
+}
+
+func InvocationModelTurnClaimed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	claimed, _ := ctx.Value(claimedModelTurnContextKey{}).(bool)
+	return claimed
 }
 
 // ContextWithMaxBudgetUSD applies an invocation-scoped hard cost ceiling.

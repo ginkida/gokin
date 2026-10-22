@@ -753,16 +753,17 @@ func (p *tuiPresenter) SubAgentActivity(agentID, agentType, prompt, toolName str
 	}
 }
 
-// runStopHooks fires end-of-turn hooks (hooks.Stop). A FailOnError stop hook
-// that exits non-zero asks the agent to CONTINUE: its output is enqueued as
-// the next message (type-ahead pending queue). Bounded: at most ONE
-// hook-driven continuation per user-initiated turn — stopHookActive marks
-// the continuation turn, and stop hooks are skipped at ITS end, so a hook
-// that always fails cannot loop the agent forever. Headless runs only
-// journal the outcome (one-shot semantics — there is no next turn).
-func (a *App) runStopHooks(ctx context.Context, response string) {
+// stopHookVerdict returns one follow-up request or an intentional terminal
+// stop. The continuation is checked again, but cannot schedule a second pass.
+func (a *App) stopHookVerdict(ctx context.Context, response string, continued bool) (string, error) {
 	if a.hooksManager == nil {
-		return
+		return "", nil
+	}
+	if a.executor != nil {
+		ctx = a.executor.SkillInvocationContext(ctx)
+	}
+	if a.registry != nil {
+		ctx = tools.ContextWithSkillHooks(ctx, a.registry, a.hooksManager)
 	}
 
 	// End-of-turn gate: on cancellation (user Esc / deadline) skip the hooks
@@ -774,21 +775,12 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 	// Same "skip, preserve work on ctx.Err()" discipline as enforceDoneGate and
 	// runCompletionReviewIfNeeded (v0.100.47).
 	if ctx.Err() != nil {
-		return
+		return "", ctx.Err()
 	}
-
-	a.mu.Lock()
-	wasContinuation := a.stopHookActive
-	a.stopHookActive = false
-	headless := a.headlessDirect
-	a.mu.Unlock()
-
-	if wasContinuation {
-		// This turn IS the hook-driven continuation — don't re-gate it.
-		return
-	}
-
-	results := a.hooksManager.RunStop(ctx, response)
+	info := hooks.RuntimeInfoFromContext(ctx)
+	info.StopHookActive = continued
+	ctx = hooks.ContextWithRuntimeInfo(ctx, info)
+	results := a.hooksManager.RunStopInDir(ctx, a.workDir, response)
 	for _, r := range results {
 		if r.Error != nil {
 			a.journalEvent("stop_hook", map[string]any{
@@ -797,16 +789,22 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 			})
 		}
 	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 
+	if stopped, ok := tools.HookStopResult(results); ok {
+		return "", tools.HookStoppedError(stopped)
+	}
 	blocked, ok := hooks.Blocked(results)
 	if !ok {
-		return
+		return "", nil
 	}
 	// RunStop may have been in-flight when Esc cancelled the turn. Recheck after
 	// the subprocess returns: a context-insensitive/FailOnError hook can report a
 	// block on cancellation, but that verdict no longer owns a continuation.
 	if ctx.Err() != nil {
-		return
+		return "", ctx.Err()
 	}
 	name := blocked.Hook.Name
 	if name == "" {
@@ -817,13 +815,41 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 		reason = blocked.Error.Error()
 	}
 
-	if headless {
-		// One-shot mode: surface the verdict, no continuation turn exists.
-		a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q failed: %s", name, reason))
+	if continued {
+		return "", &tools.HookExecutionStoppedError{Reason: fmt.Sprintf("Stop hook %q still blocks completion after one continuation: %s", name, reason)}
+	}
+	return fmt.Sprintf("[Stop hook %q asks you to continue] %s", name, reason), nil
+}
+
+// runStopHooks uses the interactive FIFO for one bounded follow-up. Headless
+// execution handles the same verdict synchronously inside its invocation.
+func (a *App) runStopHooks(ctx context.Context, response string) {
+	if ctx.Err() != nil {
 		return
 	}
-
-	followUp := fmt.Sprintf("[Stop hook %q asks you to continue] %s", name, reason)
+	a.mu.Lock()
+	wasContinuation := a.stopHookActive
+	a.stopHookActive = false
+	headless := a.headlessDirect
+	a.mu.Unlock()
+	followUp, err := a.stopHookVerdict(ctx, response, wasContinuation)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		a.currentPresenter().Warning(err.Error())
+		a.recordHeadlessTerminalOutcome("hook_stopped", err.Error())
+		a.safeSendToProgram(ui.ErrorMsg(err))
+		return
+	}
+	if followUp == "" {
+		return
+	}
+	if headless {
+		a.recordHeadlessTerminalOutcome("hook_stopped", followUp)
+		a.currentPresenter().Warning(followUp)
+		return
+	}
 	// Serialize the post-hook decision with the same authoritative Esc barrier
 	// as FIFO/recovery ownership. Either the continuation is committed first and
 	// a later Esc resets+drains it, or cancellation wins and this code observes
@@ -841,12 +867,12 @@ func (a *App) runStopHooks(ctx context.Context, response string) {
 		a.stopHookActive = false
 		a.mu.Unlock()
 		a.sessionLeaseMu.Unlock()
-		a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q wanted a continuation but the queue is full", name))
+		a.currentPresenter().Warning("Stop hook wanted a continuation but the queue is full: " + followUp)
 		return
 	}
 	a.mu.Unlock()
 	a.sessionLeaseMu.Unlock()
-	a.currentPresenter().Warning(fmt.Sprintf("Stop hook %q: continuing — %s", name, truncateRunesApp(reason, 120)))
+	a.currentPresenter().Warning(truncateRunesApp(followUp, 160))
 }
 
 // truncateRunesApp rune-safely truncates s to max runes for toast display.

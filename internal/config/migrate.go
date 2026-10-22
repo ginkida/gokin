@@ -48,6 +48,13 @@ func DetectProvider(modelName string) string {
 
 // NormalizeConfig ensures configuration is consistent and valid.
 func NormalizeConfig(cfg *Config) error {
+	if err := ValidateKeybindings(cfg.UI.Keybindings); err != nil {
+		return err
+	}
+	if err := ValidateReasoningEffort(cfg.Model.ReasoningEffort); err != nil {
+		return err
+	}
+	cfg.Model.ReasoningEffort = strings.ToLower(strings.TrimSpace(cfg.Model.ReasoningEffort))
 	if err := ValidateRetryConfig(cfg); err != nil {
 		return err
 	}
@@ -90,6 +97,12 @@ func NormalizeConfig(cfg *Config) error {
 	}
 
 	// Normalize retry provider keys for case-insensitive lookups.
+	resolvedModel, err := ResolveModelAlias(cfg.Model.Provider, cfg.Model.Name, cfg.Model.Name)
+	if err != nil {
+		return err
+	}
+	cfg.Model.Name = resolvedModel
+
 	if len(cfg.API.Retry.Providers) > 0 {
 		normalized := make(map[string]ProviderRetryConfig, len(cfg.API.Retry.Providers))
 		for provider, override := range cfg.API.Retry.Providers {

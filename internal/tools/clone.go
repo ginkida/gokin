@@ -185,6 +185,17 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 			cloned.SetSemanticProvider(t.semanticProvider())
 		}
 		return cloned
+	case *LSPTool:
+		dir := pickWorkDir(workDir, t.workDir)
+		cloned := NewLSPTool(dir)
+		if manager := t.Manager(); manager != nil {
+			if canonicalToolWorkDir(dir) == t.workDir {
+				cloned.SetManager(manager)
+			} else if fork, err := manager.ForWorkDir(dir); err == nil {
+				cloned.SetManager(fork)
+			}
+		}
+		return cloned
 	case *FindReferencesTool:
 		cloned := NewFindReferencesTool(pickWorkDir(workDir, t.workDir))
 		if workDir == "" {
@@ -254,11 +265,13 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		if workDir != "" {
 			cloned := NewSkillTool(workDir)
 			cloned.SetWorkspaceTrusted(t.WorkspaceTrusted())
+			cloned.SetShellExecutionDisabled(t.ShellExecutionDisabled())
 			cloned.InheritPermissionDenies(t.ActivePermissionDenies())
 			return cloned
 		}
 		cloned := NewSkillToolWithCatalogAndWorkDir(t.catalog, t.workDir)
 		cloned.SetWorkspaceTrusted(t.WorkspaceTrusted())
+		cloned.SetShellExecutionDisabled(t.ShellExecutionDisabled())
 		cloned.InheritPermissionDenies(t.ActivePermissionDenies())
 		return cloned
 	case *ToolsListTool:

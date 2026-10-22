@@ -114,7 +114,11 @@ func (t *EditTool) SetRequireReadBeforeEdit(require bool) {
 // must be blocked. Returns "" when the check passes, is disabled, or
 // can't run (missing deps, unresolvable path, nonexistent file).
 func (t *EditTool) checkReadBeforeEdit(filePath string) string {
-	if !t.requireReadBeforeEdit || t.readTracker == nil || t.pathValidator == nil {
+	return t.checkReadBeforeEditWithTracker(filePath, t.readTracker)
+}
+
+func (t *EditTool) checkReadBeforeEditWithTracker(filePath string, tracker *FileReadTracker) string {
+	if !t.requireReadBeforeEdit || tracker == nil || t.pathValidator == nil {
 		return ""
 	}
 	validPath, err := t.pathValidator.ValidateFile(filePath)
@@ -128,7 +132,7 @@ func (t *EditTool) checkReadBeforeEdit(filePath string) string {
 		// specific "file not found" below — preserve that diagnostic.
 		return ""
 	}
-	if t.readTracker.HasBeenRead(validPath) {
+	if tracker.HasBeenRead(validPath) {
 		return ""
 	}
 	return fmt.Sprintf(
@@ -298,7 +302,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	// helper is a no-op when the tracker isn't wired (test harnesses) or
 	// when the file doesn't exist (Edit on new file → clearer error
 	// downstream).
-	if msg := t.checkReadBeforeEdit(filePath); msg != "" {
+	if msg := t.checkReadBeforeEditWithTracker(filePath, readTrackerForContext(ctx, t.readTracker)); msg != "" {
 		return NewErrorResult(msg), nil
 	}
 

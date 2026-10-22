@@ -53,6 +53,9 @@ func (t *hookFailureTracker) isFailing(key string) bool {
 // (its output is enqueued as the next message). Everything else was
 // previously invisible.
 func (a *App) onHookResult(hook *hooks.Hook, output string, err error) {
+	if hook.Type == hooks.DirectoryAdded {
+		return // The event's source selects transcript context versus debug-only output.
+	}
 	key := string(hook.Type) + ":" + hook.DisplayName()
 	if err == nil {
 		a.hookFailures.shouldNotify(key, false) // reset the streak
@@ -74,9 +77,14 @@ func (a *App) onHookResult(hook *hooks.Hook, output string, err error) {
 	}
 	logging.Warn("hook failing (surfaced to UI)",
 		"type", string(hook.Type), "hook", hook.DisplayName(), "error", err)
-	a.safeSendToProgram(ui.StatusUpdateMsg{
+	message := ui.StatusUpdateMsg{
 		Type: ui.StatusWarning,
 		Message: fmt.Sprintf("Hook %q (%s) is failing: %s — check /hooks",
 			hook.DisplayName(), hook.Type, reason),
-	})
+	}
+	if hook.Type == hooks.FileChanged || hook.Type == hooks.CwdChanged {
+		a.safeSendToProgramAsync(message)
+	} else {
+		a.safeSendToProgram(message)
+	}
 }

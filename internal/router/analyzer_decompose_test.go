@@ -375,3 +375,17 @@ func TestLLMDecomposerPreservesCallerTimeoutOnSilentClose(t *testing.T) {
 		t.Fatalf("decomposer telemetry = %#v, want 25ms", telemetry)
 	}
 }
+
+func TestLLMDecomposerInvalidOutputStillAccountsUsage(t *testing.T) {
+	model := testkit.NewMockClient().EnqueueText("invalid decomposition JSON")
+	analyzer := NewTaskAnalyzer(4, 7)
+	analyzer.SetLLMClient(model)
+	counter := &client.TokenUsageCounter{}
+	ctx := client.ContextWithTokenUsageCounter(t.Context(), counter)
+	if _, err := analyzer.decomposeWithLLM(ctx, "inspect and verify acceptance evidence"); err == nil {
+		t.Fatal("invalid decomposition was accepted")
+	}
+	if input, _ := counter.Snapshot(); input != 10 {
+		t.Fatalf("failed auxiliary parsing lost billed usage: %d", input)
+	}
+}

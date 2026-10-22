@@ -32,7 +32,8 @@ type Shortcut struct {
 	Description string
 }
 
-// DefaultShortcuts returns the default keyboard shortcuts.
+// DefaultShortcuts retains the original Gokin reference for embedded models.
+// Application surfaces use ShortcutsForProfile with their configured profile.
 func DefaultShortcuts() []ShortcutCategory {
 	return []ShortcutCategory{
 		{

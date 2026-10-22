@@ -304,6 +304,7 @@ func newEvalReportCmd() *cobra.Command {
 	var failUnder string
 	var maxRegression string
 	var requirePass bool
+	var requireCompleteSuite bool
 	var metricThresholds []string
 	var engineGateModes []string
 	var requireCompleteEnginePairs bool
@@ -332,6 +333,16 @@ not require an external baseline.`,
 				return fmt.Errorf("read input results: %w", err)
 			}
 			report := evals.BuildReport(inputPath, results)
+			var suiteCoverage *evals.BaselineCoverage
+			if requireCompleteSuite {
+				manifest, err := evals.LoadManifest(reportManifestPath)
+				if err != nil {
+					return fmt.Errorf("audit current suite coverage: %w", err)
+				}
+				audit := evals.CheckSuiteCoverage(*manifest, results)
+				audit.InputPath = inputPath
+				suiteCoverage = &audit
+			}
 
 			var comparison *evals.Comparison
 			var baselineStale *evals.BaselineCoverage
@@ -356,7 +367,7 @@ not require an external baseline.`,
 				return fmt.Errorf("--max-regression requires --baseline")
 			}
 
-			gateOpts, gateEnabled, err := evalGateOptions(failUnder, maxRegression, requirePass, metricThresholds)
+			gateOpts, gateEnabled, err := evalGateOptions(failUnder, maxRegression, requirePass || requireCompleteSuite, metricThresholds)
 			if err != nil {
 				return err
 			}
@@ -375,16 +386,27 @@ not require an external baseline.`,
 			var gate *evals.GateResult
 			if gateEnabled {
 				result := evals.EvaluateGate(report, comparison, gateOpts)
+				if suiteCoverage != nil && !suiteCoverage.Complete {
+					result.Passed = false
+					for _, variant := range suiteCoverage.Variants {
+						if !variant.Complete {
+							result.Failures = append(result.Failures, fmt.Sprintf(
+								"suite coverage %s: %d/%d scenarios, %d missing, %d unknown, %d duplicate",
+								variant.Variant, variant.Present, variant.Expected, len(variant.Missing), len(variant.Unknown), len(variant.Duplicates)))
+						}
+					}
+				}
 				gate = &result
 			}
 
 			if jsonOut {
 				payload := struct {
+					SuiteCoverage    *evals.BaselineCoverage `json:"suite_coverage,omitempty"`
 					BaselineCoverage *evals.BaselineCoverage `json:"baseline_coverage,omitempty"`
 					Report           evals.Report            `json:"report"`
 					Comparison       *evals.Comparison       `json:"comparison,omitempty"`
 					Gate             *evals.GateResult       `json:"gate,omitempty"`
-				}{BaselineCoverage: baselineStale, Report: report, Comparison: comparison, Gate: gate}
+				}{SuiteCoverage: suiteCoverage, BaselineCoverage: baselineStale, Report: report, Comparison: comparison, Gate: gate}
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				if err := enc.Encode(payload); err != nil {
@@ -393,6 +415,20 @@ not require an external baseline.`,
 			} else {
 				printEvalReport(cmd, report, comparison, gate)
 				printBaselineStaleness(cmd, baselinePath, baselineStale)
+				if suiteCoverage != nil {
+					fmt.Fprintln(cmd.OutOrStdout(), "\nCurrent suite coverage:")
+					for _, variant := range suiteCoverage.Variants {
+						fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d/%d scenarios\n", variant.Variant, variant.Present, variant.Expected)
+						for _, issue := range []struct {
+							label string
+							ids   []string
+						}{{"missing", variant.Missing}, {"unknown", variant.Unknown}, {"duplicate", variant.Duplicates}} {
+							if len(issue.ids) > 0 {
+								fmt.Fprintf(cmd.OutOrStdout(), "    %s: %s\n", issue.label, strings.Join(issue.ids, ", "))
+							}
+						}
+					}
+				}
 			}
 
 			if gate != nil && !gate.Passed {
@@ -404,11 +440,12 @@ not require an external baseline.`,
 
 	cmd.Flags().StringVar(&inputPath, "input", ".gokin/evals/results.jsonl", "JSONL results path")
 	cmd.Flags().StringVar(&baselinePath, "baseline", "", "optional baseline JSONL results path for comparison")
-	cmd.Flags().StringVar(&reportManifestPath, "manifest", "evals/coding/manifest.json", "eval manifest path, used to report baseline coverage")
+	cmd.Flags().StringVar(&reportManifestPath, "manifest", "evals/coding/manifest.json", "eval manifest path for baseline and current suite coverage")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON")
 	cmd.Flags().StringVar(&failUnder, "fail-under", "", "fail if aggregate score is below this ratio or percent (example: 0.9 or 90%)")
 	cmd.Flags().StringVar(&maxRegression, "max-regression", "", "fail if score regresses by more than this ratio or percent-point value versus --baseline")
 	cmd.Flags().BoolVar(&requirePass, "require-pass", false, "fail unless every scenario was actually executed and passed")
+	cmd.Flags().BoolVar(&requireCompleteSuite, "require-complete-suite", false, "fail unless every current manifest scenario was executed and passed exactly once per represented provider/model/engine/fault/trial cohort")
 	cmd.Flags().StringArrayVar(&metricThresholds, "fail-metric", nil, "fail if metric ratio is below threshold, as name=ratio; repeatable")
 	cmd.Flags().StringArrayVar(&engineGateModes, "engine-gate-mode", nil, "engine comparison to gate (auto or hybrid); repeatable; default auto when an engine gate is enabled")
 	cmd.Flags().BoolVar(&requireCompleteEnginePairs, "require-complete-engine-pairs", false, "fail unless selected comparisons have valid, fully measured pairs, complete mode-provenant and exposure-consistent hybrid policy evidence, and zero exclusions")

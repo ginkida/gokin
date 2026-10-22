@@ -58,6 +58,18 @@ func (a *App) clearConversationPersistenceBoundary() (int, error) {
 // conversation-root reset. The optional rebuild runs under the session lease
 // after the old retry lineage is invalidated and before the new root is saved.
 func (a *App) replaceConversationPersistenceBoundary(rebuild func()) (int, error) {
+	return a.replaceConversationRoot(rebuild, false)
+}
+
+func (a *App) replacePlanConversationPersistenceBoundary(rebuild func()) (int, error) {
+	return a.replaceConversationRoot(rebuild, true)
+}
+
+func (a *App) replaceConversationRoot(rebuild func(), preserveGoal bool) (int, error) {
+	return a.replaceConversationRootWithReason(rebuild, preserveGoal, "other")
+}
+
+func (a *App) replaceConversationRootWithReason(rebuild func(), preserveGoal bool, reason string) (int, error) {
 	if a == nil || a.session == nil {
 		return 0, nil
 	}
@@ -67,9 +79,18 @@ func (a *App) replaceConversationPersistenceBoundary(rebuild func()) (int, error
 		// There is no active autosave/load source to tombstone, but the in-memory
 		// epoch/ledger/queue boundary is still mandatory.
 		a.sessionLeaseMu.Lock()
-		a.recoveryEpoch.Add(1)
+		var ending *sessionEndInvocation
+		if !preserveGoal {
+			ending = a.captureSessionEndLocked(a.session.GetState(), reason)
+		}
+		a.advanceConversationEpoch()
+		a.stopGoalTimer()
 		sessionID := a.session.GetID()
+		goal := a.session.GoalState()
 		a.session.Clear()
+		if preserveGoal {
+			_ = a.session.SetGoalState(goal)
+		}
 		if a.executor != nil {
 			a.executor.ResetSideEffectLedger()
 			a.executor.SetSideEffectDedup(false)
@@ -77,6 +98,11 @@ func (a *App) replaceConversationPersistenceBoundary(rebuild func()) (int, error
 		if rebuild != nil {
 			rebuild()
 		}
+		if !preserveGoal {
+			a.invalidateSessionStartLocked()
+		}
+		a.runSessionEndLocked(ending)
+		a.startSessionStartLocked(sessionStartResetSource(preserveGoal), !preserveGoal)
 		a.sessionLeaseMu.Unlock()
 		a.cancelRecoveryTimersForSession(sessionID)
 		return a.dropRecoveryPendingForSession(sessionID), nil
@@ -84,11 +110,18 @@ func (a *App) replaceConversationPersistenceBoundary(rebuild func()) (int, error
 	a.sessionLeaseMu.Lock()
 	defer a.sessionLeaseMu.Unlock()
 	previousState := a.session.GetState()
+	var ending *sessionEndInvocation
+	if !preserveGoal {
+		ending = a.captureSessionEndLocked(previousState, reason)
+	}
 	previousEpoch := a.recoveryEpoch.Load()
 	sessionID := a.session.GetID()
 	transactionErr := a.sessionManager.ApplyAndSave(func() (func(), error) {
-		a.recoveryEpoch.Add(1)
+		a.advanceConversationEpoch()
 		a.session.Clear()
+		if preserveGoal {
+			_ = a.session.SetGoalState(previousState.Goal)
+		}
 		if a.executor != nil {
 			a.executor.ResetSideEffectLedger()
 			a.executor.SetSideEffectDedup(false)
@@ -108,6 +141,12 @@ func (a *App) replaceConversationPersistenceBoundary(rebuild func()) (int, error
 	if transactionErr != nil && !errors.Is(transactionErr, fileutil.ErrAtomicWriteCommitUncertain) {
 		return 0, transactionErr
 	}
+	if !preserveGoal {
+		a.invalidateSessionStartLocked()
+	}
+	a.runSessionEndLocked(ending)
+	a.startSessionStartLocked(sessionStartResetSource(preserveGoal), !preserveGoal)
+	a.stopGoalTimer()
 	// Drop queued executable retries only after the new root is known to be
 	// visible (or commit-uncertain after replace). On a definite pre-commit
 	// failure ApplyAndSave restored the prior epoch/session and those requests
@@ -471,7 +510,7 @@ func (a *App) cancelPendingAtRecoveryBoundary() (drainedCount, remaining, releas
 func (a *App) cancelPendingAtRecoveryBoundaryLocked() (drainedCount, remaining, released int, releasedKeys []recoveryTimerKey, releaseErr error) {
 	drained := a.drainPendingRequests()
 	drainedCount = len(drained)
-	a.recoveryEpoch.Add(1)
+	a.advanceConversationEpoch()
 	if a.session == nil {
 		remaining = a.pendingCount()
 		return drainedCount, remaining, 0, nil, nil

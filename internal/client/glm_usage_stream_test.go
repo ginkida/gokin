@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"testing"
 
 	"google.golang.org/genai"
@@ -38,5 +39,38 @@ func TestGLMUsageEventsPreserveTokenAndImplicitCacheMetrics(t *testing.T) {
 	}
 	if !delta.Done || delta.FinishReason != genai.FinishReasonStop {
 		t.Fatalf("message_delta completion = done %v reason %v", delta.Done, delta.FinishReason)
+	}
+}
+
+func TestGLMFinalUsageReachesResponseAndContextCallback(t *testing.T) {
+	c := &AnthropicClient{}
+	acc := &toolCallAccumulator{}
+	chunks := make(chan ResponseChunk, 2)
+	chunks <- c.processStreamEvent(map[string]any{
+		"type": "message_start",
+		"message": map[string]any{"usage": map[string]any{
+			"input_tokens": float64(0), "output_tokens": float64(0),
+		}},
+	}, acc)
+	chunks <- c.processStreamEvent(map[string]any{
+		"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"},
+		"usage": map[string]any{
+			"input_tokens": float64(16), "output_tokens": float64(4),
+			"cache_read_input_tokens": float64(7), "cache_creation_input_tokens": float64(3),
+		},
+	}, acc)
+	close(chunks)
+	var contextTokens, outputTokens int
+	response, err := ProcessStream(context.Background(), &StreamingResponse{Chunks: chunks}, &StreamHandler{
+		OnTokenUpdate: func(input, output int) { contextTokens, outputTokens = input, output },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.InputTokens != 16 || response.OutputTokens != 4 || response.CacheReadInputTokens != 7 || response.CacheCreationInputTokens != 3 {
+		t.Fatalf("terminal usage was lost: %+v", response)
+	}
+	if contextTokens != 26 || outputTokens != 4 {
+		t.Fatalf("context callback = %d input/%d output, want 26/4", contextTokens, outputTokens)
 	}
 }

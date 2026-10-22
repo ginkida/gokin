@@ -170,6 +170,9 @@ func (e *Executor) enforceDeltaCheckBarrier(ctx context.Context, call *genai.Fun
 		"tool", call.Name,
 		"limit", deltaCheckBarrierGraceLimit,
 		"summary", strings.TrimSpace(result.Summary))
+	e.deltaCheckMu.Lock()
+	e.deltaCheckBarrierRefused = true
+	e.deltaCheckMu.Unlock()
 
 	reason := strings.TrimSpace(blockReason)
 	if reason == "" {
@@ -181,6 +184,46 @@ func (e *Executor) enforceDeltaCheckBarrier(ctx context.Context, call *genai.Fun
 		reason = "delta-check guard: " + reason
 	}
 	return reason, true
+}
+
+// A model can repair a failed build through an authorized Bash command. Only
+// a fresh, successful check can clear a previously refused compiler barrier;
+// final prose and a shell's exit code are not verification evidence.
+func (e *Executor) verifyRecoveredDeltaCheck(ctx context.Context) error {
+	e.deltaCheckMu.Lock()
+	needed := e.deltaCheckEnabled && !e.deltaCheckWarnOnly && e.deltaCheckBarrierRefused
+	pending := copyStringSet(e.deltaPendingPaths)
+	if needed {
+		e.deltaCheckLastResult = nil // Do not reuse a result from before the repair.
+	}
+	e.deltaCheckMu.Unlock()
+	if !needed {
+		return nil
+	}
+	result := e.runDeltaCheck(ctx)
+	verified := result.Ran && result.Passed && result.Executed > 0 && result.Skipped == 0
+	if !verified {
+		e.deltaCheckMu.Lock()
+		e.deltaCheckBarrierRefused = true
+		e.deltaCheckBlocked = true
+		if e.deltaPendingPaths == nil {
+			e.deltaPendingPaths = make(map[string]struct{})
+		}
+		for path := range pending {
+			e.deltaPendingPaths[path] = struct{}{}
+		}
+		e.deltaCheckMu.Unlock()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if verified {
+		return nil
+	}
+	if !result.Ran || result.Executed == 0 || result.Skipped > 0 {
+		return fmt.Errorf("final build verification unavailable after a delta-check refusal: %s", result.Summary)
+	}
+	return fmt.Errorf("final build verification failed after a delta-check refusal: %s\n%s", result.Summary, result.Details)
 }
 
 func (e *Executor) runDeltaCheckAfterMutation(ctx context.Context, call *genai.FunctionCall) *deltaCheckResult {
@@ -354,6 +397,7 @@ func (e *Executor) commitDeltaCheckResult(result deltaCheckResult, warnOnly bool
 		// Next failure starts with a fresh grace window.
 		e.deltaPendingPaths = make(map[string]struct{})
 		e.deltaCheckGracedCalls = 0
+		e.deltaCheckBarrierRefused = false
 		return
 	}
 

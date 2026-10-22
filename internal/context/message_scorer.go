@@ -573,13 +573,13 @@ func (s *MessageScorer) ScoreMessagesWithContext(ctx context.Context, messages [
 		ctx, timeout, client.NewModelRoundTimeoutError(timeout))
 	defer cancel()
 
-	stream, err := c.SendMessage(scoreCtx, prompt)
+	stream, err := client.SendAuxiliaryMessage(scoreCtx, c, prompt)
 	if err != nil {
 		logging.Debug("semantic scoring failed, using heuristics", "error", err)
 		return heuristicScores
 	}
 
-	resp, err := stream.CollectContext(scoreCtx)
+	resp, err := client.CollectAuxiliaryResponse(scoreCtx, c, stream)
 	if err != nil {
 		logging.Debug("semantic scoring collect failed", "error", err)
 		return heuristicScores

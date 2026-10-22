@@ -374,7 +374,15 @@ func (c *LogoutCommand) Execute(ctx context.Context, args []string, app AppInter
 		if np := config.GetProvider(autoSwitchProvider); np != nil {
 			cfg.Model.Name = np.DefaultModel
 		}
-		if err := clearConversationChecked(app); err != nil {
+		var clearErr error
+		if runtime, ok := app.(interface {
+			ClearConversationForSessionEnd(context.Context, string) error
+		}); ok {
+			clearErr = runtime.ClearConversationForSessionEnd(ctx, "logout")
+		} else {
+			clearErr = clearConversationChecked(app)
+		}
+		if err := clearErr; err != nil {
 			return "", fmt.Errorf("credentials/provider were not changed because the old conversation could not be cleared safely: %w", err)
 		}
 	}
@@ -409,6 +417,11 @@ The removed credential may return next launch. Fix the config path permissions o
 		}
 	}
 
+	if autoSwitchProvider == "" && (target == currentProvider || target == "all") {
+		if runtime, ok := app.(interface{ EndSessionHooks(context.Context, string) }); ok {
+			runtime.EndSessionHooks(ctx, "logout")
+		}
+	}
 	var result strings.Builder
 	targetP := config.GetProvider(target)
 	displayTarget := target
@@ -519,7 +532,11 @@ func (c *ProviderCommand) Execute(ctx context.Context, args []string, app AppInt
 
 		fmt.Fprintf(&sb, "\nCurrent: %s (%s)\n", currentProvider, cfg.Model.Name)
 		sb.WriteString("\nUsage: /provider <name>  — switches (asks for the key if missing)\n")
-		sb.WriteString("       /model <name>     — switch model (Ctrl+K for the picker)")
+		pickerKey := "Ctrl+K"
+		if claudeKeyboard(app) {
+			pickerKey = "Alt+P"
+		}
+		fmt.Fprintf(&sb, "       /model <name>     — switch model (%s for the picker)", pickerKey)
 
 		return sb.String(), nil
 	}

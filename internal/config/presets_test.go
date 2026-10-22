@@ -11,13 +11,13 @@ func TestApplyPreset(t *testing.T) {
 		wantModel    string
 		wantProvider string
 	}{
-		{"coding", true, "glm-5.2", "glm"},
-		{"fast", true, "glm-5.2", "glm"},
-		{"balanced", true, "glm-5.2", "glm"},
+		{"coding", true, "glm-5.3-flash", "glm"},
+		{"fast", true, "glm-5.3-flash", "glm"},
+		{"balanced", true, "glm-5.3", "glm"},
 		{"creative", true, "MiniMax-M2.7", "minimax"},
 		{"ollama", true, "llama3.2", "ollama"},
 		{"kimi", true, "k3", "kimi"},
-		{"glm", true, "glm-5.2", "glm"},
+		{"glm", true, "glm-5.3-flash", "glm"},
 		{"minimax", true, "MiniMax-M2.7", "minimax"},
 		{"nonexistent", false, "", ""},
 	}
@@ -43,9 +43,9 @@ func TestApplyPreset(t *testing.T) {
 
 func TestApplyPresetTemperature(t *testing.T) {
 	cases := map[string]float32{
-		"coding":  0.6, // glm-5.2 coding default
+		"coding":  1.0, // glm-5.3 provider recommendation
 		"kimi":    0.6,
-		"glm":     0.7,
+		"glm":     1.0,
 		"ollama":  0.7,
 		"minimax": 0.7,
 	}
@@ -60,7 +60,7 @@ func TestApplyPresetTemperature(t *testing.T) {
 
 func TestApplyPresetMaxTokens(t *testing.T) {
 	cases := map[string]int32{
-		"coding": 65536, // glm-5.2 default coding cap (headroom)
+		"coding": 65536, // glm-5.3 default coding cap (headroom)
 		"fast":   65536,
 		"kimi":   65536,
 		"glm":    131072,

@@ -89,6 +89,12 @@ func (m *Model) SetCancelCallback(onCancel func()) {
 	m.onCancel = onCancel
 }
 
+// SetIdleAsyncHookCancelCallback keeps idle Esc cancellation independent of
+// the runtime-status polling interval. It returns whether work was cancelled.
+func (m *Model) SetIdleAsyncHookCancelCallback(cancel func() bool) {
+	m.onCancelIdleAsyncHooks = cancel
+}
+
 // SetPermissionsToggleCallback sets the callback for permissions toggle.
 func (m *Model) SetPermissionsToggleCallback(onToggle func() bool) {
 	m.onPermissionsToggle = onToggle
@@ -439,7 +445,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Open Settings",
 			Description: settingsDescription,
-			Shortcut:    "Ctrl+S",
+			Shortcut:    m.keyLabel("Ctrl+S"),
 			Category:    PaletteCategoryInfo{Name: "Auth & Setup", Icon: "lock", Priority: 2},
 			Enabled:     settingsAvailable,
 			Reason:      settingsReason,
@@ -450,7 +456,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Open Model Selector",
 			Description: "Switch the active AI model",
-			Shortcut:    "Ctrl+K",
+			Shortcut:    m.keyLabel("Ctrl+K"),
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     true,
 			Priority:    149,
@@ -490,7 +496,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Live Activity Detail",
 			Description: liveDetailDescription + " (works while streaming)",
-			Shortcut:    "Ctrl+O",
+			Shortcut:    m.keyLabel("Ctrl+O"),
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     true,
 			Priority:    150,
@@ -510,7 +516,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Toggle Agent Tree",
 			Description: agentTreeDescription,
-			Shortcut:    "Ctrl+A",
+			Shortcut:    m.keyLabel("Ctrl+A"),
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     agentTreeAvailable,
 			Reason:      agentTreeReason,
@@ -521,7 +527,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Context Observatory",
 			Description: observatoryDescription,
-			Shortcut:    "Ctrl+H",
+			Shortcut:    m.keyLabel("Ctrl+H"),
 			Category:    PaletteCategoryInfo{Name: "Tools", Icon: "gear", Priority: 5},
 			Enabled:     observatoryAvailable,
 			Reason:      observatoryReason,
@@ -532,7 +538,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Toggle Plan Panel",
 			Description: planPanelDescription,
-			Shortcut:    "Ctrl+X",
+			Shortcut:    m.keyLabel("Ctrl+X"),
 			Category:    PaletteCategoryInfo{Name: "Planning", Icon: "tree", Priority: 4},
 			Enabled:     planPanelAvailable,
 			Reason:      planPanelReason,
@@ -554,7 +560,7 @@ func (m *Model) RegisterPaletteActions() {
 		{
 			Name:        "Clear Screen",
 			Description: "Clear the output display",
-			Shortcut:    "Ctrl+L",
+			Shortcut:    m.clearOutputShortcut(),
 			Category:    PaletteCategoryInfo{Name: "Session", Icon: "chat", Priority: 1},
 			Enabled:     true,
 			Priority:    152,

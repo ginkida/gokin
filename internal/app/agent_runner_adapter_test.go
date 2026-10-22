@@ -10,12 +10,12 @@ import (
 	"gokin/internal/tools"
 )
 
-// Compile-time proof the adapter actually satisfies both interfaces —
-// task_stop.go/task_output.go's type assertions (`t.runner.(AgentCanceller)`/
-// `.(AgentLister)`) against this exact type must succeed.
+// Compile-time proof the live adapter supports cancellation, listing and
+// skill model settings; each optional runtime assertion must succeed.
 var (
-	_ tools.AgentCanceller = (*agentRunnerAdapter)(nil)
-	_ tools.AgentLister    = (*agentRunnerAdapter)(nil)
+	_ tools.AgentCanceller             = (*agentRunnerAdapter)(nil)
+	_ tools.AgentLister                = (*agentRunnerAdapter)(nil)
+	_ tools.SkillModelSettingsResolver = (*agentRunnerAdapter)(nil)
 )
 
 // TestAgentRunnerAdapter_CancelAndListAgentsForward (round 5) pins the fix:

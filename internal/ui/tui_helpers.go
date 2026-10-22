@@ -1059,6 +1059,18 @@ func (m *Model) SaveInputHistory() error {
 // ClearOutput clears the output viewport.
 func (m *Model) ClearOutput() {
 	m.output.Clear()
+	if m.toolOutput != nil {
+		m.toolOutput.Clear()
+	}
+	m.lastToolOutputIndex = -1
+	m.transcript = nil
+	m.transcriptTools = nil
+	m.transcriptToolSeq = 0
+	m.transcriptToolsDropped = false
+	if m.state == StateTranscript {
+		m.state = overlayReturnState(m.transientOverlayReturnState)
+		m.transientOverlayReturnState = StateInput
+	}
 }
 
 // ResetInput clears the input field.

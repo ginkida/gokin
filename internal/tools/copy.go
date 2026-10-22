@@ -186,12 +186,18 @@ func (t *CopyTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 				// mildest trade in this family: an unsnapshotted copy leaves an
 				// extra file behind, where an unsnapshotted delete loses one.
 				if undoSnapshotTooLarge(info.Size()) {
+					t.undoManager.MarkUntracked(p, "copied file exceeds the snapshot limit")
 					unsnapshotted++
 					logging.Warn("copy: undo unavailable, file exceeds the undo snapshot limit",
 						"path", p, "size", info.Size(), "limit", maxUndoSnapshotBytes)
 					continue
 				}
-				content, _ := os.ReadFile(p)
+				content, err := os.ReadFile(p)
+				if err != nil {
+					t.undoManager.MarkUntracked(p, "copied file snapshot could not be read")
+					unsnapshotted++
+					continue
+				}
 				change := undo.NewFileChange(p, "copy", nil, content, true)
 				change.Mode = info.Mode().Perm()
 				t.undoManager.Record(*change)

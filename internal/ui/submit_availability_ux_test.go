@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,7 @@ func TestSubmitCooldownExplainsDelayAndPreservesDraft(t *testing.T) {
 			m.width = 80
 			m.state = state
 			m.lastSubmitTime = time.Now()
+			m.lastSubmitDigest = sha256.Sum256([]byte("send this next"))
 			m.input.textarea.SetValue("send this next")
 			calls := 0
 			m.SetCallbacks(func(string) { calls++ }, nil)

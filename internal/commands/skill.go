@@ -11,7 +11,7 @@ import (
 
 // SkillCommand lists or explicitly loads a reusable SKILL.md workflow. Loaded
 // content is submitted to the model as the next user prompt, matching the
-// existing file-command handoff without executing any side effect itself.
+// existing file-command handoff. Dynamic context uses the owning executor.
 type SkillCommand struct{}
 
 func (c *SkillCommand) Name() string        { return "skill" }
@@ -41,6 +41,12 @@ func (c *SkillCommand) Execute(ctx context.Context, args []string, app AppInterf
 		return "", fmt.Errorf("registered skill tool has incompatible type")
 	}
 
+	if provider, ok := app.(interface {
+		SkillInvocationContext(context.Context) context.Context
+	}); ok {
+		ctx = provider.SkillInvocationContext(ctx)
+	}
+
 	var result tools.ToolResult
 	var err error
 	if len(args) == 0 {
@@ -48,9 +54,9 @@ func (c *SkillCommand) Execute(ctx context.Context, args []string, app AppInterf
 	} else {
 		if rawArguments, ok := RawInvocationArguments(ctx); ok {
 			_, workflowArguments := splitSkillInvocationArguments(rawArguments)
-			result, err = skillTool.ExecuteForUserRawArguments(args[0], workflowArguments)
+			result, err = skillTool.ExecuteForUserRawArgumentsContext(ctx, args[0], workflowArguments)
 		} else {
-			result, err = skillTool.ExecuteForUserArguments(args[0], args[1:])
+			result, err = skillTool.ExecuteForUserArgumentsContext(ctx, args[0], args[1:])
 		}
 	}
 	if err != nil {

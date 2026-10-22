@@ -487,13 +487,8 @@ This later paragraph is not catalog metadata.`)
 
 func TestCatalogRejectsUnsupportedExecutionFrontmatterExplicitly(t *testing.T) {
 	fields := map[string]string{
-		"model":   "sonnet",
-		"effort":  "high",
-		"context": "fork",
-		"agent":   "Explore",
-		"hooks":   "{}",
-		"paths":   "['src/**']",
-		"shell":   "bash",
+		"paths": "['src/**']",
+		"shell": "bash",
 	}
 	for field, value := range fields {
 		t.Run(field, func(t *testing.T) {
@@ -640,7 +635,7 @@ Run controlled workflow.`, value))
 	}
 }
 
-func TestCatalogRejectsUnsupportedDynamicContextInjection(t *testing.T) {
+func TestCatalogDiscoversDynamicContextWithoutExecuting(t *testing.T) {
 	tests := map[string]string{
 		"inline": "State:\n- Diff: !`git diff`",
 		"fenced": "State:\n```!\ngit status\n```",
@@ -650,10 +645,10 @@ func TestCatalogRejectsUnsupportedDynamicContextInjection(t *testing.T) {
 			root := t.TempDir()
 			writeSkill(t, root, "dynamic", "---\nname: Dynamic\ndescription: dynamic context\n---\n"+body)
 			catalog := NewCatalog([]Root{{Path: root, Source: "project"}})
-			if _, ok := catalog.Get("dynamic"); ok {
-				t.Fatal("unsupported dynamic context skill was loaded")
+			if _, ok := catalog.Get("dynamic"); !ok {
+				t.Fatalf("dynamic context skill not loaded: %v", catalog.Warnings())
 			}
-			if warnings := strings.Join(catalog.Warnings(), "\n"); !strings.Contains(warnings, "dynamic context injection") {
+			if warnings := strings.Join(catalog.Warnings(), "\n"); warnings != "" {
 				t.Fatalf("warnings = %q", warnings)
 			}
 		})

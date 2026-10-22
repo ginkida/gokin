@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/goals"
 	"gokin/internal/logging"
 	"gokin/internal/security"
 	"gokin/internal/skills"
@@ -54,16 +55,21 @@ type Session struct {
 	// through the locked accessors (GetSystemInstruction / SetSystemInstruction)
 	// — a direct field write from another package would race the save.
 	systemInstruction       string
+	title                   string
 	tokenCounts             []int // tokens per message
 	totalTokens             int   // cached total
 	version                 int64 // version for optimistic concurrency control
 	onChange                ChangeHandler
+	windowHistoryHandler    func(sessionID string)
+	windowArchives          []HistoryWindowArchive
+	goalState               goals.State
 	scratchpad              string
 	toolCheckpoints         []SerializedToolCheckpoint     // persisted tool checkpoint journal
 	pendingRecoveries       []SerializedPendingRecovery    // durable retry lineage, session-scoped
 	invocationLedger        *skills.InvocationLedger       // exact latest rendered Skills, session-scoped
 	checkpointInvokedSkills map[string][]skills.Invocation // Skill snapshots for named rollback points
-	checkpointRawIndices    map[string]bool                // indices measured without synthetic Skill carry
+	checkpointSkillHooks    map[string][]skills.HookActivation
+	checkpointRawIndices    map[string]bool // indices measured without synthetic Skill carry
 	mu                      sync.RWMutex
 }
 
@@ -76,6 +82,25 @@ func NewSession() *Session {
 		invocationLedger:        skills.NewInvocationLedger(),
 		checkpointInvokedSkills: make(map[string][]skills.Invocation),
 		checkpointRawIndices:    make(map[string]bool),
+	}
+}
+
+func (s *Session) GetTitle() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.title
+}
+
+func (s *Session) SetTitle(title string) {
+	title = strings.Join(strings.Fields(title), " ")
+	if runes := []rune(title); len(runes) > 200 {
+		title = string(runes[:200])
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.title != title {
+		s.title = title
+		s.version++
 	}
 }
 
@@ -113,6 +138,9 @@ func (s *Session) SetChangeHandler(handler ChangeHandler) {
 func (s *Session) notifyChange(oldCount int) {
 	// Capture event data and handler BEFORE unlocking
 	handler := s.onChange
+	windowHandler := s.windowHistoryHandler
+	windowSessionID := s.ID
+	hasWindows := len(s.windowArchives) != 0
 	event := ChangeEvent{
 		OldCount: oldCount,
 		NewCount: len(s.History),
@@ -122,7 +150,7 @@ func (s *Session) notifyChange(oldCount int) {
 	// Always release the lock — whether or not handler is set
 	s.mu.Unlock()
 
-	if handler == nil {
+	if handler == nil && (windowHandler == nil || !hasWindows) {
 		return
 	}
 
@@ -143,7 +171,12 @@ func (s *Session) notifyChange(oldCount int) {
 	}()
 
 	// Call handler outside lock (prevent deadlock if handler tries to access session)
-	handler(event)
+	if windowHandler != nil && hasWindows {
+		windowHandler(windowSessionID)
+	}
+	if handler != nil {
+		handler(event)
+	}
 }
 
 // AddUserMessage adds a user message to the history.
@@ -205,7 +238,7 @@ func (s *Session) SetHistoryWithSkillCarry(history []*genai.Content, insertAt in
 	s.mu.Lock()
 
 	oldCount := len(s.History)
-	committed := s.prepareHistoryWithSkillCarryLocked(history, insertAt)
+	committed := s.prepareWindowHistoryLocked(history, insertAt)
 	s.History = committed
 	s.tokenCounts = make([]int, len(committed)) // keep len(tokenCounts)==len(History)
 	s.totalTokens = 0
@@ -232,7 +265,7 @@ func (s *Session) SetHistoryIfVersionWithSkillCarry(history []*genai.Content, ex
 	}
 
 	oldCount := len(s.History)
-	committed := s.prepareHistoryWithSkillCarryLocked(history, insertAt)
+	committed := s.prepareWindowHistoryLocked(history, insertAt)
 	s.History = committed
 	s.tokenCounts = make([]int, len(committed)) // keep len(tokenCounts)==len(History)
 	s.totalTokens = 0
@@ -276,6 +309,7 @@ func (s *Session) Clear() {
 	s.History = make([]*genai.Content, 0)
 	s.tokenCounts = make([]int, 0)
 	s.totalTokens = 0
+	s.title = ""
 	if s.invocationLedger != nil {
 		s.invocationLedger.Clear()
 	}
@@ -284,11 +318,14 @@ func (s *Session) Clear() {
 	// Skills that were deliberately cleared.
 	s.Checkpoints = make(map[string]int)
 	s.checkpointInvokedSkills = make(map[string][]skills.Invocation)
+	s.checkpointSkillHooks = make(map[string][]skills.HookActivation)
 	s.checkpointRawIndices = make(map[string]bool)
 	// A cleared conversation must not retain a prior turn's mutation replay or
 	// an automatic retry capable of resurrecting it.
 	s.toolCheckpoints = nil
 	s.pendingRecoveries = nil
+	s.windowArchives = nil
+	s.goalState = goals.State{}
 	s.version++
 
 	s.notifyChange(oldCount) // unlocks mu
@@ -331,7 +368,7 @@ func (s *Session) MessageCount() int {
 func (s *Session) trimHistoryLocked() {
 	previousHistory := s.History
 	previousCounts := s.tokenCounts
-	s.History = s.prepareHistoryWithSkillCarryLocked(s.History, 0)
+	s.History = s.prepareWindowHistoryLocked(s.History, 0)
 	newCounts := realignTokenCounts(previousHistory, previousCounts, s.History)
 	s.tokenCounts = newCounts
 	s.totalTokens = 0
@@ -519,8 +556,10 @@ func cloneHistorySlice(history []*genai.Content) []*genai.Content {
 // TrimHistory manually triggers history trimming to max messages.
 func (s *Session) TrimHistory() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	oldCount := len(s.History)
 	s.trimHistoryLocked()
+	s.version++
+	s.notifyChange(oldCount)
 }
 
 // generateSessionID generates a unique session ID.
@@ -595,7 +634,7 @@ func (s *Session) ReplaceWithSummary(upToIndex int, summary *genai.Content, summ
 	s.tokenCounts = append(s.tokenCounts, remainingTokens...)
 	preCarryHistory := s.History
 	preCarryCounts := s.tokenCounts
-	s.History = s.prepareHistoryWithSkillCarryLocked(s.History, 1)
+	s.History = s.prepareWindowHistoryLocked(s.History, 1)
 	s.tokenCounts = realignTokenCounts(preCarryHistory, preCarryCounts, s.History)
 
 	// Recalculate total
@@ -701,11 +740,14 @@ func (s *Session) GetState() *SessionState {
 
 	state := &SessionState{
 		ID:                s.ID,
+		Title:             s.title,
 		StartTime:         s.StartTime,
 		LastActive:        time.Now(),
 		WorkDir:           s.WorkDir,
 		Provider:          s.Provider,
 		History:           history,
+		HistoryWindows:    cloneHistoryWindows(s.windowArchives),
+		Goal:              goals.Clone(s.goalState),
 		TokenCounts:       make([]int, len(s.tokenCounts)),
 		TotalTokens:       s.totalTokens,
 		Version:           s.version,
@@ -713,7 +755,13 @@ func (s *Session) GetState() *SessionState {
 		SystemInstruction: s.systemInstruction,
 	}
 	if s.invocationLedger != nil {
-		state.InvokedSkills = s.invocationLedger.SnapshotNewestFirst()
+		state.InvokedSkills, state.SkillHooks = s.invocationLedger.SnapshotWithHooks()
+	}
+	if len(s.checkpointSkillHooks) > 0 {
+		state.CheckpointSkillHooks = make(map[string][]skills.HookActivation, len(s.checkpointSkillHooks))
+		for name, activations := range s.checkpointSkillHooks {
+			state.CheckpointSkillHooks[name] = skills.CloneHookActivations(activations)
+		}
 	}
 	if len(s.checkpointInvokedSkills) > 0 {
 		state.CheckpointInvokedSkills = make(map[string][]skills.Invocation, len(s.checkpointInvokedSkills))
@@ -766,6 +814,9 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	if state == nil {
 		return fmt.Errorf("cannot restore nil session state")
 	}
+	if err := validateSessionHookGraph(state, 0, make(map[*SessionState]bool)); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -785,6 +836,7 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.StartTime = state.StartTime
 	s.WorkDir = state.WorkDir
 	s.Provider = state.Provider
+	s.title = state.Title
 	s.History = history
 	// Align tokenCounts with history length. Legacy sessions serialised with
 	// an empty TokenCounts slice (saved before v0.78.32) would violate
@@ -807,6 +859,13 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 		// rejected corrupt entries. Do not make an otherwise healthy session
 		// unresumable because one optional Skill snapshot was damaged.
 		logging.Warn("skipped invalid persisted skill invocations", "error", err)
+	}
+	// Validated before publishing any identity/history. Never silently discard
+	// required hooks as if they were optional rendered-context snapshots.
+	_ = s.invocationLedger.RestoreHookActivations(state.SkillHooks)
+	s.checkpointSkillHooks = make(map[string][]skills.HookActivation, len(state.CheckpointSkillHooks))
+	for name, activations := range state.CheckpointSkillHooks {
+		s.checkpointSkillHooks[name] = skills.CloneHookActivations(activations)
 	}
 	preCarryHistory := s.History
 	preCarryCounts := s.tokenCounts
@@ -854,6 +913,8 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	// Restore tool checkpoints — always replace.
 	s.toolCheckpoints = cloneSerializedToolCheckpoints(state.ToolCheckpoints)
 	s.pendingRecoveries = cloneSerializedPendingRecoveries(state.PendingRecoveries)
+	s.windowArchives = cloneHistoryWindows(state.HistoryWindows)
+	s.goalState = goals.Clone(state.Goal)
 
 	return nil
 }
@@ -1054,7 +1115,11 @@ func (s *Session) Fork(name string) *Session {
 		ID:                      generateSessionID() + "-" + name,
 		StartTime:               time.Now(),
 		WorkDir:                 s.WorkDir,
+		title:                   s.title,
+		Provider:                s.Provider,
 		History:                 historyCopy,
+		windowArchives:          cloneHistoryWindows(s.windowArchives),
+		goalState:               goals.Clone(s.goalState),
 		tokenCounts:             tokenCountsCopy,
 		totalTokens:             s.totalTokens,
 		scratchpad:              s.scratchpad,
@@ -1065,7 +1130,13 @@ func (s *Session) Fork(name string) *Session {
 		Checkpoints:             make(map[string]int, len(s.Checkpoints)),
 	}
 	if s.invocationLedger != nil {
-		_ = branch.invocationLedger.Restore(s.invocationLedger.SnapshotNewestFirst())
+		invocations, activations := s.invocationLedger.SnapshotWithHooks()
+		_ = branch.invocationLedger.Restore(invocations)
+		_ = branch.invocationLedger.RestoreHookActivations(activations)
+	}
+	branch.checkpointSkillHooks = make(map[string][]skills.HookActivation, len(s.checkpointSkillHooks))
+	for checkpoint, activations := range s.checkpointSkillHooks {
+		branch.checkpointSkillHooks[checkpoint] = skills.CloneHookActivations(activations)
 	}
 	for checkpoint, invocations := range s.checkpointInvokedSkills {
 		branch.checkpointInvokedSkills[checkpoint] = cloneSkillInvocations(invocations)
@@ -1133,10 +1204,14 @@ func (s *Session) SaveCheckpoint(name string) {
 	if s.checkpointInvokedSkills == nil {
 		s.checkpointInvokedSkills = make(map[string][]skills.Invocation)
 	}
+	if s.checkpointSkillHooks == nil {
+		s.checkpointSkillHooks = make(map[string][]skills.HookActivation)
+	}
 	if s.invocationLedger != nil {
-		s.checkpointInvokedSkills[name] = s.invocationLedger.SnapshotNewestFirst()
+		s.checkpointInvokedSkills[name], s.checkpointSkillHooks[name] = s.invocationLedger.SnapshotWithHooks()
 	} else {
 		s.checkpointInvokedSkills[name] = nil
+		s.checkpointSkillHooks[name] = nil
 	}
 }
 
@@ -1162,6 +1237,7 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 		// untrusted. Reject before touching either history or active Skills.
 		delete(s.Checkpoints, name)
 		delete(s.checkpointInvokedSkills, name)
+		delete(s.checkpointSkillHooks, name)
 		delete(s.checkpointRawIndices, name)
 		return false
 	}
@@ -1177,6 +1253,9 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 		// would falsely carry workflows loaded after the rollback point; fail
 		// closed to an empty active set.
 		s.invocationLedger.Clear()
+	}
+	if s.invocationLedger != nil {
+		_ = s.invocationLedger.RestoreHookActivations(s.checkpointSkillHooks[name])
 	}
 
 	// Truncate the checkpoint's index basis, then remove any orphaned responses.
@@ -1219,6 +1298,7 @@ func (s *Session) RestoreCheckpoint(name string) bool {
 		if cpIdx > limit {
 			delete(s.Checkpoints, cpName)
 			delete(s.checkpointInvokedSkills, cpName)
+			delete(s.checkpointSkillHooks, cpName)
 			delete(s.checkpointRawIndices, cpName)
 		}
 	}

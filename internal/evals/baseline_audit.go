@@ -38,7 +38,15 @@ func AuditBaselineCoverage(manifestPath, inputPath string) (BaselineCoverage, er
 	if err != nil {
 		return BaselineCoverage{}, fmt.Errorf("read baseline results: %w", err)
 	}
+	audit := CheckSuiteCoverage(*manifest, results)
+	audit.InputPath = inputPath
+	return audit, nil
+}
 
+// CheckSuiteCoverage audits the same result snapshot a report was built from.
+// Reading a changing results file twice could otherwise let a passing subset
+// borrow coverage from a different run written between those reads.
+func CheckSuiteCoverage(manifest Manifest, results []Result) BaselineCoverage {
 	expected := make(map[string]struct{}, len(manifest.Scenarios))
 	for _, scenario := range manifest.Scenarios {
 		expected[scenario.ID] = struct{}{}
@@ -58,7 +66,7 @@ func AuditBaselineCoverage(manifestPath, inputPath string) (BaselineCoverage, er
 		countsByVariant["default"] = make(map[string]int)
 	}
 
-	audit := BaselineCoverage{InputPath: inputPath, Complete: true}
+	audit := BaselineCoverage{Complete: true}
 	variants := make([]string, 0, len(countsByVariant))
 	for variant := range countsByVariant {
 		variants = append(variants, variant)
@@ -94,5 +102,5 @@ func AuditBaselineCoverage(manifestPath, inputPath string) (BaselineCoverage, er
 		audit.Complete = audit.Complete && coverage.Complete
 		audit.Variants = append(audit.Variants, coverage)
 	}
-	return audit, nil
+	return audit
 }

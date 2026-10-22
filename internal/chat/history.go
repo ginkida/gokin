@@ -242,12 +242,37 @@ func getSessionsDir() (string, error) {
 	return filepath.Join(homeDir, ".local", "share", "gokin", "sessions"), nil
 }
 
+// RewindStorageDir returns the private checkpoint location beside sessions.
+// Resolving it does not create files, including when persistence is disabled.
+func RewindStorageDir() (string, error) {
+	dir, err := getSessionsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "rewind"), nil
+}
+
 // SaveFull saves a complete session state including all content.
 // Uses atomic write (tmp + rename) to prevent corruption on crash.
 func (m *HistoryManager) SaveFull(session *Session) error {
 	if session == nil {
 		return fmt.Errorf("cannot save a nil session")
 	}
+	return m.saveFullState(session.GetState())
+}
+
+// SaveFullState persists an immutable, already captured snapshot without
+// refreshing LastActive. The caller must retain that session's writer lease.
+func (m *HistoryManager) SaveFullState(state *SessionState) error {
+	if state == nil {
+		return fmt.Errorf("cannot save a nil session snapshot")
+	}
+	return m.saveFullState(state)
+}
+
+// saveFullState also serves a conversation rotation: its two snapshots use
+// fixed activity timestamps so the fresh empty root stays the newest entry.
+func (m *HistoryManager) saveFullState(state *SessionState) error {
 	sessionsDir, err := getSessionsDir()
 	if err != nil {
 		return err
@@ -258,7 +283,6 @@ func (m *HistoryManager) SaveFull(session *Session) error {
 		return err
 	}
 
-	state := session.GetState()
 	if err := ValidateSessionID(state.ID); err != nil {
 		return err
 	}
@@ -452,5 +476,21 @@ func (m *HistoryManager) DeleteSession(sessionID string) error {
 	if err != nil {
 		return err
 	}
-	return removePrivateRegular(filename)
+	if err := removePrivateRegular(filename); err != nil {
+		return err
+	}
+	// Checkpoints have the same lifetime as their owning session. Never follow
+	// a substituted checkpoint root while cleaning up private session data.
+	root := filepath.Join(sessionsDir, "rewind")
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("checkpoint storage is not a real directory")
+	}
+	return os.RemoveAll(filepath.Join(root, sessionID))
 }

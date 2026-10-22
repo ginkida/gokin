@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"os"
@@ -27,10 +28,18 @@ const (
 
 // Model represents the main TUI model.
 type Model struct {
-	input   InputModel
-	output  OutputModel
-	spinner spinner.Model
-	styles  *Styles
+	composerChord          bool
+	claudeKeys             bool
+	quitConfirmKey         tea.KeyType
+	transcript             *transcriptView
+	transcriptTools        []transcriptToolResult
+	transcriptToolSeq      int
+	transcriptToolsDropped bool
+	editorOpen             bool
+	input                  InputModel
+	output                 OutputModel
+	spinner                spinner.Model
+	styles                 *Styles
 
 	state            State
 	width            int
@@ -48,6 +57,8 @@ type Model struct {
 	lastRecapLine    string // dedup latch for the end-of-turn ※ recap (turn_recap.go)
 	workDir          string
 	initialPrompt    string
+	sessionStartWait uint64
+	sessionStartText string
 
 	// Streaming timeout protection
 	streamStartTime time.Time
@@ -62,7 +73,8 @@ type Model struct {
 
 	// Rate limiting / debounce for message submission
 	lastSubmitTime       time.Time
-	minSubmitDelay       time.Duration // Minimum delay between submissions (default: 500ms)
+	lastSubmitDigest     [sha256.Size]byte
+	minSubmitDelay       time.Duration // Duplicate-submit debounce and modal key guard (default: 500ms)
 	modalEnterGuardUntil time.Time     // Short-lived barrier against a surface-closing key auto-repeat leaking into the revealed surface.
 	modalExitGuardKey    string        // Exact Bubble Tea key identity owned by the surface transition; distinct input releases the barrier.
 
@@ -247,8 +259,16 @@ type Model struct {
 	onPlanApprovalWithID       func(reqID string, decision PlanApprovalDecision)
 	onPlanApprovalWithFeedback func(decision PlanApprovalDecision, feedback string) // Extended callback with feedback
 	onPlanFeedbackWithID       func(reqID string, decision PlanApprovalDecision, feedback string)
-	onInterrupt                func()      // Called after the UI handles Esc/Ctrl+C interruption
-	onCancel                   func()      // Cancels current backend processing
+	onInterrupt                func() // Called after the UI handles Esc/Ctrl+C interruption
+	onCancel                   func() // Cancels current backend processing
+	onCancelIdleAsyncHooks     func() bool
+	rewindChoices              []RewindChoice
+	sessionPicker              *sessionPicker
+	rewindSelected             int
+	rewindAction               int
+	rewindChoosingAction       bool
+	rewindSummaryGuidance      string
+	lastRewindEscape           time.Time
 	onPermissionsToggle        func() bool // Called to toggle permissions
 	firstLaunchWelcomePending  bool
 	onFirstLaunchWelcomeSeen   func()
@@ -516,9 +536,32 @@ type ScratchpadMsg string
 // Update handles TUI events.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	if mouse, ok := msg.(tea.MouseMsg); ok && m.state == StateSessionPicker && m.sessionPicker != nil {
+		switch mouse.Button {
+		case tea.MouseButtonWheelUp:
+			m.sessionPicker.move(-3)
+		case tea.MouseButtonWheelDown:
+			m.sessionPicker.move(3)
+		}
+		return m, nil
+	}
+	if mouse, ok := msg.(tea.MouseMsg); ok && m.state == StateTranscript && m.transcript != nil {
+		switch mouse.Button {
+		case tea.MouseButtonWheelUp:
+			m.transcript.offset = max(m.transcript.offset-3, 0)
+		case tea.MouseButtonWheelDown:
+			m.transcript.offset = min(m.transcript.offset+3, max(len(m.transcript.lines)-max(m.height-3, 1), 0))
+		}
+		return m, nil
+	}
 
 	// Handle critical messages FIRST - always process these regardless of welcome screen
 	switch msg := msg.(type) {
+	case KeyboardProfileMsg:
+		m.SetKeyboardProfile(msg.Profile)
+		return m, nil
+	case editorFinishedMsg:
+		return m.applyEditedPrompt(msg)
 	case InitialPromptMsg:
 		return m, m.submitPaletteLine(string(msg))
 	case ScratchpadMsg:
@@ -720,15 +763,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyMsg handles keyboard input.
 func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
+	if msg.Type != tea.KeyEscape {
+		m.lastRewindEscape = time.Time{}
+	}
+	if m.state == StateRewind {
+		return m.handleRewindKeys(msg)
+	}
+	if m.state == StateTranscript {
+		return m.handleTranscriptKeys(msg)
+	}
 	// Modal handlers return before handleGlobalKeys, so clearing only in the
 	// global handler left a quit confirmation armed across Esc/decision keys.
 	// A later single Ctrl+C could then quit even though the presses were not
 	// consecutive. Ctrl+C owned by a modal also cancels an older idle confirm.
-	if msg.Type != tea.KeyCtrlC || m.isModalState() {
+	if !m.quitKeyMatches(msg) || m.isModalState() {
 		m.clearQuitConfirmation()
 	}
 	if m.consumeModalEnterGuard(msg) {
 		return keyConsumed
+	}
+	if m.state == StateSessionPicker {
+		return m.handleSessionPickerKeys(msg)
 	}
 	// The first-launch surface is only real after terminal geometry has been
 	// applied. Dismiss it on the first main-composer action, but continue
@@ -838,7 +893,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) tea.Cmd {
 // welcome completely; consuming its first key there permanently skipped
 // onboarding the user never saw.
 func (m Model) firstLaunchWelcomeReadable() bool {
-	if m.width < lipgloss.Width("Ctrl+P · ?") || m.height <= 0 {
+	if m.width < lipgloss.Width(m.keyLabel("Ctrl+P")+" · ?") || m.height <= 0 {
 		return false
 	}
 	// Suggestions, notices or a multiline draft can make the composer taller
@@ -1824,6 +1879,7 @@ func (m *Model) submitPaletteLine(line string) tea.Cmd {
 	now := time.Now()
 	m.input.AddToHistory(line)
 	m.lastSubmitTime = now
+	m.lastSubmitDigest = sha256.Sum256([]byte(line))
 	m.state = StateProcessing
 	m.streamStartTime = now
 	m.lastActivityTime = now
@@ -1963,13 +2019,7 @@ func (m *Model) acceptModeResultRevision(revision uint64) bool {
 }
 
 func (m *Model) clearOutputWithFeedback() {
-	m.output.Clear()
-	// Expansion entries are a hidden transcript backing store. Leaving them
-	// alive made Ctrl+E resurrect content immediately after "Output cleared".
-	if m.toolOutput != nil {
-		m.toolOutput.Clear()
-	}
-	m.lastToolOutputIndex = -1
+	m.ClearOutput()
 	if m.toastManager != nil {
 		m.toastManager.ShowInfo("Output cleared")
 	}
@@ -2010,7 +2060,7 @@ func (m *Model) activeRequestState() State {
 	case StateBatchProgress:
 		return overlayReturnState(m.progressReturnState)
 	case StateShortcutsOverlay, StateCommandPalette, StateContextObservatory,
-		StateNotificationCenter:
+		StateNotificationCenter, StateRewind, StateTranscript, StateSessionPicker:
 		return overlayReturnState(m.transientOverlayReturnState)
 	case StateSearchResults, StateGitStatus, StateFileBrowser:
 		return overlayReturnState(m.workspaceOverlayReturnState)
@@ -2027,7 +2077,7 @@ func (m *Model) activeRequestState() State {
 func isTransientOverlayState(state State) bool {
 	switch state {
 	case StateShortcutsOverlay, StateCommandPalette, StateContextObservatory,
-		StateNotificationCenter:
+		StateNotificationCenter, StateRewind, StateTranscript, StateSessionPicker:
 		return true
 	}
 	return false
@@ -2065,7 +2115,7 @@ func (m *Model) setAsyncModalReturnState(state State) bool {
 		// resurrect the old Processing/Streaming state.
 		m.progressReturnState = state
 	case StateShortcutsOverlay, StateCommandPalette, StateContextObservatory,
-		StateNotificationCenter:
+		StateNotificationCenter, StateRewind, StateTranscript, StateSessionPicker:
 		m.transientOverlayReturnState = state
 	case StateSearchResults, StateGitStatus, StateFileBrowser:
 		m.workspaceOverlayReturnState = state
@@ -2639,7 +2689,7 @@ func (m Model) quitConfirmationReadable() bool {
 	if m.width <= 0 || m.height <= 0 {
 		return true
 	}
-	return m.width >= lipgloss.Width("Ctrl+C Quit")
+	return m.width >= lipgloss.Width(m.quitKeyLabel()+" Quit")
 }
 
 // interruptActiveRequest is the single cancellation transaction shared by Esc
@@ -2652,6 +2702,10 @@ func (m *Model) interruptActiveRequest() tea.Cmd {
 	}
 	if m.onCancel != nil {
 		m.onCancel()
+	}
+	if m.sessionStartText != "" {
+		m.input.RestoreDraft(m.sessionStartText)
+		m.sessionStartWait, m.sessionStartText = 0, ""
 	}
 	m.clearQuitConfirmation()
 	m.state = StateInput
@@ -2685,6 +2739,13 @@ func (m *Model) interruptActiveRequest() tea.Cmd {
 
 // handleGlobalKeys handles global keyboard shortcuts.
 func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
+	if m.claudeKeys {
+		return m.handleClaudeKeys(msg)
+	}
+	return m.handleLegacyGlobalKeys(msg)
+}
+
+func (m *Model) handleLegacyGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 	// Ctrl+C is local cancellation while reverse-history is open. Let the input
 	// model restore its draft without arming the application quit flow.
 	if msg.Type == tea.KeyCtrlC && m.state == StateInput && m.input.historySearchMode {
@@ -2963,7 +3024,7 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			// that never happened; Ctrl+E (single, re-emits content) is the
 			// key that actually expands an existing card.
 			if m.toolOutput.AllExpanded {
-				m.toastManager.ShowInfo("New tool outputs will render expanded (Ctrl+E expands the last one)")
+				m.toastManager.ShowInfo(m.keyLabel("New tool outputs will render expanded (Ctrl+E expands the last one)"))
 			} else {
 				m.toastManager.ShowInfo("New tool outputs will render collapsed")
 			}
@@ -3080,9 +3141,9 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.quitConfirmTime = now
 		if m.toastManager != nil {
-			message := "Press Ctrl+C again to quit"
+			message := fmt.Sprintf("Press %s again to quit", m.quitKeyLabel())
 			if m.input.Value() != "" {
-				message = "Draft preserved — press Ctrl+C again to quit"
+				message = fmt.Sprintf("Draft preserved — press %s again to quit", m.quitKeyLabel())
 			}
 			m.toastManager.ShowTagged("quit-confirm", ToastWarning, message, quitConfirmationWindow)
 		}
@@ -3102,6 +3163,23 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 			return m.interruptActiveRequest()
 		}
 
+		// A waiting goal still owns an automatic completion wakeup while the
+		// prompt is idle. Esc closes that wakeup before its result can restart
+		// the worker; preserve editing and rewind gestures outside this state.
+		if m.state == StateInput && m.input.Value() == "" && !m.input.ShowingSuggestions() && !m.input.IsHistorySearchMode() &&
+			m.onCancelIdleAsyncHooks != nil && m.onCancelIdleAsyncHooks() {
+			m.lastRewindEscape = time.Time{}
+			return keyConsumed
+		}
+		if m.state == StateInput && m.runtimeStatus.GoalWaiting &&
+			m.input.Value() == "" && !m.input.ShowingSuggestions() && !m.input.IsHistorySearchMode() {
+			if m.onCancel != nil {
+				m.onCancel()
+			}
+			m.runtimeStatus.GoalWaiting = false
+			m.lastRewindEscape = time.Time{}
+			return keyConsumed
+		}
 		// Esc at an IDLE prompt while a background /loop iteration is firing:
 		// the streaming the user sees is the loop's sub-agent — the foreground
 		// cancel has nothing to cancel, so route to onCancel anyway; the app
@@ -3115,6 +3193,19 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 				m.onCancel()
 			}
 			return keyConsumed
+		}
+		if m.state == StateInput && !m.input.ShowingSuggestions() && !m.input.IsHistorySearchMode() {
+			now := time.Now()
+			if !m.lastRewindEscape.IsZero() && now.Sub(m.lastRewindEscape) <= 500*time.Millisecond {
+				m.lastRewindEscape = time.Time{}
+				if m.input.Value() != "" {
+					m.input.AddToHistory(m.input.ExpandedValue())
+					m.input.Reset()
+					return keyConsumed
+				}
+				return m.submitRewindCommand("/rewind")
+			}
+			m.lastRewindEscape = now
 		}
 
 	case tea.KeyEnter:
@@ -3150,20 +3241,21 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 					m.showSubmitUnavailable()
 					return keyConsumed
 				}
-				// Rate limiting: prevent rapid message spam. keyConsumed, not
-				// nil — a swallowed Enter must not fall through to the
-				// textarea and insert a newline at the cursor.
-				if time.Since(m.lastSubmitTime) < m.minSubmitDelay {
+				expanded := m.input.ExpandedValue()
+				// Debounce only identical expanded messages. A different prompt
+				// after a fast response must submit immediately, as must distinct
+				// follow-ups queued while the current request is running.
+				if m.isDuplicateSubmit(expanded) {
 					m.showSubmitCooldown()
 					return keyConsumed
 				}
 				m.lastSubmitTime = time.Now()
+				m.lastSubmitDigest = sha256.Sum256([]byte(expanded))
 
 				// Expand collapsed-paste chips to their real content for the
 				// model BEFORE Reset (which clears the paste store). The echo
 				// stays collapsed (value); history keeps the expanded form so a
 				// recalled paste-message resubmits correctly.
-				expanded := m.input.ExpandedValue()
 				m.input.AddToHistory(expanded)
 				m.input.Reset()
 				m.advanceIdleHint() // queue the next discovery hint for the return to idle
@@ -3202,15 +3294,16 @@ func (m *Model) handleGlobalKeys(msg tea.KeyMsg) tea.Cmd {
 					m.showSubmitUnavailable()
 					return keyConsumed
 				}
-				if time.Since(m.lastSubmitTime) < m.minSubmitDelay {
+				expanded := m.input.ExpandedValue()
+				if m.isDuplicateSubmit(expanded) {
 					m.showSubmitCooldown()
 					return keyConsumed // swallowed Enter must not reach the textarea
 				}
 				m.lastSubmitTime = time.Now()
+				m.lastSubmitDigest = sha256.Sum256([]byte(expanded))
 
 				// Expand collapsed-paste chips before Reset (clears the store);
 				// echo stays collapsed (value), history + model get expanded.
-				expanded := m.input.ExpandedValue()
 				m.input.AddToHistory(expanded)
 				m.input.Reset()
 				m.flushPendingToolLines() // queued echo lands mid-turn — keep order
@@ -3284,6 +3377,11 @@ func (m *Model) showSubmitUnavailable() {
 }
 
 const submitCooldownNotice = "Please wait a moment before sending again · draft preserved"
+
+func (m Model) isDuplicateSubmit(expanded string) bool {
+	return time.Since(m.lastSubmitTime) < m.minSubmitDelay &&
+		sha256.Sum256([]byte(expanded)) == m.lastSubmitDigest
+}
 
 func isSubmitCooldownNotice(notice string) bool {
 	return notice == submitCooldownNotice
@@ -3384,6 +3482,51 @@ func (m *Model) discardPartialResponse() {
 
 // handleMessageTypes handles various message types.
 func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
+	if menu, ok := msg.(OpenSessionPickerMsg); ok {
+		m.openSessionPicker(menu)
+		return nil
+	}
+	if restored, ok := msg.(SessionConversationMsg); ok {
+		m.RestoreSessionConversation(restored)
+		return nil
+	}
+	// Reading the transcript must never implicitly reject a tool or plan.
+	// Blocking decisions take priority over this read-only surface; its draft
+	// and snapshot remain available when the user returns with Ctrl+O.
+	if m.state == StateTranscript || m.state == StateSessionPicker {
+		switch msg.(type) {
+		case PermissionRequestMsg, QuestionRequestMsg, PlanApprovalRequestMsg, DiffPreviewRequestMsg, MultiDiffPreviewRequestMsg:
+			m.sessionPicker = nil
+			m.state = overlayReturnState(m.transientOverlayReturnState)
+			m.transientOverlayReturnState = StateInput
+		}
+	}
+	if menu, ok := msg.(OpenRewindMenuMsg); ok {
+		if !m.isModalState() && len(menu.Choices) > 0 {
+			m.rewindChoices = append([]RewindChoice(nil), menu.Choices...)
+			m.rewindSelected = len(menu.Choices) - 1
+			m.rewindChoosingAction = false
+			m.rewindSummaryGuidance = ""
+			m.rewindAction = 0
+			m.enterTransientOverlay(StateRewind)
+		}
+		return nil
+	}
+	if restored, ok := msg.(RewindPromptMsg); ok {
+		if draft := m.input.ExpandedValue(); draft != "" {
+			m.input.AddToHistory(draft)
+		}
+		m.input.setRecalledValue(restored.Prompt)
+		return nil
+	}
+	if wait, ok := msg.(SessionStartWaitMsg); ok {
+		if wait.Waiting && wait.ID >= m.sessionStartWait {
+			m.sessionStartWait, m.sessionStartText = wait.ID, wait.Prompt
+		} else if !wait.Waiting && wait.ID == m.sessionStartWait {
+			m.sessionStartWait, m.sessionStartText = 0, ""
+		}
+		return nil
+	}
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -3457,6 +3600,19 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 			OutputTokens: outputTokens,
 		}
 		m.baseTokenCount = msg.TotalTokens
+		return nil
+
+	case ResponseRevisedMsg:
+		m.markResponseStarted()
+		m.output.FlushStream()
+		m.output.ResetStream()
+		m.output.EndThinking()
+		m.output.AppendLine("")
+		m.output.AppendLine(lipgloss.NewStyle().Foreground(ColorInfo).Render("Updated result"))
+		m.output.AppendLine("")
+		m.currentResponseBuf.Reset()
+		m.currentResponseBuf.WriteString(msg.Text)
+		m.output.AppendMarkdown(msg.Text)
 		return nil
 
 	case StreamThinkingMsg:
@@ -3583,6 +3739,11 @@ func (m *Model) handleMessageTypes(msg tea.Msg) tea.Cmd {
 		}
 
 		matchIdx := m.findActiveToolCall(msg.Name, msg.Args)
+		info := m.extractToolInfoFromArgs(msg.Name, msg.Args)
+		if matchIdx >= 0 {
+			info = m.activeToolCalls[matchIdx].info
+		}
+		m.recordTranscriptTool(msg, info)
 
 		if matchIdx >= 0 {
 			matched := m.activeToolCalls[matchIdx]
@@ -5500,6 +5661,12 @@ func (m Model) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
+	if m.state == StateTranscript {
+		return m.renderTranscript()
+	}
+	if m.state == StateSessionPicker {
+		return m.renderSessionPicker()
+	}
 
 	var builder strings.Builder
 	const outputMarker = "\x00gokin-main-output\x00"
@@ -5825,6 +5992,10 @@ func (m Model) View() string {
 	}
 
 	// Model selector
+	if m.state == StateRewind {
+		builder.WriteString(m.renderRewindMenu())
+		builder.WriteString("\n")
+	}
 	if m.state == StateModelSelector {
 		builder.WriteString(m.renderModelSelector())
 		builder.WriteString("\n")

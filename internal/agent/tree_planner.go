@@ -1341,59 +1341,25 @@ STEP: decompose | Implement the core JWT authentication logic
 STEP: bash | Run tests to verify the implementation works correctly`, prompt)
 
 	// Call LLM
-	stream, err := tp.client.SendMessage(llmCtx, planningPrompt)
+	stream, err := client.SendAuxiliaryMessage(llmCtx, tp.client, planningPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("LLM call failed: %w", err)
 	}
 
 	var actions []*PlannedAction
-	var fullText strings.Builder
 	var incompleteLine string
-
-streamLoop:
-	for {
-		select {
-		case <-llmCtx.Done():
-			if len(actions) > 0 {
-				return actions, nil // Return partial plan on timeout
-			}
-			return nil, client.ContextErr(llmCtx)
-		case chunk, ok := <-stream.Chunks:
-			if !ok {
-				// A provider may close the channel while cancellation races
-				// with its terminal error chunk. Preserve the typed model-round
-				// cause instead of degrading it to "no valid actions parsed".
-				if err := client.ContextErr(llmCtx); err != nil {
-					if len(actions) > 0 {
-						return actions, nil
-					}
-					return nil, err
-				}
-				break streamLoop
-			}
-			if chunk.Error != nil {
-				return nil, chunk.Error
-			}
-
-			chunkText := chunk.Text
-			fullText.WriteString(chunkText)
-
-			// Simple line-based streaming parser
+	_, streamErr := client.ProcessAuxiliaryStream(llmCtx, tp.client, stream, &client.StreamHandler{
+		OnText: func(chunkText string) {
 			textToParse := incompleteLine + chunkText
 			lines := strings.Split(textToParse, "\n")
-
-			// Keep the last (potentially incomplete) line
 			if !strings.HasSuffix(textToParse, "\n") {
 				incompleteLine = lines[len(lines)-1]
 				lines = lines[:len(lines)-1]
 			} else {
 				incompleteLine = ""
 			}
-
 			for _, line := range lines {
-				parsed := tp.parsePlanResponseValidated(line, prompt, goal)
-				for _, action := range parsed {
-					// Check for duplicates
+				for _, action := range tp.parsePlanResponseValidated(line, prompt, goal) {
 					isDup := false
 					for _, existing := range actions {
 						if existing.Prompt == action.Prompt && existing.AgentType == action.AgentType {
@@ -1407,7 +1373,13 @@ streamLoop:
 					}
 				}
 			}
+		},
+	})
+	if streamErr != nil {
+		if client.ContextErr(llmCtx) != nil && len(actions) > 0 {
+			return actions, nil
 		}
+		return nil, streamErr
 	}
 
 	// Process remaining text

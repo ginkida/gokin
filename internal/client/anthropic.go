@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/security"
 
@@ -58,8 +59,9 @@ type AnthropicConfig struct {
 	HTTPTimeout       time.Duration // HTTP request timeout
 	StreamIdleTimeout time.Duration // Max pause between SSE chunks (default: 30s)
 	// Extended Thinking
-	EnableThinking bool  // Enable extended thinking mode
-	ThinkingBudget int32 // Max tokens for thinking (0 = disabled)
+	EnableThinking  bool   // Enable extended thinking mode
+	ThinkingBudget  int32  // Max tokens for thinking (0 = disabled on optional-reasoning models)
+	ReasoningEffort string // GLM-5.3: auto/low/high/max; explicit effort overrides adaptive budgets
 }
 
 // AnthropicClient implements Client for Anthropic-compatible providers.
@@ -165,11 +167,17 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 	turnContext := c.turnContext
 	enableThinking := c.config.EnableThinking
 	thinkingBudget := c.config.ThinkingBudget
+	reasoningEffort := c.config.ReasoningEffort
 	model := c.config.Model
 	maxTokens := c.config.MaxTokens
 	temperature := c.config.Temperature
 	tools := c.tools
 	c.mu.RUnlock()
+	var effortErr error
+	reasoningEffort, effortErr = c.requestReasoningEffort(ctx, model, reasoningEffort)
+	if effortErr != nil {
+		return nil, effortErr
+	}
 
 	var messages []map[string]any
 	var systemPrompt string
@@ -196,37 +204,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		requestBody["system"] = systemPrompt
 	}
 
-	// Extended Thinking support
-	if enableThinking && thinkingBudget > 0 {
-		thinking := map[string]any{
-			"type":          "enabled",
-			"budget_tokens": clampThinkingBudgetBelowMax(thinkingBudget, maxTokens),
-		}
-		if c.isProvider("glm") {
-			thinking["clear_thinking"] = false
-		}
-		requestBody["thinking"] = thinking
-		// Extended thinking requires temperature=1 (Anthropic requirement)
-		requestBody["temperature"] = 1.0
-	} else {
-		// Kimi models default to reasoning even when the field is omitted.
-		// `/thinking off` and an adaptive easy turn therefore need an explicit
-		// disable marker; omission would make the UI/config lie about behavior.
-		// EXCEPTION — K3 (v0.100.101 field report): K3 is an ALWAYS-ON
-		// reasoning flagship (reasoning_effort supports only "max"; reasoning
-		// cannot be disabled server-side). Sending {"type":"disabled"} put it
-		// in a degraded mode with NO thinking blocks where it re-emitted its
-		// full narration VERBATIM before every tool call and looped — while
-		// GLM handled the same adaptive-off turns fine. For K3 the field is
-		// omitted so server-side reasoning stays on regardless of the local
-		// thinking flag.
-		if c.isProvider("kimi") && !kimiAlwaysOnReasoningModel(model) {
-			requestBody["thinking"] = map[string]any{"type": "disabled"}
-		}
-		if temperature > 0 {
-			requestBody["temperature"] = temperature
-		}
-	}
+	c.applyReasoningSettings(requestBody, model, enableThinking, thinkingBudget, reasoningEffort, maxTokens, temperature)
 
 	if len(tools) > 0 {
 		// Convert tools to Anthropic format (uses snapshot)
@@ -260,11 +238,17 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 	turnContext := c.turnContext
 	enableThinking := c.config.EnableThinking
 	thinkingBudget := c.config.ThinkingBudget
+	reasoningEffort := c.config.ReasoningEffort
 	model := c.config.Model
 	maxTokens := c.config.MaxTokens
 	temperature := c.config.Temperature
 	tools := c.tools
 	c.mu.RUnlock()
+	var effortErr error
+	reasoningEffort, effortErr = c.requestReasoningEffort(ctx, model, reasoningEffort)
+	if effortErr != nil {
+		return nil, effortErr
+	}
 
 	var messages []map[string]any
 	var systemPrompt string
@@ -288,26 +272,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 		requestBody["system"] = systemPrompt
 	}
 
-	// Extended Thinking support
-	if enableThinking && thinkingBudget > 0 {
-		thinking := map[string]any{
-			"type":          "enabled",
-			"budget_tokens": clampThinkingBudgetBelowMax(thinkingBudget, maxTokens),
-		}
-		if c.isProvider("glm") {
-			thinking["clear_thinking"] = false
-		}
-		requestBody["thinking"] = thinking
-		requestBody["temperature"] = 1.0
-	} else {
-		// K3 exception mirrors SendMessageWithHistory — see the comment there.
-		if c.isProvider("kimi") && !kimiAlwaysOnReasoningModel(model) {
-			requestBody["thinking"] = map[string]any{"type": "disabled"}
-		}
-		if temperature > 0 {
-			requestBody["temperature"] = temperature
-		}
-	}
+	c.applyReasoningSettings(requestBody, model, enableThinking, thinkingBudget, reasoningEffort, maxTokens, temperature)
 
 	if len(tools) > 0 {
 		requestBody["tools"] = c.convertToolsToAnthropicFrom(tools)
@@ -496,7 +461,7 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]any) {
 func (c *AnthropicClient) SetThinkingBudget(budget int32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.config.EnableThinking = budget > 0
+	c.config.EnableThinking = budget > 0 || (c.isProvider("glm") && config.GLMAlwaysOnReasoning(c.config.Model))
 	c.config.ThinkingBudget = budget
 }
 
@@ -992,7 +957,7 @@ func classifyGLMErrorCode(code, message string) (retryable bool, keyword, descri
 	case "1005":
 		return false, "", "GLM account requires two-factor authentication"
 	case "1113":
-		return false, "", "GLM balance or resource package is insufficient — top up or switch provider with /provider"
+		return false, "", "GLM rejected the request (1113: insufficient balance or resource package) — verify the Coding Plan key, subscription, API endpoint and supported client, or switch provider with /provider"
 	case "1210":
 		return false, "", "GLM request has an invalid API parameter"
 	case "1211":
@@ -1527,7 +1492,8 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	modelSnap := c.config.Model
 	c.mu.RUnlock()
 	silentThinkingSnap := enableThinkingSnap ||
-		(strings.EqualFold(providerSnap, "kimi") && kimiAlwaysOnReasoningModel(modelSnap))
+		(strings.EqualFold(providerSnap, "kimi") && kimiAlwaysOnReasoningModel(modelSnap)) ||
+		(c.isProvider("glm") && config.GLMAlwaysOnReasoning(modelSnap))
 
 	// Process stream in goroutine
 	go func() {
@@ -2144,15 +2110,7 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 	case "message_start":
 		if msg, ok := event["message"].(map[string]any); ok {
 			if usage, ok := msg["usage"].(map[string]any); ok {
-				if v, ok := usage["input_tokens"].(float64); ok && v > 0 {
-					chunk.InputTokens = int(v)
-				}
-				if v, ok := usage["cache_creation_input_tokens"].(float64); ok && v > 0 {
-					chunk.CacheCreationInputTokens = int(v)
-				}
-				if v, ok := usage["cache_read_input_tokens"].(float64); ok && v > 0 {
-					chunk.CacheReadInputTokens = int(v)
-				}
+				applyAnthropicUsage(&chunk, usage)
 			}
 		}
 
@@ -2176,11 +2134,10 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 				}
 			}
 		}
-		// Parse usage from message_delta (output tokens)
+		// Some compatible gateways publish zero usage at message_start and
+		// the complete input/cache/output totals only in the terminal delta.
 		if usage, ok := event["usage"].(map[string]any); ok {
-			if v, ok := usage["output_tokens"].(float64); ok && v > 0 {
-				chunk.OutputTokens = int(v)
-			}
+			applyAnthropicUsage(&chunk, usage)
 		}
 		// message_delta is terminal in the normal protocol and the outer stream
 		// loop returns immediately when Done is set, so message_stop cannot be
@@ -2212,6 +2169,21 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 	}
 
 	return chunk
+}
+
+func applyAnthropicUsage(chunk *ResponseChunk, usage map[string]any) {
+	if value, ok := usage["input_tokens"].(float64); ok && value > 0 {
+		chunk.InputTokens = int(value)
+	}
+	if value, ok := usage["output_tokens"].(float64); ok && value > 0 {
+		chunk.OutputTokens = int(value)
+	}
+	if value, ok := usage["cache_creation_input_tokens"].(float64); ok && value > 0 {
+		chunk.CacheCreationInputTokens = int(value)
+	}
+	if value, ok := usage["cache_read_input_tokens"].(float64); ok && value > 0 {
+		chunk.CacheReadInputTokens = int(value)
+	}
 }
 
 // convertHistoryToMessagesWithSystem converts Gemini history to Anthropic messages format,
@@ -2435,30 +2407,11 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 		}
 		logging.Debug("adding tool result", "tool_use_id", toolUseID, "name", result.Name)
 
-		var contentStr string
-		resp := result.Response
-		if resp != nil {
-			if content, ok := resp["content"].(string); ok {
-				contentStr = content
-			} else if data, ok := resp["data"]; ok {
-				if jsonBytes, err := json.Marshal(data); err == nil {
-					contentStr = string(jsonBytes)
-				}
-			}
-			if errStr, ok := resp["error"].(string); ok && errStr != "" {
-				contentStr = "Error: " + errStr
-			}
-		}
-
-		if contentStr == "" {
-			contentStr = "Operation completed"
-		}
-
 		resultContents = append(resultContents, map[string]any{
 			"type":        "tool_result",
 			"tool_use_id": toolUseID,
 			"id":          toolUseID, // Z.AI compatibility
-			"content":     contentStr,
+			"content":     anthropicToolResultContent(result.Response),
 		})
 	}
 
@@ -2477,6 +2430,33 @@ func (c *AnthropicClient) convertHistoryWithResultsAndSystem(history []*genai.Co
 func (c *AnthropicClient) convertHistoryWithResults(history []*genai.Content, results []*genai.FunctionResponse) []map[string]any {
 	messages, _ := c.convertHistoryWithResultsAndSystem(history, results)
 	return messages
+}
+
+// Native tools use content/data/error envelopes, but FunctionResponse also
+// permits arbitrary structured output. Preserve that output rather than
+// acknowledging an operation whose actual result the model never received.
+func anthropicToolResultContent(response map[string]any) string {
+	if message, ok := response["error"].(string); ok && message != "" {
+		return "Error: " + message
+	}
+	if content, ok := response["content"].(string); ok && content != "" {
+		return content
+	}
+	if data, ok := response["data"]; ok {
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return "Error: tool result could not be serialized as JSON"
+		}
+		return string(encoded)
+	}
+	if len(response) > 0 {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return "Error: tool result could not be serialized as JSON"
+		}
+		return string(encoded)
+	}
+	return "Operation completed"
 }
 
 // buildUserMessage builds a user message from parts.
@@ -2538,31 +2518,12 @@ func (c *AnthropicClient) buildUserMessage(parts []*genai.Part) map[string]any {
 					"fallback_tool_use_id", toolUseID)
 			}
 
-			// Extract content string from the response map
-			var contentStr string
-			resp := part.FunctionResponse.Response
-			if resp != nil {
-				if c, ok := resp["content"].(string); ok {
-					contentStr = c
-				} else if data, ok := resp["data"]; ok {
-					if jsonBytes, err := json.Marshal(data); err == nil {
-						contentStr = string(jsonBytes)
-					}
-				}
-				if errStr, ok := resp["error"].(string); ok && errStr != "" {
-					contentStr = "Error: " + errStr
-				}
-			}
-			if contentStr == "" {
-				contentStr = "Operation completed"
-			}
-
 			logging.Debug("buildUserMessage tool_result", "tool_use_id", toolUseID, "name", part.FunctionResponse.Name)
 			content = append(content, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": toolUseID,
 				"id":          toolUseID,
-				"content":     contentStr,
+				"content":     anthropicToolResultContent(part.FunctionResponse.Response),
 			})
 			lastToolResultIdx = len(content) - 1
 			toolResultOrdinal++

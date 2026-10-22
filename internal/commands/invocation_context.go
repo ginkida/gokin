@@ -8,6 +8,11 @@ import (
 
 type rawInvocationContextKey struct{}
 
+func RawInvocation(ctx context.Context) string {
+	value, _ := ctx.Value(rawInvocationContextKey{}).(string)
+	return value
+}
+
 // WithRawInvocation preserves the accepted slash-command text for commands
 // whose semantics depend on exact quoting. Most commands should continue to
 // use the normalized []string passed to Execute.

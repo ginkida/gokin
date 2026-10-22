@@ -28,6 +28,7 @@ func DefaultRules() *Rules {
 			"review_changes":       LevelAllow,
 			"go_to_definition":     LevelAllow,
 			"find_references":      LevelAllow,
+			"lsp":                  LevelAllow,
 			"history_search":       LevelAllow,
 			"tools_list":           LevelAllow,
 			"skill":                LevelAllow,

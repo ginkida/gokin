@@ -61,24 +61,21 @@ func observeProviderStream(ctx context.Context, provider string, stream *Streami
 					len(chunk.FunctionCalls) > 0 || len(chunk.Parts) > 0 {
 					meaningful = true
 				}
-				if !emitObservedChunk(ctx, out, chunk) {
-					return
-				}
-
+				// Publish terminal completion after health bookkeeping. Callers may
+				// start the next request or release their workspace on Done; no
+				// persistence should still race that lifecycle transition.
 				if chunk.Error != nil {
 					if ContextErr(ctx) == nil && shouldFallbackToNextProvider(chunk.Error) {
 						recordProviderFailure(provider, IsRetryableError(chunk.Error))
 					}
-					return
-				}
-				if chunk.Done {
-					if ContextErr(ctx) == nil {
-						if meaningful {
-							recordProviderSuccess(provider)
-						} else {
-							recordProviderFailure(provider, true)
-						}
+				} else if chunk.Done && ContextErr(ctx) == nil {
+					if meaningful {
+						recordProviderSuccess(provider)
+					} else {
+						recordProviderFailure(provider, true)
 					}
+				}
+				if !emitObservedChunk(ctx, out, chunk) || chunk.Error != nil || chunk.Done {
 					return
 				}
 			}

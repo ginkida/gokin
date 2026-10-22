@@ -191,6 +191,8 @@ func (t *DeleteTool) Execute(ctx context.Context, args map[string]any) (ToolResu
 		change := undo.NewFileChange(path, "delete", oldContent, nil, false)
 		change.Mode = info.Mode().Perm()
 		t.undoManager.Record(*change)
+	} else if t.undoManager != nil {
+		t.undoManager.MarkUntracked(path, "deleted contents were not snapshotted")
 	}
 
 	if info.IsDir() {

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"gokin/internal/tools"
+
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -158,4 +160,40 @@ func (s *StructuredOutputSchema) correctionPrompt(validationErr error) string {
 		"output contract. This is a format-only correction: do not call tools or redo " +
 		"the completed work. Return exactly one JSON value matching the system-provided " +
 		"schema, with no Markdown fence or commentary.\n\nValidation error: " + detail
+}
+
+func (a *App) correctHeadlessStructuredOutput(ctx context.Context, schema *StructuredOutputSchema, presenter headlessOutputPresenter, result *HeadlessResult, memoryQuery string, attempts *int) error {
+	if schema == nil {
+		return nil
+	}
+	for {
+		if deferred := deferredGoalTurn(ctx); deferred != nil && deferred.observation != nil {
+			a.sessionLeaseMu.Lock()
+			current := a.goalSourceMatchesLocked(&deferred.observation.source)
+			a.sessionLeaseMu.Unlock()
+			if !current {
+				err := fmt.Errorf("%w; stale structured-output continuation was discarded", errRecoveryConversationChanged)
+				a.recordHeadlessTerminalOutcome("conversation_changed", err.Error())
+				return err
+			}
+		}
+		value, err := schema.Validate(result.Result)
+		if err == nil {
+			result.StructuredOutput = &value
+			return nil
+		}
+		if *attempts >= maxStructuredOutputRetries {
+			return err
+		}
+		*attempts++
+		correctionCtx := tools.ContextWithToolCapabilityCeiling(ctx, []string{})
+		correctionCtx = withStructuredOutputCorrection(correctionCtx)
+		a.structuredCorrectionActive.Store(true)
+		a.processMessageWithMemoryQuery(correctionCtx, schema.correctionPrompt(err), memoryQuery)
+		a.structuredCorrectionActive.Store(false)
+		result.Result = selectHeadlessResult(presenter.Result(), a.headlessFinalResultSnapshot())
+		if !a.headlessPipelineHealthy(ctx) {
+			return err
+		}
+	}
 }

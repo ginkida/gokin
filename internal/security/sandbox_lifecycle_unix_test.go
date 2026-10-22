@@ -4,12 +4,70 @@ package security
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSandboxNormalExitReapsDescendantsHoldingOutputPipes(t *testing.T) {
+	dir := t.TempDir()
+	sc := newUnsandboxedLifecycleCommand(t, context.Background(), dir,
+		"(trap '' TERM; sleep 30) & printf complete; printf diagnostic >&2")
+	result := sc.Run(time.Second)
+	if result.Error != nil || result.ExitCode != 0 {
+		t.Fatalf("successful shell waited for its background child's pipes: %+v", result)
+	}
+	if string(result.Stdout) != "complete" || string(result.Stderr) != "diagnostic" {
+		t.Fatalf("lost output during descendant cleanup: stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestSandboxRunDrainsOutputAfterLeaderExit(t *testing.T) {
+	// Each stream exceeds a pipe buffer. Wait must reap the leader without
+	// closing the read ends or discarding the tail of either stream.
+	sc := newUnsandboxedLifecycleCommand(t, context.Background(), t.TempDir(),
+		"for ((i=0; i<8192; i++)); do printf 'stdout-0123456789'; printf 'stderr-0123456789' >&2; done")
+	result := sc.Run(5 * time.Second)
+	if result.Error != nil || result.ExitCode != 0 {
+		t.Fatalf("Run: %+v", result)
+	}
+	if string(result.Stdout) != strings.Repeat("stdout-0123456789", 8192) ||
+		string(result.Stderr) != strings.Repeat("stderr-0123456789", 8192) {
+		t.Fatalf("output truncated: stdout=%d stderr=%d", len(result.Stdout), len(result.Stderr))
+	}
+}
+
+func TestSandboxCancellationPreservesCompletedOutput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	sc := newUnsandboxedLifecycleCommand(t, ctx, dir,
+		"printf complete; printf diagnostic >&2; printf ready > "+sandboxShellQuote(ready)+"; sleep 30")
+	go func() {
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	result := sc.Run(5 * time.Second)
+	if !errors.Is(result.Error, context.Canceled) {
+		t.Fatalf("cancellation reason lost: %+v", result)
+	}
+	if string(result.Stdout) != "complete" || string(result.Stderr) != "diagnostic" {
+		t.Fatalf("cancellation lost output: stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
 
 func TestSandboxRunZeroTimeoutWaitsWithoutLimit(t *testing.T) {
 	dir := t.TempDir()

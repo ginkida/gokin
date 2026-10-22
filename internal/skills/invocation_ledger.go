@@ -39,9 +39,11 @@ type Invocation struct {
 // InvocationLedger records the latest distinct rendered skill payload per
 // invocation name. Its zero value is ready for use.
 type InvocationLedger struct {
-	mu           sync.RWMutex
-	latest       map[string]Invocation
-	nextSequence uint64
+	mu              sync.RWMutex
+	latest          map[string]Invocation
+	nextSequence    uint64
+	hookActivations map[string]HookActivation
+	hookEpoch       uint64
 }
 
 // NewInvocationLedger returns an empty invocation ledger.
@@ -66,9 +68,13 @@ func (l *InvocationLedger) Record(name, rendered, source, path string) (Invocati
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.ensureInitializedLocked()
+	invocation, changed := l.recordInvocationLocked(normalized, rendered, source, path, hash)
+	return invocation, changed, nil
+}
 
+func (l *InvocationLedger) recordInvocationLocked(normalized, rendered, source, path, hash string) (Invocation, bool) {
 	if existing, ok := l.latest[normalized]; ok && existing.RenderHash == hash {
-		return cloneInvocation(existing), false, nil
+		return cloneInvocation(existing), false
 	}
 	if _, exists := l.latest[normalized]; !exists && len(l.latest) >= MaxSkillCount {
 		l.evictOldestLocked()
@@ -83,7 +89,7 @@ func (l *InvocationLedger) Record(name, rendered, source, path string) (Invocati
 		Sequence:   sequence,
 	}
 	l.latest[normalized] = invocation
-	return cloneInvocation(invocation), true, nil
+	return cloneInvocation(invocation), true
 }
 
 // SnapshotNewestFirst returns a deep copy sorted by descending sequence. Name
@@ -182,12 +188,14 @@ func (l *InvocationLedger) Clear() {
 	l.mu.Lock()
 	l.latest = make(map[string]Invocation)
 	l.nextSequence = 1
+	l.hookActivations = nil
+	l.hookEpoch++
 	l.mu.Unlock()
 }
 
 func validateInvocationFields(name, rendered, source, path string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(name))
-	if !validSkillName.MatchString(normalized) {
+	if !ValidInvocationName(normalized) {
 		return "", fmt.Errorf("invalid invocation name %q", name)
 	}
 	if strings.TrimSpace(rendered) == "" {

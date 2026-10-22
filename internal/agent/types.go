@@ -78,6 +78,7 @@ func (t AgentType) AllowedTools() []string {
 	case AgentTypeExplore:
 		return []string{
 			"read", "glob", "grep", "tree", "list_dir",
+			"lsp",
 			"tools_list", "skill", "request_tool", "ask_agent",
 		}
 	case AgentTypeBash:
@@ -91,6 +92,7 @@ func (t AgentType) AllowedTools() []string {
 		// Read-only exploration + planning tools
 		return []string{
 			"read", "glob", "grep", "tree", "list_dir", "diff",
+			"lsp",
 			"todo", "web_fetch", "web_search", "ask_user", "env",
 			"tools_list", "skill", "request_tool", "ask_agent",
 			// Planning tools

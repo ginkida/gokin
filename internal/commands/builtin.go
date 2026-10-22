@@ -18,6 +18,7 @@ import (
 	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
 	"gokin/internal/repl"
+	"gokin/internal/ui"
 )
 
 const (
@@ -108,11 +109,11 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		commands []string
 	}{
 		{"Getting Started", []string{"help", "quickstart", "shortcuts"}},
-		{"Session", []string{"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "tasks", "audit", "cost", "instructions", "memory", "loop", "undo", "redo"}},
+		{"Session", []string{"model", "thinking", "effort", "clear", "compact", "save", "resume", "sessions", "stats", "tasks", "audit", "cost", "instructions", "memory", "goal", "loop", "undo", "redo", "rewind"}},
 		{"Auth & Setup", []string{"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "settings", "update", "restart", "whats-new", "changelog"}},
 		{"Git", []string{"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"}},
 		{"Planning", []string{"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"}},
-		{"Tools", []string{"browse", "open", "pwd", "mcp", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "timeout", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
+		{"Tools", []string{"browse", "open", "pwd", "mcp", "lsp", "plugin", "reload-plugins", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "timeout", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"}},
 	}
 
@@ -182,12 +183,20 @@ func (c *HelpCommand) Execute(ctx context.Context, args []string, app AppInterfa
 		{"Esc", "Cancel current operation"},
 		{"?", "Show all keyboard shortcuts (filterable; empty input)"},
 	}
-	for _, s := range shortcuts {
-		fmt.Fprintf(&sb, "  %s%-16s%s %s\n", colorGreen, s.key, colorReset, s.desc)
+	if claudeKeyboard(app) {
+		renderClaudeKeyboardReference(&sb, true)
+	} else {
+		for _, s := range shortcuts {
+			fmt.Fprintf(&sb, "  %s%-16s%s %s\n", colorGreen, s.key, colorReset, s.desc)
+		}
 	}
 
-	fmt.Fprintf(&sb, "\nTip: Use %sCtrl+P%s for the full command palette, or %s?%s for the filterable shortcuts overlay.\n",
-		colorGreen, colorReset, colorGreen, colorReset)
+	paletteKey := "Ctrl+P"
+	if claudeKeyboard(app) {
+		paletteKey = "F1"
+	}
+	fmt.Fprintf(&sb, "\nTip: Use %s%s%s for the full command palette, or %s?%s for the filterable shortcuts overlay.\n",
+		colorGreen, paletteKey, colorReset, colorGreen, colorReset)
 	fmt.Fprintf(&sb, "\n%sSession modes:%s Normal asks before write/edit/bash; Plan explores read-only and proposes a plan; YOLO disables prompts and sandbox. The active mode remains visible in the status bar.\n",
 		colorYellow, colorReset)
 
@@ -254,8 +263,14 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 		}
 	}
 
-	if err := clearConversationChecked(app); err != nil {
-		return "", fmt.Errorf("clear conversation safely: %w", err)
+	var clearErr error
+	if runtime, ok := app.(interface{ ClearConversationForRewind(context.Context) error }); ok {
+		clearErr = runtime.ClearConversationForRewind(ctx)
+	} else {
+		clearErr = clearConversationChecked(app)
+	}
+	if clearErr != nil {
+		return "", fmt.Errorf("clear conversation safely: %w", clearErr)
 	}
 	app.RefreshTokenCount()
 	// Also clear todos
@@ -268,6 +283,9 @@ func (c *ClearCommand) Execute(ctx context.Context, args []string, app AppInterf
 		msg += " Active plan saved for /resume-plan."
 	}
 	msg += planSaveWarning
+	if previous, ok := app.(interface{ PreviousClearSessionID() string }); ok && previous.PreviousClearSessionID() != "" {
+		msg += " Previous conversation is available in /rewind."
+	}
 	return msg, nil
 }
 
@@ -561,7 +579,7 @@ type sessionSwitcher interface {
 
 func (c *ResumeCommand) Name() string        { return "resume" }
 func (c *ResumeCommand) Description() string { return "Resume a saved session" }
-func (c *ResumeCommand) Usage() string       { return "/resume <session_id> [--force]" }
+func (c *ResumeCommand) Usage() string       { return "/resume [session_id] [--force]" }
 func (c *ResumeCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{
 		Category: CategorySession,
@@ -573,6 +591,9 @@ func (c *ResumeCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	sessionID := ""
 	force := false
 	if len(args) > 0 {
@@ -586,6 +607,15 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 		}
 	}
 
+	if sessionID != "" && validSessionID(sessionID) {
+		if previous, ok := app.(interface {
+			PreviousClearSessionID() string
+			ResumePreviousClearSession(context.Context, string, bool) (string, error)
+		}); ok && previous.PreviousClearSessionID() == sessionID {
+			return previous.ResumePreviousClearSession(ctx, sessionID, force)
+		}
+	}
+
 	hm, err := app.GetHistoryManager()
 	if err != nil {
 		return fmt.Sprintf("Failed to get history manager: %v", err), nil
@@ -594,17 +624,29 @@ func (c *ResumeCommand) Execute(ctx context.Context, args []string, app AppInter
 	// No args: show recent sessions for this project to pick from
 	if len(args) == 0 {
 		sessions, problems, err := hm.ListSessionsWithProblems()
-		if err != nil || len(sessions) == 0 {
+		if err != nil {
+			return fmt.Sprintf("Failed to list sessions: %v", err), nil
+		}
+		if len(sessions) == 0 {
 			if msg := unreadableSessionsNote(problems); msg != "" {
 				return msg, nil
 			}
 			return "No saved sessions. Use /save to save the current session first.", nil
+		}
+		note := strings.TrimPrefix(unreadableSessionsNote(problems), "No readable sessions, but ")
+		if picker, ok := app.(interface {
+			ShowSessionPicker(context.Context, []chat.SessionInfo, string) bool
+		}); ok && picker.ShowSessionPicker(ctx, sessions, note) {
+			return "", nil
 		}
 
 		workDir := app.GetWorkDir()
 		output, shown := formatRecentSessions(sessions, workDir)
 		if shown == 0 {
 			return "No sessions for current project. Use /sessions --all to see all.", nil
+		}
+		if note != "" {
+			output += "\n\n" + note
 		}
 		return output, nil
 	}
@@ -1332,6 +1374,12 @@ func (c *ShortcutsCommand) GetMetadata() CommandMetadata {
 }
 
 func (c *ShortcutsCommand) Execute(ctx context.Context, args []string, app AppInterface) (string, error) {
+	if claudeKeyboard(app) {
+		var sb strings.Builder
+		sb.WriteString("Keyboard Shortcuts (Claude-style)\n\n")
+		renderClaudeKeyboardReference(&sb, false)
+		return sb.String(), nil
+	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "\n%sKeyboard Shortcuts%s  (also: press ? in empty input for the filterable overlay)\n\n", colorCyan, colorReset)
 
@@ -1741,9 +1789,9 @@ func getDataDir() (string, error) {
 func getCommandExample(name string) string {
 	examples := map[string]string{
 		"commit":   "  /commit              — AI generates commit message from staged changes\n  /commit fix typo     — commit with custom message",
-		"model":    "  /model glm-5.2               — switch to GLM 5.2 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model k3                    — switch to Kimi K3 (flagship, 1M ctx)\n  /model kimi-for-coding       — switch to Kimi K2.7\n  /model MiniMax-M2.7          — switch to MiniMax",
+		"model":    "  /model glm-5.3               — switch to GLM 5.3 (Z.AI Coding Plan default)\n  /model deepseek-v4-pro       — switch to DeepSeek V4 Pro\n  /model k3                    — switch to Kimi K3 (flagship, 1M ctx)\n  /model kimi-for-coding       — switch to Kimi K2.7\n  /model MiniMax-M2.7          — switch to MiniMax",
 		"plan":     "  /plan                — toggle planning mode on/off\n  Then type a complex task and it will be broken into steps",
-		"resume":   "  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
+		"resume":   "  /resume              — search saved sessions for this project\n  /resume abc123       — restore session abc123\n  /resume abc123 --force — restore even from different project",
 		"save":     "  /save                — save current session for later /resume\n  /save mywork         — save with custom name (refuses to overwrite by default)\n  /save mywork --force — overwrite an existing 'mywork' checkpoint",
 		"compact":  "  /compact             — summarize old messages to free context space",
 		"clear":    "  /clear               — start fresh (saves active plan for /resume-plan)\n  /clear --force       — clear even if active-plan recovery cannot be saved",
@@ -1776,7 +1824,8 @@ func getCommandExample(name string) string {
 		"memory":      "  /memory               — show all stored memories\n  Project memories live in .gokin/MEMORY.md",
 		"sandbox":     "  /sandbox on           — gate bash on permission prompts\n  /sandbox off          — disable bash safety prompts (yolo)",
 		"permissions": "  /permissions on       — prompt before write/edit/bash\n  /permissions off      — auto-approve (yolo mode)",
-		"thinking":    "  /thinking auto        — reason only when the task is hard\n  /thinking on          — force reasoning every turn\n  /thinking off         — never reason\n  /thinking 16384       — force reasoning with a 16K-token budget",
+		"effort":      "  /effort max           — deep reasoning for GLM-5.3 coding\n  /effort low           — lightweight reasoning\n  /effort auto          — choose depth per task",
+		"thinking":    "  /thinking auto        — reason only when the task is hard\n  /thinking on          — force reasoning every turn\n  /thinking off         — disable optional reasoning (GLM-5.3: low effort)\n  /thinking 16384       — force reasoning with a 16K-token budget",
 		"timeout":     "  /timeout             — show the effective model round cap\n  /timeout 20m         — apply a 20-minute cap live\n  /timeout default     — restore the recommended default",
 		"open":        "  /open main.go         — open file in $EDITOR (or vi)\n  /open internal/app/app.go",
 		"resume-plan": "  /resume-plan          — restore the plan saved by the last /clear\n  /resume-plan list     — show which plans can be resumed\n  /resume-plan abc123   — resume one plan by ID",
@@ -1836,7 +1885,8 @@ func getRelatedCommands(name string) string {
 		// v0.78.26 — fill out see-also for the rest of user-facing commands.
 		"mcp":               "/permissions, /status, /stats",
 		"memory":            "/clear, /compact, /memory-governance",
-		"thinking":          "/model, /provider, /timeout",
+		"thinking":          "/effort, /model, /provider, /timeout",
+		"effort":            "/thinking, /model",
 		"timeout":           "/doctor, /config, /thinking",
 		"logout":            "/login, /provider, /status",
 		"open":              "/grep, /blame, /diff, /browse",
@@ -1925,3 +1975,25 @@ func unreadableSessionsNote(problems []error) string {
 // maxReportedUnreadableSessions keeps a directory of damaged files from
 // filling the screen; the count above the list stays exact.
 const maxReportedUnreadableSessions = 5
+
+func claudeKeyboard(app AppInterface) bool {
+	if app == nil {
+		return false
+	}
+	cfg := app.GetConfig()
+	return cfg != nil && !strings.EqualFold(strings.TrimSpace(cfg.UI.Keybindings), "gokin")
+}
+func renderClaudeKeyboardReference(sb *strings.Builder, compact bool) {
+	for _, category := range ui.ShortcutsForProfile("claude") {
+		if compact && category.Name != "Input" && category.Name != "Editing & drafts" {
+			continue
+		}
+		fmt.Fprintf(sb, "%s:\n", category.Name)
+		for _, shortcut := range category.Shortcuts {
+			fmt.Fprintf(sb, "  %-18s %s\n", strings.Join(shortcut.Keys, "+"), shortcut.Description)
+		}
+	}
+	if compact {
+		sb.WriteString("  F1 / Alt+X         Command palette\n  F2                 Settings\n  Alt+P              Model selector\n")
+	}
+}

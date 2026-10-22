@@ -42,6 +42,7 @@ type DiffPreviewModel struct {
 	newContent        string
 	displayOldContent string
 	displayNewContent string
+	lineDiff          []diffLine
 	decision          DiffDecision
 	toolName          string
 	isNewFile         bool
@@ -196,14 +197,13 @@ func (m *DiffPreviewModel) MarkResponseUnavailable() {
 
 // diffLine represents a single line in the diff with its type.
 type diffLine struct {
-	Type diffmatchpatch.Operation
-	Text string
+	Type      diffmatchpatch.Operation
+	Text      string
+	NoNewline bool
 }
 
 // generateDiff creates a unified diff between old and new content.
 func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
-	dmp := diffmatchpatch.New()
-
 	var result strings.Builder
 
 	// Header
@@ -211,21 +211,8 @@ func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
 	fmt.Fprintf(&result, "--- %s\n", displayPath)
 	fmt.Fprintf(&result, "+++ %s\n", displayPath)
 
-	// Generate line-based diff
-	diffs := dmp.DiffMain(oldContent, newContent, true)
-	diffs = dmp.DiffCleanupSemantic(diffs)
-
-	// Convert diffs to individual lines with their types
-	var allLines []diffLine
-	for _, d := range diffs {
-		lines := strings.Split(d.Text, "\n")
-		for i, line := range lines {
-			if i == len(lines)-1 && line == "" {
-				continue
-			}
-			allLines = append(allLines, diffLine{Type: d.Type, Text: line})
-		}
-	}
+	allLines := reviewLines(oldContent, newContent)
+	m.lineDiff = allLines
 
 	// Build hunks with context lines
 	contextN := m.contextLines
@@ -328,6 +315,12 @@ func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
 		funcName := findNearestFuncName(allLines, hunk.start)
 
 		// Write hunk header
+		if oldCount == 0 {
+			oldStart--
+		}
+		if newCount == 0 {
+			newStart--
+		}
 		header := fmt.Sprintf("@@ -%d,%d +%d,%d @@", oldStart, oldCount, newStart, newCount)
 		if funcName != "" {
 			header += " " + funcName
@@ -344,6 +337,9 @@ func (m *DiffPreviewModel) generateDiff(oldContent, newContent string) string {
 				fmt.Fprintf(&result, "-%s\n", dl.Text)
 			case diffmatchpatch.DiffInsert:
 				fmt.Fprintf(&result, "+%s\n", dl.Text)
+			}
+			if dl.NoNewline {
+				result.WriteString("\\ No newline at end of file\n")
 			}
 		}
 	}
@@ -417,15 +413,15 @@ func (m *DiffPreviewModel) highlightDiff(diff string) string {
 	i := 0
 	for i < len(lines) {
 		// Find a block of removed lines followed by added lines
-		if strings.HasPrefix(lines[i], "-") && !strings.HasPrefix(lines[i], "---") {
+		if strings.HasPrefix(lines[i], "-") && !reviewHeader(lines[i], i) {
 			removeStart := i
-			for i < len(lines) && strings.HasPrefix(lines[i], "-") && !strings.HasPrefix(lines[i], "---") {
+			for i < len(lines) && strings.HasPrefix(lines[i], "-") && !reviewHeader(lines[i], i) {
 				i++
 			}
 			removeEnd := i
 
 			addStart := i
-			for i < len(lines) && strings.HasPrefix(lines[i], "+") && !strings.HasPrefix(lines[i], "+++") {
+			for i < len(lines) && strings.HasPrefix(lines[i], "+") && !reviewHeader(lines[i], i) {
 				i++
 			}
 			addEnd := i
@@ -458,11 +454,11 @@ func (m *DiffPreviewModel) highlightDiff(diff string) string {
 		var styledLine string
 
 		switch {
-		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+		case reviewHeader(line, idx):
 			styledLine = headerStyle.Render(line)
 		case strings.HasPrefix(line, "@@"):
 			styledLine = hunkStyle.Render(line)
-		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+		case strings.HasPrefix(line, "-") && !reviewHeader(line, idx):
 			if partnerIdx, ok := paired[idx]; ok && strings.HasPrefix(lines[partnerIdx], "+") {
 				// Word-level highlight for paired removed line
 				oldText := line[1:] // strip the "-" prefix
@@ -471,7 +467,7 @@ func (m *DiffPreviewModel) highlightDiff(diff string) string {
 			} else {
 				styledLine = removedStyle.Render(line)
 			}
-		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+		case strings.HasPrefix(line, "+") && !reviewHeader(line, idx):
 			if partnerIdx, ok := paired[idx]; ok && strings.HasPrefix(lines[partnerIdx], "-") {
 				// Word-level highlight for paired added line
 				oldText := lines[partnerIdx][1:]
@@ -924,10 +920,10 @@ func renderTinyResizeRows(identity, resize, safeAction string, budget int) strin
 // countChanges counts added and removed lines.
 func (m DiffPreviewModel) countChanges() (added, removed int) {
 	lines := strings.Split(m.diff, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+	for i, line := range lines {
+		if strings.HasPrefix(line, "+") && !reviewHeader(line, i) {
 			added++
-		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+		} else if strings.HasPrefix(line, "-") && !reviewHeader(line, i) {
 			removed++
 		}
 	}
@@ -1053,59 +1049,60 @@ func (m DiffPreviewModel) renderSideBySide() string {
 	leftHeader := lipgloss.NewStyle().Foreground(ColorDim).Bold(true).Render("OLD")
 	rightHeader := lipgloss.NewStyle().Foreground(ColorDim).Bold(true).Render("NEW")
 
-	oldLines := strings.Split(m.displayOldContent, "\n")
-	newLines := strings.Split(m.displayNewContent, "\n")
-	maxLines := len(oldLines)
-	if len(newLines) > maxLines {
-		maxLines = len(newLines)
-	}
-	if maxLines == 0 {
+	rows := alignReviewLines(m.lineDiff)
+	if len(rows) == 0 {
 		return ""
 	}
-
-	leftW := m.viewport.Width/2 - 4
-	if leftW < 20 {
-		leftW = 20
+	maxNumber := 0
+	for _, row := range rows {
+		maxNumber = max(maxNumber, row.oldNum, row.newNum)
 	}
-	rightW := m.viewport.Width - leftW - 7
-	if rightW < 20 {
-		rightW = 20
+	gutter := max(4, len(fmt.Sprint(maxNumber)))
+	available := max(m.viewport.Width-(2*gutter+9), 2)
+	leftW := available / 2
+	rightW := available - leftW
+	pad := func(text string, width int) string {
+		text = truncateForWidth(text, width)
+		return text + strings.Repeat(" ", max(width-lipgloss.Width(text), 0))
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-4s %-*s | %-4s %-*s | Δ\n", "#", leftW, leftHeader, "#", rightW, rightHeader)
-	b.WriteString(strings.Repeat("-", leftW+rightW+18))
+	fmt.Fprintf(&b, "%-*s %s | %-*s %s | Δ\n", gutter, "#", pad(leftHeader, leftW), gutter, "#", pad(rightHeader, rightW))
+	b.WriteString(strings.Repeat("-", m.viewport.Width))
 	b.WriteString("\n")
 
 	addedStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
 	removedStyle := lipgloss.NewStyle().Foreground(ColorError)
 	sameStyle := lipgloss.NewStyle().Foreground(ColorDim)
 
-	for i := 0; i < maxLines; i++ {
-		var oldLine, newLine string
-		if i < len(oldLines) {
-			oldLine = oldLines[i]
-		}
-		if i < len(newLines) {
-			newLine = newLines[i]
-		}
-
-		left := truncateForWidth(oldLine, leftW)
-		right := truncateForWidth(newLine, rightW)
-
-		marker := sameStyle.Render(" ")
-		if oldLine != newLine {
-			if oldLine == "" && newLine != "" {
-				marker = addedStyle.Render("+")
-			} else if oldLine != "" && newLine == "" {
-				marker = removedStyle.Render("-")
-			} else {
-				marker = lipgloss.NewStyle().Foreground(ColorWarning).Render("≠")
+	for _, row := range rows {
+		lineText := func(line diffLine, number int) string {
+			if number == 0 {
+				return ""
 			}
+			if line.NoNewline {
+				return line.Text + " ⟪no newline⟫"
+			}
+			return line.Text
 		}
-
-		fmt.Fprintf(&b, "%-4d %-*s | %-4d %-*s | %s\n",
-			i+1, leftW, left, i+1, rightW, right, marker)
+		lineNumber := func(number int) string {
+			if number == 0 {
+				return ""
+			}
+			return fmt.Sprint(number)
+		}
+		marker := sameStyle.Render(" ")
+		switch {
+		case row.oldNum == 0:
+			marker = addedStyle.Render("+")
+		case row.newNum == 0:
+			marker = removedStyle.Render("-")
+		case row.old.Text != row.new.Text || row.old.NoNewline != row.new.NoNewline:
+			marker = lipgloss.NewStyle().Foreground(ColorWarning).Render("≠")
+		}
+		fmt.Fprintf(&b, "%-*s %s | %-*s %s | %s\n",
+			gutter, lineNumber(row.oldNum), pad(lineText(row.old, row.oldNum), leftW),
+			gutter, lineNumber(row.newNum), pad(lineText(row.new, row.newNum), rightW), marker)
 	}
 
 	return b.String()
@@ -1127,15 +1124,26 @@ func truncateForWidth(s string, max int) string {
 
 func (m *DiffPreviewModel) detectChangeOffsets(content string) []int {
 	lines := strings.Split(content, "\n")
+	unified := strings.HasPrefix(ansi.Strip(content), "--- ")
 	offsets := make([]int, 0, 16)
 	for i, line := range lines {
+		line = ansi.Strip(line)
 		switch {
-		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+		case unified && strings.HasPrefix(line, "+") && !reviewHeader(line, i):
 			offsets = append(offsets, i)
-		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+		case unified && strings.HasPrefix(line, "-") && !reviewHeader(line, i):
 			offsets = append(offsets, i)
-		case strings.Contains(line, "| +"), strings.Contains(line, "| -"), strings.Contains(line, "| ≠"):
-			offsets = append(offsets, i)
+		case !unified && strings.Contains(line, " | "):
+			first := strings.TrimSpace(strings.SplitN(line, " | ", 2)[0])
+			if first != "" && (first[0] < '0' || first[0] > '9') {
+				continue
+			}
+			if column := strings.LastIndex(line, " | "); column >= 0 {
+				switch strings.TrimSpace(line[column+3:]) {
+				case "+", "-", "≠":
+					offsets = append(offsets, i)
+				}
+			}
 		}
 	}
 	return offsets
@@ -1392,29 +1400,20 @@ func (m *MultiDiffPreviewModel) generateDiff(index int) string {
 	displayPath := safeKeyEntryText(file.FilePath)
 	displayOld := visibleTerminalControlText(file.OldContent)
 	displayNew := visibleTerminalControlText(file.NewContent)
-	dmp := diffmatchpatch.New()
-
 	var result strings.Builder
 	fmt.Fprintf(&result, "--- %s\n", displayPath)
 	fmt.Fprintf(&result, "+++ %s\n", displayPath)
-
-	diffs := dmp.DiffMain(displayOld, displayNew, true)
-	diffs = dmp.DiffCleanupSemantic(diffs)
-
-	for _, d := range diffs {
-		lines := strings.Split(d.Text, "\n")
-		for i, line := range lines {
-			if i == len(lines)-1 && line == "" {
-				continue
-			}
-			switch d.Type {
-			case diffmatchpatch.DiffEqual:
-				fmt.Fprintf(&result, " %s\n", line)
-			case diffmatchpatch.DiffDelete:
-				fmt.Fprintf(&result, "-%s\n", line)
-			case diffmatchpatch.DiffInsert:
-				fmt.Fprintf(&result, "+%s\n", line)
-			}
+	for _, line := range reviewLines(displayOld, displayNew) {
+		prefix := " "
+		switch line.Type {
+		case diffmatchpatch.DiffDelete:
+			prefix = "-"
+		case diffmatchpatch.DiffInsert:
+			prefix = "+"
+		}
+		fmt.Fprintf(&result, "%s%s\n", prefix, line.Text)
+		if line.NoNewline {
+			result.WriteString("\\ No newline at end of file\n")
 		}
 	}
 
@@ -1440,10 +1439,10 @@ func (m *MultiDiffPreviewModel) highlightMultiDiff(diff string) string {
 	lines := strings.Split(diff, "\n")
 	var result strings.Builder
 
-	for _, line := range lines {
+	for i, line := range lines {
 		var styledLine string
 		switch {
-		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+		case reviewHeader(line, i):
 			styledLine = headerStyle.Render(line)
 		case strings.HasPrefix(line, "@@"):
 			styledLine = hunkStyle.Render(line)

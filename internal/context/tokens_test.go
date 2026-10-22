@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"gokin/internal/client"
@@ -104,9 +105,9 @@ func TestGetPricing_KnownModels(t *testing.T) {
 		wantInput  float64
 		wantOutput float64
 	}{
-		{"glm-5.2", 4.00, 16.00},
-		{"glm-5.1", 4.00, 16.00},
-		{"glm-5", 1.00, 4.00},
+		{"glm-5.2", 1.40, 4.40},
+		{"glm-5.1", 1.40, 4.40},
+		{"glm-5", 1.00, 3.20},
 		{"kimi-for-coding", 0.95, 4.00},
 		{"MiniMax-M2.7", 0.30, 1.20},
 	}
@@ -143,7 +144,7 @@ func TestGetPricing_Resolution(t *testing.T) {
 		{"minimax-m2.7-highspeed", 0.60, 2.40}, // case-insensitive resolves the same
 		{"MiniMax-M2.7", 0.30, 1.20},           // base variant
 		{"deepseek-v4-pro-2026", 0.435, 0.87},  // suffix variant → longest key, not bare "deepseek"
-		{"GLM-5.1", 4.00, 16.00},               // case-insensitive exact
+		{"GLM-5.1", 1.40, 4.40},                // case-insensitive exact
 		{"glm-5-turbo", 0.70, 2.80},            // not the shorter "glm-5"
 		{"totally-unknown-model", 0.14, 0.28},  // flash default, NOT zero (silent under-report)
 	}
@@ -190,7 +191,7 @@ func TestGetPricingFunction(t *testing.T) {
 		// MiniMax mixed-case key must match case-insensitively.
 		{"MiniMax-M2.7", 0.30, 1.20, "MiniMax-M2.7 case-insensitive match"},
 		// "glm-5.1" must not match "glm-5" (a shorter substring).
-		{"glm-5.1", 4.00, 16.00, "glm-5.1 beats shorter glm-5 key"},
+		{"glm-5.1", 1.40, 4.40, "glm-5.1 beats shorter glm-5 key"},
 		// Generic fallback should match for unknown model.
 		{"unknown-model-xyz", 0.14, 0.28, "unknown model gets flash-tier fallback"},
 	}
@@ -462,9 +463,9 @@ func TestCalculateCost(t *testing.T) {
 func TestCalculateCost_WithOutput(t *testing.T) {
 	tc := NewTokenCounter(nil, "glm-5", nil)
 	cost := tc.CalculateCost(1000000, 1000000)
-	// glm-5: $1.00/1M input + $4.00/1M output = $5.00
-	if cost != 5.00 {
-		t.Errorf("CalculateCost = %v, want 5.00", cost)
+	// glm-5: $1.00/1M input + $3.20/1M output = $4.20
+	if cost != 4.20 {
+		t.Errorf("CalculateCost = %v, want 4.20", cost)
 	}
 }
 
@@ -481,11 +482,11 @@ func TestCalculateCostWithCache_GLM(t *testing.T) {
 		{"half cached", 1_000_000, 0, 500_000, 0.60},
 		{"cached clamped to input", 1_000_000, 0, 2_000_000, 0.20},
 		{"negative cache ignored", 1_000_000, 0, -1, 1.00},
-		{"output unaffected", 1_000_000, 1_000_000, 1_000_000, 4.20},
+		{"output unaffected", 1_000_000, 1_000_000, 1_000_000, 3.40},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tc.CalculateCostWithCache(tt.input, tt.output, tt.cacheRead); got != tt.want {
+			if got := tc.CalculateCostWithCache(tt.input, tt.output, tt.cacheRead); math.Abs(got-tt.want) > 1e-9 {
 				t.Fatalf("CalculateCostWithCache() = %v, want %v", got, tt.want)
 			}
 		})

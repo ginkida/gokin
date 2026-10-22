@@ -161,7 +161,7 @@ func TestAnyProviderHasKey(t *testing.T) {
 
 func TestProviderDefaultModels(t *testing.T) {
 	expected := map[string]string{
-		"glm":     "glm-5.2",
+		"glm":     "glm-5.3-flash",
 		"minimax": "MiniMax-M2.7",
 		"kimi":    "k3",
 		"ollama":  "llama3.2",

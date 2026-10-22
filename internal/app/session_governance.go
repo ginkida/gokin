@@ -37,6 +37,9 @@ func (a *App) enforceSessionMemoryGovernance(reason string) {
 	archiveCount, stale, err := a.archiveSessionHistoryLocked(reason)
 	a.sessionGovernanceMu.Unlock()
 	a.sessionLeaseMu.Unlock()
+	if err == nil && !stale && archiveCount > 0 {
+		a.flushHistoryWindowArchives(a.session.GetID())
+	}
 
 	if err != nil {
 		a.journalEvent("session_archive_failed", map[string]any{
@@ -100,7 +103,7 @@ func (a *App) archiveSessionHistoryLocked(reason string) (archiveCount int, stal
 		return archiveCount, false, err
 	}
 
-	if !a.session.SetHistoryIfVersion(history[archiveCount:], sessionVersion) {
+	if !a.session.TrimHistoryPrefixIfVersion(archiveCount, sessionVersion) {
 		return archiveCount, true, nil
 	}
 	return archiveCount, false, nil

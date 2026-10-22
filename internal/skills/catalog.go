@@ -13,6 +13,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"gokin/internal/hooks"
 	"gokin/internal/permission"
 
 	"gopkg.in/yaml.v3"
@@ -36,7 +37,6 @@ const (
 var (
 	validSkillName    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	validArgumentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
-	dynamicContext    = regexp.MustCompile("(?m)(^|[[:space:]])!`")
 )
 
 // Root is one skill-discovery directory. Earlier roots have higher priority.
@@ -44,6 +44,7 @@ type Root struct {
 	Path     string
 	Source   string
 	Boundary string // Optional trusted ancestor; Path may not resolve outside it.
+	Commands bool   // Legacy Claude command files rather than SKILL.md folders.
 }
 
 // Skill is one validated, immutable workflow loaded from SKILL.md.
@@ -61,6 +62,13 @@ type Skill struct {
 	Path                   string
 	DisableModelInvocation bool
 	UserInvocable          bool
+	Context                string
+	Agent                  string
+	Background             bool
+	Model                  string
+	Effort                 string
+	Hooks                  []hooks.ClaudeCommand
+	plugin                 *hooks.ClaudePlugin
 }
 
 type skillFrontmatter struct {
@@ -86,6 +94,7 @@ type skillFrontmatter struct {
 	Effort          yaml.Node `yaml:"effort"`
 	Context         yaml.Node `yaml:"context"`
 	Agent           yaml.Node `yaml:"agent"`
+	Background      *bool     `yaml:"background"`
 	Hooks           yaml.Node `yaml:"hooks"`
 	Paths           yaml.Node `yaml:"paths"`
 	Shell           yaml.Node `yaml:"shell"`
@@ -96,11 +105,6 @@ func (fm skillFrontmatter) unsupportedExecutionField() string {
 		name string
 		node yaml.Node
 	}{
-		{"model", fm.Model},
-		{"effort", fm.Effort},
-		{"context", fm.Context},
-		{"agent", fm.Agent},
-		{"hooks", fm.Hooks},
 		{"paths", fm.Paths},
 		{"shell", fm.Shell},
 	}
@@ -118,11 +122,13 @@ type Catalog struct {
 	mu               sync.RWMutex
 	reloadMu         sync.Mutex
 	roots            []Root
+	additionalRoots  []Root // reloadMu; explicit registered repository roots
 	skills           map[string]Skill
 	warnings         []string
 	metadata         [sha256.Size]byte
 	metadataIsStable bool
 	revision         uint64
+	plugins          *hooks.Manager
 }
 
 // NewCatalog creates and initially loads a catalog.
@@ -146,16 +152,23 @@ func DefaultRoots(workDir string) []Root {
 
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
-		return projectRoots
+		return append(projectRoots, Root{Path: filepath.Join(workDir, ".claude", "commands"), Source: "claude-project", Boundary: workDir, Commands: true})
 	}
 	configBase := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
 	if configBase == "" {
 		configBase = filepath.Join(home, ".config")
 	}
-	return append([]Root{
+	claudeUserDir, claudeErr := hooks.ClaudeUserSettingsDir()
+	if claudeErr != nil {
+		claudeUserDir = filepath.Join(home, ".claude")
+	}
+	roots := append([]Root{
 		Root{Path: filepath.Join(configBase, "gokin", "skills"), Source: "global", Boundary: filepath.Join(configBase, "gokin")},
-		Root{Path: filepath.Join(home, ".claude", "skills"), Source: "claude-global", Boundary: filepath.Join(home, ".claude")},
+		Root{Path: filepath.Join(claudeUserDir, "skills"), Source: "claude-global", Boundary: claudeUserDir},
 	}, projectRoots...)
+	return append(roots,
+		Root{Path: filepath.Join(claudeUserDir, "commands"), Source: "claude-global", Boundary: claudeUserDir, Commands: true},
+		Root{Path: filepath.Join(workDir, ".claude", "commands"), Source: "claude-project", Boundary: workDir, Commands: true})
 }
 
 // Reload rescans every root and atomically publishes a fresh snapshot. Broken
@@ -164,6 +177,19 @@ func DefaultRoots(workDir string) []Root {
 func (c *Catalog) Reload() []string {
 	c.reloadMu.Lock()
 	defer c.reloadMu.Unlock()
+	return c.reloadLocked()
+}
+
+func (c *Catalog) SetAdditionalProjectRoots(directories []string) []string {
+	c.reloadMu.Lock()
+	defer c.reloadMu.Unlock()
+	c.additionalRoots = nil
+	for _, directory := range directories {
+		c.additionalRoots = append(c.additionalRoots,
+			Root{Path: filepath.Join(directory, ".gokin", "skills"), Source: "project", Boundary: directory},
+			Root{Path: filepath.Join(directory, ".claude", "skills"), Source: "claude-project", Boundary: directory},
+			Root{Path: filepath.Join(directory, ".claude", "commands"), Source: "claude-project", Boundary: directory, Commands: true})
+	}
 	return c.reloadLocked()
 }
 
@@ -177,6 +203,9 @@ func (c *Catalog) ReloadIfChanged() []string {
 	c.reloadMu.Lock()
 	defer c.reloadMu.Unlock()
 
+	if c.plugins != nil {
+		return c.reloadLocked()
+	}
 	metadata := c.metadataFingerprint()
 	c.mu.RLock()
 	unchanged := c.metadataIsStable && metadata == c.metadata
@@ -197,7 +226,7 @@ func (c *Catalog) reloadLocked() []string {
 	seenRoots := make(map[string]bool)
 	totalBytes := 0
 
-	for _, root := range c.roots {
+	for _, root := range append(append([]Root(nil), c.roots...), c.additionalRoots...) {
 		root.Path = filepath.Clean(strings.TrimSpace(root.Path))
 		if root.Path == "." || seenRoots[root.Path] {
 			continue
@@ -209,6 +238,33 @@ func (c *Catalog) reloadLocked() []string {
 			if !os.IsNotExist(err) {
 				warnings = append(warnings, fmt.Sprintf("open %s skills: %v", root.Source, err))
 			}
+			continue
+		}
+		if root.Commands {
+			files, scanErr := commandFiles(secureRoot)
+			if scanErr != nil {
+				warnings = append(warnings, fmt.Sprintf("%s commands: %v", root.Source, scanErr))
+			}
+			for _, path := range files {
+				name := strings.ReplaceAll(strings.TrimSuffix(filepath.ToSlash(path), ".md"), "/", ":")
+				if claimed[name] || len(next) >= MaxSkillCount {
+					continue
+				}
+				claimed[name] = true
+				displayPath := filepath.Join(root.Path, path)
+				skill, err := loadSkill(secureRoot, path, displayPath, name, root.Source, true)
+				if err != nil {
+					warnings = append(warnings, fmt.Sprintf("%s command %s: %v", root.Source, displayPath, err))
+					continue
+				}
+				skillBytes := catalogSkillBytes(skill)
+				if totalBytes+skillBytes > MaxCatalogBytes {
+					warnings = append(warnings, fmt.Sprintf("skill catalog byte limit %d reached; %s ignored", MaxCatalogBytes, displayPath))
+					continue
+				}
+				next[name], totalBytes = skill, totalBytes+skillBytes
+			}
+			secureRoot.Close()
 			continue
 		}
 		dir, err := secureRoot.Open(".")
@@ -238,6 +294,9 @@ func (c *Catalog) reloadLocked() []string {
 			// A symlinked directory/file could escape the trusted skill root. Skills
 			// are instructions, so fail closed instead of following it.
 			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			if _, err := secureRoot.Stat(filepath.Join(entry.Name(), ".claude-plugin", "plugin.json")); err == nil {
 				continue
 			}
 			rawDirectoryName := entry.Name()
@@ -279,6 +338,14 @@ func (c *Catalog) reloadLocked() []string {
 		}
 	}
 
+	if c.plugins != nil {
+		plugins, err := c.plugins.ClaudePlugins()
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("Claude plugins unavailable: %v", err))
+		} else {
+			c.loadPluginWorkflows(plugins, next, &totalBytes, &warnings)
+		}
+	}
 	metadataAfter := c.metadataFingerprint()
 	c.mu.Lock()
 	c.skills = next
@@ -310,11 +377,14 @@ func (c *Catalog) metadataFingerprint() [sha256.Size]byte {
 	// allocate for each string and integer.
 	var inline [4096]byte
 	metadata := inline[:0]
-	for _, root := range c.roots {
+	for _, root := range append(append([]Root(nil), c.roots...), c.additionalRoots...) {
 		root.Path = filepath.Clean(strings.TrimSpace(root.Path))
 		metadata = appendFingerprintString(metadata, root.Path)
 		metadata = appendFingerprintString(metadata, root.Source)
 		metadata = appendFingerprintString(metadata, root.Boundary)
+		if root.Commands {
+			metadata = appendFingerprintString(metadata, "commands")
+		}
 		if root.Path == "." {
 			metadata = appendFingerprintString(metadata, "invalid-root")
 			continue
@@ -331,6 +401,17 @@ func (c *Catalog) metadataFingerprint() [sha256.Size]byte {
 		secureRoot, err := openSkillRoot(root)
 		if err != nil {
 			metadata = appendFingerprintError(metadata, err)
+			continue
+		}
+		if root.Commands {
+			files, err := commandFiles(secureRoot)
+			metadata = appendFingerprintError(metadata, err)
+			for _, path := range files {
+				metadata = appendFingerprintString(metadata, path)
+				info, err := secureRoot.Lstat(path)
+				metadata = appendFingerprintFileInfo(metadata, info, err)
+			}
+			secureRoot.Close()
 			continue
 		}
 		dir, err := secureRoot.Open(".")
@@ -421,7 +502,7 @@ func openSkillRoot(root Root) (*os.Root, error) {
 	return boundaryRoot.OpenRoot(rel)
 }
 
-func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source string) (Skill, error) {
+func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source string, command ...bool) (Skill, error) {
 	info, err := root.Lstat(relativePath)
 	if err != nil {
 		return Skill{}, err
@@ -452,7 +533,18 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 		return Skill{}, fmt.Errorf("SKILL.md must be valid UTF-8")
 	}
 
-	fm, body, err := parseSkillDocument(string(data))
+	return parseSkillData(data, displayPath, invocationName, source, command...)
+}
+
+func parseSkillData(data []byte, displayPath, invocationName, source string, command ...bool) (Skill, error) {
+	if len(data) > MaxSkillBytes || !utf8.Valid(data) {
+		return Skill{}, fmt.Errorf("skill must be bounded UTF-8")
+	}
+	isCommand := len(command) > 0 && command[0]
+	if (isCommand || strings.HasPrefix(source, "claude-plugin:")) && !strings.HasPrefix(strings.TrimSpace(string(data)), "---") {
+		data = append([]byte("---\n{}\n---\n"), data...)
+	}
+	fm, body, err := parseSkillDocument(string(data), isCommand)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -460,8 +552,8 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 	if body == "" {
 		return Skill{}, fmt.Errorf("skill body is empty")
 	}
-	if dynamicContext.MatchString(body) || containsDynamicContextFence(body) {
-		return Skill{}, fmt.Errorf("Claude dynamic context injection is recognized but unsupported by this runtime")
+	if _, err := ParseDynamicCommands(body); err != nil {
+		return Skill{}, fmt.Errorf("dynamic context: %w", err)
 	}
 
 	displayName, err := boundedMetadataScalar(fm.Name, "name", maxDisplayNameBytes)
@@ -477,6 +569,12 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 	}
 	if description == "" {
 		description = boundedFallbackDescription(firstMarkdownParagraph(body), maxDescriptionBytes)
+	}
+	if description == "" && isCommand {
+		description = "Run command " + invocationName
+	}
+	if description == "" && strings.HasPrefix(source, "claude-plugin:") {
+		description = "Run plugin workflow " + invocationName
 	}
 	if description == "" {
 		return Skill{}, fmt.Errorf("description is required when the body has no markdown paragraph")
@@ -501,10 +599,18 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 	if err != nil {
 		return Skill{}, err
 	}
+	skillHooks, err := hooks.ParseClaudeHooks(fm.Hooks)
+	if err != nil {
+		return Skill{}, fmt.Errorf("frontmatter hooks: %w", err)
+	}
 
 	userInvocable := true
 	if fm.UserInvocable != nil {
 		userInvocable = *fm.UserInvocable
+	}
+	background := true
+	if fm.Background != nil {
+		background = *fm.Background
 	}
 	return Skill{
 		Name:                   invocationName,
@@ -520,6 +626,12 @@ func loadSkill(root *os.Root, relativePath, displayPath, invocationName, source 
 		Path:                   displayPath,
 		DisableModelInvocation: fm.DisableModelInvocation,
 		UserInvocable:          userInvocable,
+		Context:                fm.Context.Value,
+		Agent:                  fm.Agent.Value,
+		Background:             background,
+		Model:                  strings.TrimSpace(fm.Model.Value),
+		Effort:                 strings.TrimSpace(fm.Effort.Value),
+		Hooks:                  skillHooks,
 	}, nil
 }
 
@@ -579,16 +691,6 @@ func parseSkillAllowedTools(node yaml.Node) ([]string, error) {
 		return nil, fmt.Errorf("frontmatter allowed-tools: %w", err)
 	}
 	return canonical, nil
-}
-
-func containsDynamicContextFence(body string) bool {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "```!") || strings.HasPrefix(line, "~~~!") {
-			return true
-		}
-	}
-	return false
 }
 
 func boundedMetadataScalar(node yaml.Node, field string, maxBytes int) (string, error) {
@@ -752,7 +854,7 @@ func catalogSkillBytes(skill Skill) int {
 	return total
 }
 
-func parseSkillDocument(document string) (skillFrontmatter, string, error) {
+func parseSkillDocument(document string, command ...bool) (skillFrontmatter, string, error) {
 	document = strings.TrimPrefix(document, "\ufeff")
 	document = strings.ReplaceAll(document, "\r\n", "\n")
 	if !strings.HasPrefix(document, "---\n") {
@@ -783,8 +885,47 @@ func parseSkillDocument(document string) (skillFrontmatter, string, error) {
 		// name falls back to the directory name and description to the first
 		// body paragraph, both designed fallbacks.
 	}
+	if len(command) > 0 && command[0] {
+		// Command names come from the relative file path. Claude ignores name
+		// and paths in legacy command files, while other execution controls
+		// retain the same validation as skills.
+		fm.Name, fm.Paths = yaml.Node{}, yaml.Node{}
+	}
 	if field := fm.unsupportedExecutionField(); field != "" {
 		return fm, "", fmt.Errorf("frontmatter field %q is recognized but unsupported by this runtime", field)
+	}
+	if fm.Context.Kind != 0 && (fm.Context.Kind != yaml.ScalarNode || fm.Context.Tag != "!!str" || fm.Context.Value != "fork") {
+		return fm, "", fmt.Errorf("frontmatter context must be fork")
+	}
+	if fm.Agent.Kind != 0 {
+		if fm.Context.Value != "fork" {
+			return fm, "", fmt.Errorf("frontmatter agent requires context: fork")
+		}
+		if fm.Agent.Kind != yaml.ScalarNode || fm.Agent.Tag != "!!str" || strings.TrimSpace(fm.Agent.Value) == "" || len(fm.Agent.Value) > 128 || strings.ContainsAny(fm.Agent.Value, "\n\r\x00") {
+			return fm, "", fmt.Errorf("frontmatter agent must be a non-empty agent name")
+		}
+	}
+	if fm.Background != nil && fm.Context.Value != "fork" {
+		return fm, "", fmt.Errorf("frontmatter background requires context: fork")
+	}
+	for _, control := range []struct {
+		name string
+		node yaml.Node
+	}{{"model", fm.Model}, {"effort", fm.Effort}} {
+		if control.node.Kind == 0 {
+			continue
+		}
+		value := strings.TrimSpace(control.node.Value)
+		if control.node.Kind != yaml.ScalarNode || control.node.Tag != "!!str" || value == "" || len(value) > 128 || strings.ContainsAny(value, "\n\r\x00") {
+			return fm, "", fmt.Errorf("frontmatter %s must be a non-empty scalar string", control.name)
+		}
+	}
+	if fm.Effort.Kind != 0 {
+		switch fm.Effort.Value {
+		case "low", "medium", "high", "xhigh", "max":
+		default:
+			return fm, "", fmt.Errorf("frontmatter effort must be low, medium, high, xhigh, or max")
+		}
 	}
 	return fm, body, nil
 }
@@ -794,6 +935,17 @@ func (c *Catalog) Get(name string) (Skill, bool) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	c.mu.RLock()
 	skill, ok := c.skills[name]
+	if !ok && !strings.Contains(name, ":") {
+		for key, candidate := range c.skills {
+			if candidate.plugin != nil && strings.HasSuffix(key, ":"+name) {
+				if ok {
+					ok = false
+					break
+				}
+				skill, ok = candidate, true
+			}
+		}
+	}
 	c.mu.RUnlock()
 	if ok {
 		skill = cloneSkill(skill)
@@ -817,6 +969,7 @@ func cloneSkill(skill Skill) Skill {
 	skill.Arguments = append([]string(nil), skill.Arguments...)
 	skill.AllowedTools = append([]string(nil), skill.AllowedTools...)
 	skill.DisallowedTools = append([]string(nil), skill.DisallowedTools...)
+	skill.Hooks = hooks.CloneClaudeCommands(skill.Hooks)
 	return skill
 }
 

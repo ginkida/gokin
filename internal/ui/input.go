@@ -178,6 +178,11 @@ func trailingInputToken(value string) (inputToken, bool) {
 
 // InputModel represents the input component.
 type InputModel struct {
+	readline       bool
+	stashedDraft   *composerSnapshot
+	clearedDraft   *composerSnapshot
+	undoDrafts     []composerSnapshot
+	killRing       []string
 	textarea       textarea.Model
 	styles         *Styles
 	viewportHeight int      // terminal rows available to the main composer; 0 = unconstrained
@@ -326,11 +331,12 @@ func DefaultCommands() []CommandInfo {
 		{Name: "shortcuts", Description: "Show keyboard shortcuts", Category: "Getting Started"},
 
 		// Session
+		{Name: "goal", Description: "Work across turns until a completion condition holds", Category: "Session", Usage: "/goal [condition|clear]", Args: []ArgInfo{{Name: "condition", Type: "string", Required: false}}},
 		{Name: "model", Description: "Switch AI model", Category: "Session",
 			// Tab-complete options reflect the v0.65+ supported set —
 			// gemini/claude/gpt entries pre-v0.78.30 were stale references
 			// to providers removed during the v0.65 trim.
-			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"list", "glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "k3", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
+			Args:  []ArgInfo{{Name: "model", Required: false, Type: "option", Options: []string{"list", "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.2", "glm-5.1", "deepseek-v4-pro", "deepseek-v4-flash", "k3", "kimi-for-coding", "MiniMax-M2.7", "ollama"}}},
 			Usage: "/model [name]"},
 		{Name: "clear", Description: "Clear conversation history", Category: "Session",
 			Args: []ArgInfo{{Name: "force", Required: false, Type: "option", Options: []string{"--force"}}}, Usage: "/clear [--force]"},
@@ -368,6 +374,10 @@ func DefaultCommands() []CommandInfo {
 		{Name: "redo", Description: "Redo last undone change(s)", Category: "Session",
 			Args:  []ArgInfo{{Name: "n_or_all", Required: false, Type: "string"}},
 			Usage: "/redo [N|all]"},
+		{Name: "rewind", Description: "Restore or summarize at a selected prompt", Category: "Session",
+			Args: []ArgInfo{{Name: "point", Required: false, Type: "string"},
+				{Name: "mode", Required: false, Type: "option", Options: []string{"code", "conversation", "both", "summarize-from", "summarize-before"}}},
+			Usage: "/rewind [<point-id|number> <code|conversation|both|summarize-from|summarize-before> [-- guidance]] | previous | transcript <summary-id>"},
 		{Name: "instructions", Description: "Show loaded project instructions (GOKIN.md/CLAUDE.md)", Category: "Session",
 			Args:  []ArgInfo{{Name: "source", Required: false, Type: "option", Options: []string{"--source"}}},
 			Usage: "/instructions [--source]"},
@@ -479,6 +489,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "ql", Description: "Preview a file using macOS Quick Look", Category: "Tools",
 			Args: []ArgInfo{{Name: "path", Required: true, Type: "path"}}, Usage: "/ql <path>"},
 		{Name: "hooks", Description: "List configured agent hooks and their sources", Category: "Tools"},
+		{Name: "reload-plugins", Description: "Reload plugin components and changed MCP/LSP servers", Category: "Tools", Usage: "/reload-plugins [--force]", Args: []ArgInfo{{Name: "force", Type: "option", Options: []string{"--force", "force"}}}},
+		{Name: "lsp", Description: "Inspect plugin language servers and startup errors", Category: "Tools"},
+		{Name: "plugin", Description: "Manage plugins and marketplaces", Category: "Tools"},
 		{Name: "add-dir", Description: "Grant the agent access to a directory outside the workspace", Category: "Tools",
 			Args: []ArgInfo{{Name: "persist", Required: false, Type: "option", Options: []string{"--persist"}},
 				{Name: "path", Required: true, Type: "path"}},
@@ -491,6 +504,9 @@ func DefaultCommands() []CommandInfo {
 		{Name: "sandbox", Description: "View or configure bash sandbox containment", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"on", "off"}}},
 			Usage: "/sandbox [on|off]"},
+		{Name: "effort", Description: "Choose GLM reasoning effort", Category: "Tools",
+			Args:  []ArgInfo{{Name: "level", Required: false, Type: "option", Options: []string{"auto", "low", "high", "max"}}},
+			Usage: "/effort [auto|low|high|max]"},
 		{Name: "thinking", Description: "Configure adaptive/forced reasoning and its token budget", Category: "Tools",
 			Args:  []ArgInfo{{Name: "mode", Required: false, Type: "option", Options: []string{"auto", "on", "off"}}},
 			Usage: "/thinking [auto|on|off|<budget>]"},
@@ -726,6 +742,13 @@ func (m *InputModel) refreshCompletionStateForValue() {
 
 // Update handles input events.
 func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
+	if m.readline {
+		return m.updateReadline(msg)
+	}
+	return m.updateInput(msg)
+}
+
+func (m InputModel) updateInput(msg tea.Msg) (InputModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Handle history search mode
@@ -1598,6 +1621,14 @@ func (m InputModel) shouldSuggestFiles(input string) bool {
 		return false
 	}
 	lastWord := token.text
+	// Sentence punctuation is not an implicit file reference. Otherwise a
+	// matching filename steals Enter from an ordinary question ending in a
+	// period. Explicit @ references and slash-command path arguments are
+	// handled above; relative/absolute path prefixes still complete normally.
+	if strings.Contains(lastWord, "://") ||
+		(strings.HasSuffix(lastWord, ".") && !strings.ContainsAny(lastWord, `/\`)) {
+		return false
+	}
 	return len(lastWord) >= 2 && (strings.Contains(lastWord, "/") || strings.Contains(lastWord, "."))
 }
 
@@ -2470,6 +2501,8 @@ func (m InputModel) ExpandedValue() string {
 
 // Reset clears the input and optionally saves to history.
 func (m *InputModel) Reset() {
+	m.clearedDraft = nil
+	m.undoDrafts = nil
 	m.textarea.Reset()
 	m.syncTextareaHeight() // Shrink back to single line after send
 	m.historyIndex = -1
@@ -2504,6 +2537,9 @@ func (m *InputModel) Reset() {
 // InsertNewline adds a newline at the cursor position and grows the input height.
 // Used for multi-line input with Alt+Enter.
 func (m *InputModel) InsertNewline() {
+	if m.readline {
+		m.rememberUndo(m.snapshot())
+	}
 	before := m.textarea.Value()
 	cursor := textareaCursorByteOffset(m.textarea)
 	m.textarea.InsertString("\n")
@@ -2899,12 +2935,14 @@ func (m *InputModel) SetHintsEnabled(enabled bool) {
 
 // updatePlaceholder updates the placeholder text based on context.
 func (m *InputModel) updatePlaceholder() {
-	if m.activeTask != "" {
+	if m.readline && m.stashedDraft != nil {
+		m.textarea.Placeholder = "Draft stashed · Ctrl+S restores · Message or /command"
+	} else if m.activeTask != "" {
 		m.textarea.Placeholder = "Continue: " + m.activeTask
 	} else if !m.placeholderTipsOn {
 		m.textarea.Placeholder = placeholderTips[0]
 	} else {
-		m.textarea.Placeholder = placeholderTips[m.placeholderTipIndex%len(placeholderTips)]
+		m.textarea.Placeholder = profileKeyText(placeholderTips[m.placeholderTipIndex%len(placeholderTips)], m.readline)
 	}
 }
 

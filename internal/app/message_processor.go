@@ -15,6 +15,8 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/donegate"
+	"gokin/internal/goals"
+	"gokin/internal/hooks"
 	"gokin/internal/hybrid"
 	"gokin/internal/logging"
 	"gokin/internal/plan"
@@ -128,6 +130,7 @@ func isHeadlessTimeoutFailure(err error) bool {
 // Keeping those steps together prevents one operation type from leaving queued
 // user input stranded after success, error, panic, or early validation failure.
 func (a *App) finishForegroundProcessing(beforePending func()) {
+	defer a.tryWakeAsyncHooks()
 	// Shutdown owns terminal persistence now. Do not synchronously send final UI
 	// messages or dequeue another request: handleQuit runs in Bubble Tea's Update
 	// callback, where Program.Send cannot complete until Update returns.
@@ -213,6 +216,13 @@ func (a *App) finishForegroundProcessing(beforePending func()) {
 		nextCtx = a.claimForegroundContextLocked()
 		nextCtx = withConversationLineage(
 			nextCtx, dispatchLineage.sessionID, dispatchLineage.epoch)
+		if pendingRequest.goal != nil {
+			nextCtx = context.WithValue(nextCtx, goalContinuationKey{}, pendingRequest.goal)
+		}
+		if pendingRequest.promptSubmission != nil {
+			nextCtx = context.WithValue(nextCtx, promptSubmissionKey{}, pendingRequest.promptSubmission)
+			nextCtx = context.WithValue(nextCtx, promptExpansionKey{}, true)
+		}
 		if pendingRequest.recoverySessionID == "" {
 			name, args, isCmd = a.commandHandler.Parse(pending)
 		}
@@ -320,6 +330,61 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	if ctx.Err() != nil {
 		return
 	}
+	asyncWakeScope, automaticAsyncWake := ctx.Value(asyncHookWakeKey{}).(*hooks.AsyncScope)
+	if automaticAsyncWake && !asyncWakeScope.HasRewake() {
+		return
+	}
+	ctx = a.withAsyncHooks(ctx)
+	if continuation, ok := ctx.Value(goalContinuationKey{}).(*goalContinuation); ok {
+		if a.session == nil {
+			return
+		}
+		current := a.session.GoalState().Current
+		if current == nil || current.ID != continuation.goalID || current.Status != goals.Active || current.Suspended || current.Turns != continuation.turns || a.session.GetID() != continuation.sessionID || a.recoveryEpoch.Load() != continuation.epoch || continuation.scheduled && continuation.intent != a.goalIntent.Load() {
+			return
+		}
+		if err := a.goalPolicyError(); err != nil {
+			a.suspendGoal(ctx, current.ID, err.Error())
+			a.recordHeadlessTerminalOutcome("goal_policy", err.Error())
+			a.safeSendToProgram(ui.ErrorMsg(err))
+			return
+		}
+	}
+	ctx, goalTurn := a.observeGoalTurn(ctx)
+	ctx = a.withAuxiliaryRequests(ctx)
+	if a.contextManager != nil {
+		a.contextManager.SetAuxiliaryRequestContext(ctx)
+	}
+	defer a.finishInterruptedGoalTurn(goalTurn)
+	if deferred := deferredGoalTurn(ctx); deferred != nil && !isStructuredOutputCorrection(ctx) {
+		deferred.observation = goalTurn
+	}
+	if actor, automatic := ctx.Value(goalContinuationKey{}).(*goalContinuation); automatic {
+		if goalTurn == nil {
+			return
+		}
+		ctx = withSideEffectRecovery(ctx, actor.checkpoints)
+	}
+	if goalTurn != nil {
+		goalTurn.message = message
+	}
+	if a.session != nil {
+		tools.BindSkillInvocationLedger(a.registry, a.session.InvocationLedger())
+	}
+	if a.executor != nil {
+		ctx = a.executor.SkillInvocationContext(ctx)
+	} else {
+		ctx = tools.ContextWithSkillHooks(ctx, a.registry, a.hooksManager)
+	}
+	if err := tools.SkillHooksError(ctx); err != nil {
+		if goalTurn != nil {
+			goalTurn.err = err
+		}
+		a.recordHeadlessTerminalOutcome("hook_stopped", err.Error())
+		a.currentPresenter().Warning(err.Error())
+		a.safeSendToProgram(ui.ErrorMsg(err))
+		return
+	}
 	if ceiling, restricted := a.toolCapabilitySnapshot(); restricted {
 		if inherited, inheritedRestricted :=
 			tools.ToolCapabilityCeilingFromContext(ctx); inheritedRestricted {
@@ -327,9 +392,37 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		}
 		ctx = tools.ContextWithToolCapabilityCeiling(ctx, ceiling)
 	}
+	var submissionErr error
+	ctx, submissionErr = a.withPromptSubmission(ctx, memoryQuery)
+	if submissionErr != nil {
+		if goalTurn != nil {
+			goalTurn.err = submissionErr
+		}
+		a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), submissionErr)
+		return
+	}
+	submissionNotes := a.consumePromptSubmission(ctx, goalTurn)
+	if submissionNotes != "" {
+		message += "\n\n" + submissionNotes
+	}
 
 	if a.session == nil {
 		a.safeSendToProgram(ui.ErrorMsg(fmt.Errorf("session not initialized — try /clear or restart")))
+		return
+	}
+	if err := a.prepareGoalTurn(ctx); err != nil {
+		a.recordHeadlessTerminalOutcome("persistence_failed", err.Error())
+		a.safeSendToProgram(ui.ErrorMsg(err))
+		return
+	}
+	if err := a.ensureHistoryWindowsReady(); err != nil {
+		err = fmt.Errorf("preserve pending history originals before starting new model work: %w", err)
+		a.recordHeadlessTerminalOutcome("persistence_failed", err.Error())
+		a.safeSendToProgram(ui.ErrorMsg(err))
+		return
+	}
+	if actor, ok := ctx.Value(goalContinuationKey{}).(*goalContinuation); ok && actor.evaluateOnly {
+		a.finishGoalTurn(ctx, "", nil)
 		return
 	}
 	turnLineage, ok := conversationLineageFromContext(ctx)
@@ -344,10 +437,14 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		logging.Warn("discarded turn after conversation boundary",
 			"session_id", turnLineage.sessionID, "epoch", turnLineage.epoch)
 		a.recordHeadlessTerminalOutcome("conversation_changed", err.Error())
-		a.safeSendToProgram(ui.StatusUpdateMsg{
-			Type:    ui.StatusWarning,
-			Message: "The conversation changed while this request was running; its stale result and automatic retries were discarded",
-		})
+		// Explicit interruption already has a visible stop marker. Don't follow
+		// it with a technical warning about expected cancellation bookkeeping.
+		if ctx.Err() == nil {
+			a.safeSendToProgram(ui.StatusUpdateMsg{
+				Type:    ui.StatusWarning,
+				Message: "Conversation switched. The previous response was discarded; continue here.",
+			})
+		}
 		a.safeSendToProgram(ui.ResponseDoneMsg{})
 		return true
 	}
@@ -378,6 +475,9 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	a.pushTurnContext()
 
 	// Group all file changes from this message for atomic undo.
+	if !recoveryTurn {
+		a.captureTurnRewind(memoryQuery)
+	}
 	if a.undoManager != nil {
 		groupID := fmt.Sprintf("msg-%d", time.Now().UnixNano())
 		a.undoManager.SetActiveGroup(groupID)
@@ -400,10 +500,12 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// Track response start time and reset tools used
 	a.mu.Lock()
 	a.responseStartTime = time.Now()
-	a.responseToolsUsed = nil
-	a.responseTouchedPaths = nil
-	a.responseCommands = nil
-	a.responseEvidence = responseEvidenceLedger{}
+	if !isStructuredOutputCorrection(ctx) {
+		a.responseToolsUsed = nil
+		a.responseTouchedPaths = nil
+		a.responseCommands = nil
+		a.responseEvidence = responseEvidenceLedger{}
+	}
 	a.streamedChars = 0           // Reset streaming accumulator
 	a.streamedEstimatedTokens = 0 // Reset streaming token estimate
 	a.messageCount++
@@ -505,6 +607,19 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		a.sendTokenUsageUpdate()
 	}
 
+	// Deliver completed root checks before routing. Their evidence belongs to
+	// this conversation and must be persisted with the user turn, rather than
+	// delegated to a child with a separate async owner or stripped as a hint.
+	if err := hooks.AwaitSessionStart(ctx); err != nil {
+		a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), err)
+		return
+	}
+	asyncNotes := hooks.TakeAsyncNotes(ctx)
+	if asyncNotes != "" {
+		message += "\n\n" + asyncNotes
+	}
+	retainAsyncOwner := automaticAsyncWake || asyncNotes != "" || submissionNotes != ""
+
 	// Get current history
 	history := a.session.GetHistory()
 
@@ -547,6 +662,12 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	overloadRetryCount := 0
 	var overloadElapsed time.Duration
 	var turnUsage turnUsageAccumulator
+	if deferred := deferredGoalTurn(ctx); deferred != nil && isStructuredOutputCorrection(ctx) {
+		defer func() { deferred.correctionInput += turnUsage.input; deferred.correctionOutput += turnUsage.output }()
+	}
+	if goalTurn != nil {
+		goalTurn.worker = &turnUsage
+	}
 	usageCommitted := false
 	// Several fail-closed finalization paths (done-gate refusal, recovered
 	// panic, context-clear handoff) return before the normal footer/metadata
@@ -567,6 +688,9 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	a.mu.Lock()
 	headlessDirect := a.headlessDirect
 	a.mu.Unlock()
+	if headlessDirect && goalTurn == nil {
+		a.applyHeadlessThinking(memoryQuery)
+	}
 
 	for {
 		if abortIfConversationChanged() {
@@ -575,13 +699,17 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		history = a.session.GetHistory() // Re-read history on each attempt (partial saves possible)
 		currentMessage := retryMessage
 		unaugmentedMessage := currentMessage
-		if (a.taskRouter == nil || headlessDirect) && directHybridHint != "" {
+		if (a.taskRouter == nil || headlessDirect || goalTurn != nil || retainAsyncOwner) && directHybridHint != "" {
 			currentMessage = directHybridHint + "\n\n" + currentMessage
 		}
 		execFn := func() error {
 			// Headless runs execute directly: routed strategies stream
 			// through the nil TUI program and skip the journal (headless.go).
-			if a.taskRouter != nil && !headlessDirect {
+			// Goal turns retain the foreground executor. Routing the generated
+			// "background work finished" directive can otherwise spawn another
+			// async agent instead of consuming the completed task's evidence.
+			// The worker can still explicitly delegate through its task tool.
+			if a.taskRouter != nil && !headlessDirect && goalTurn == nil && !retainAsyncOwner {
 				// Route the task intelligently
 				newHistory, response, err = a.taskRouter.ExecuteWithPolicyDecisions(
 					ctx, history, currentMessage, mode, policyDecision, autoDecision)
@@ -615,7 +743,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 					ctx, history, currentMessage, &turnUsage)
 				if directHybridHint != "" {
 					newHistory = restoreDirectPromptScaffolding(
-						newHistory, len(history), unaugmentedMessage)
+						newHistory, len(history), unaugmentedMessage, currentMessage)
 				}
 			}
 			return err
@@ -651,7 +779,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 					// and may re-execute them.
 					if len(newHistory) > len(history) {
 						cleaned := stripOrphanFunctionCalls(newHistory)
-						a.session.SetHistory(cleaned)
+						a.setRetainedToolHistory(history, cleaned)
 						a.syncToolCheckpoints()
 						if a.sessionManager != nil {
 							_ = a.sessionManager.SaveAfterMessage()
@@ -671,6 +799,12 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			break
 		}
 
+		if tools.IsHookStopError(err) {
+			if ctx.Err() != nil {
+				err = errors.Join(client.ContextErr(ctx), err)
+			}
+			break
+		}
 		ft := client.DetectFailureTelemetry(err)
 		logging.Warn("request attempt failed",
 			"reason", ft.Reason,
@@ -785,7 +919,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// this via stripOrphanFunctionCalls; the retry path was missing it.
 		if len(newHistory) > len(history) {
 			cleaned := stripOrphanFunctionCalls(newHistory)
-			a.session.SetHistory(cleaned)
+			a.setRetainedToolHistory(history, cleaned)
 			a.syncToolCheckpoints()
 			if a.sessionManager != nil {
 				_ = a.sessionManager.SaveAfterMessage()
@@ -846,6 +980,12 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	if err != nil {
 		// Terminal failures return before normal turn finalization. Commit every
+		if deferred := deferredGoalTurn(ctx); deferred != nil {
+			deferred.err = err
+		}
+		if goalTurn != nil {
+			goalTurn.err = err
+		}
 		// attempt collected above so failed-request spend remains visible.
 		turnUsage.commit(a)
 		usageCommitted = true
@@ -853,14 +993,27 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// but one-shot automation must exit non-zero with a typed timeout. This
 		// runs only after the in-turn retry budget is exhausted, so a transient
 		// timeout that recovered is still a successful turn.
-		if isHeadlessTimeoutFailure(err) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "timeout", err.Error())
+		} else if ctx.Err() != nil {
+			// The invocation's owning cancellation determines its result.
 		} else if errors.Is(err, tools.ErrMaxTurnsExceeded) {
 			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "max_turns", err.Error())
 		} else if errors.Is(err, tools.ErrBudgetExceeded) {
 			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "budget_exceeded", err.Error())
 		} else if errors.Is(err, tools.ErrCostUnavailable) {
 			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "cost_unavailable", err.Error())
+		} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, client.ErrModelRoundTimeout) {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "timeout", err.Error())
+		} else if tools.IsHookStopError(err) && ctx.Err() == nil {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "hook_stopped", err.Error())
+		} else if !errors.Is(err, context.Canceled) && isHeadlessTimeoutFailure(err) {
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "timeout", err.Error())
+		}
+		if goalTurn != nil && ctx.Err() == nil {
+			// Clearing a failed goal must not turn an empty one-shot response
+			// into success merely because no active condition remains at exit.
+			a.recordHeadlessTerminalOutcomeForTurn(headlessTurn, "goal_failed", err.Error())
 		}
 
 		cancelled := errors.Is(err, context.Canceled)
@@ -882,7 +1035,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			"provider":        ft.Provider,
 		})
 		// Don't count user cancellation (Esc) as a failure — only real API errors
-		if a.reliability != nil && !cancelled {
+		if a.reliability != nil && !cancelled && !tools.IsHookStopError(err) {
 			a.reliability.RecordFailure()
 		}
 		if errors.Is(err, ErrRequestCircuitOpen) {
@@ -896,14 +1049,22 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// If it ends with a user/tool-result message, the model never responded —
 		// saving it would create an orphaned tool_result that breaks subsequent API calls.
 		if len(newHistory) > len(history) {
-			if last := newHistory[len(newHistory)-1]; last != nil && last.Role == genai.RoleModel {
+			if tools.IsHookStopError(err) {
+				// The executor committed every tool-use/result pair before stopping.
+				// Keep completed writes and skipped outcomes in the next prompt.
+				a.setRetainedToolHistory(history, stripOrphanFunctionCalls(newHistory))
+				a.syncToolCheckpoints()
+				if a.sessionManager != nil {
+					_ = a.sessionManager.SaveAfterMessage()
+				}
+			} else if last := newHistory[len(newHistory)-1]; last != nil && last.Role == genai.RoleModel {
 				// Last message is a model turn — its tool_calls may be
 				// orphaned (execution failed before we appended results).
 				// Strip orphans so the next API call doesn't fail with
 				// "tool_call_ids did not have response messages" on every
 				// subsequent turn.
 				cleaned := stripOrphanFunctionCalls(newHistory)
-				a.session.SetHistory(cleaned)
+				a.setRetainedToolHistory(history, cleaned)
 				// Persist the tool-checkpoint journal alongside the saved
 				// partial history — the success path (after the loop) and BOTH
 				// retry-path saves do this; the terminal-error branches omitted
@@ -919,7 +1080,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 				// Trim back to the last model message to avoid orphaned tool results
 				trimmed := trimToLastModelMessage(newHistory, len(history))
 				if len(trimmed) > len(history) {
-					a.session.SetHistory(trimmed)
+					a.setRetainedToolHistory(history, trimmed)
 					a.syncToolCheckpoints() // see note above — symmetric with retry/success saves
 					if a.sessionManager != nil {
 						_ = a.sessionManager.SaveAfterMessage()
@@ -940,6 +1101,18 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 			a.lastErrorTime = time.Time{}
 			a.mu.Unlock()
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			return
+		}
+		if tools.IsHookStopError(err) {
+			// A hook explicitly stopped this invocation. It owns no retry timer.
+			a.clearRateLimitRetry(message)
+			a.clearAutoResume(originalMessage)
+			a.mu.Lock()
+			a.lastError = ""
+			a.lastErrorTime = time.Time{}
+			a.mu.Unlock()
+			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			a.safeSendToProgram(ui.ErrorMsg(err))
 			return
 		}
 		if isAutomaticRetryUnsafe(err) {
@@ -968,6 +1141,14 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 					"Automatic retry was blocked; inspect the diff, then explicitly continue.",
 			})
 			a.safeSendToProgram(ui.ResponseDoneMsg{})
+			a.safeSendToProgram(ui.ErrorMsg(err))
+			return
+		}
+		// A goal owns its continuation. Do not also install a generic request
+		// timer that can replay this directive after /goal clear or replacement.
+		if goalTurn != nil {
+			a.clearRateLimitRetry(message)
+			a.clearAutoResume(originalMessage)
 			a.safeSendToProgram(ui.ErrorMsg(err))
 			return
 		}
@@ -1248,8 +1429,11 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	a.applyToolOutputHygiene()
 
 	// Extract session memory if thresholds are met
-	if a.sessionMemory != nil && a.sessionMemory.ShouldExtract(a.totalInputTokens) {
-		a.sessionMemory.ExtractAsync(a.session.GetHistory(), a.totalInputTokens)
+	if a.sessionMemory != nil {
+		inputTokens := a.GetTokenStats().InputTokens
+		if a.sessionMemory.ShouldExtract(inputTokens) {
+			a.sessionMemory.ExtractAsyncWithContext(ctx, a.session.GetHistory(), inputTokens)
+		}
 	}
 
 	// Check for context-clear request after plan approval
@@ -1262,35 +1446,69 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	}
 
 	formatCorrection := isStructuredOutputCorrection(ctx)
-	if !formatCorrection {
-		if !a.runCompletionReviewIfNeeded(ctx, message, &response, &turnUsage) {
-			return
+	for stopPass := 0; ; stopPass++ {
+		if !formatCorrection {
+			if !a.runCompletionReviewIfNeeded(ctx, message, &response, &turnUsage) {
+				return
+			}
 		}
-	}
-	// Completion review may replace the draft response. Capture the resulting
-	// terminal answer before the done-gate starts any internal auto-fix model
-	// exchanges; JSON headless output must not concatenate those hidden calls.
-	a.recordHeadlessFinalResult(response)
+		// Completion review may replace the draft response. Capture the resulting
+		// terminal answer before the done-gate starts any internal auto-fix model
+		// exchanges; JSON headless output must not concatenate those hidden calls.
+		a.recordHeadlessFinalResult(response)
 
-	// Hard done-gate before response completion.
-	if !formatCorrection {
-		if !a.enforceDoneGate(ctx, message) {
-			return
+		// Hard done-gate before response completion.
+		if !formatCorrection {
+			if !a.enforceDoneGate(ctx, message) {
+				return
+			}
+			if headlessDirect {
+				followUp, stopErr := a.stopHookVerdict(ctx, response, stopPass > 0)
+				if stopErr != nil {
+					a.reportHeadlessStopFailure(ctx, headlessTurn, stopErr)
+					return
+				}
+				if followUp != "" {
+					if abortIfConversationChanged() {
+						return
+					}
+					a.currentPresenter().Warning(truncateRunesApp(followUp, 160))
+					prior := a.session.GetHistory()
+					continuedHistory, continuedResponse, continuationErr := a.executeTrackedContinuation(ctx, prior, followUp, &turnUsage)
+					if abortIfConversationChanged() {
+						return
+					}
+					if len(continuedHistory) >= len(prior) {
+						a.session.SetHistory(continuedHistory)
+						a.applyToolOutputHygiene()
+					}
+					if continuationErr != nil {
+						if strings.TrimSpace(continuedResponse) != "" {
+							a.recordHeadlessFinalResult(continuedResponse)
+						}
+						a.reportHeadlessStopFailure(ctx, headlessTurn, continuationErr)
+						return
+					}
+					response = continuedResponse
+					continue
+				}
+			}
+
+			// Evidence footer: deterministic audit-trail streamed after the model's
+			// prose answer for code-change turns. Runs AFTER done-gate so a failing
+			// verification never gets a "✓ Verified" claim under it. Skipped when
+			// the response already names every touched file + verification signal.
+			// Intentionally NOT mixed into `response` — working memory already
+			// derives its own "Files changed / Verification" lines from the raw
+			// touched-paths + commands snapshots, so folding the footer back in
+			// would produce redundant entries on the next turn.
+			if footer := a.buildEvidenceFooterIfEnabled(response); footer != "" {
+				a.safeSendToProgram(ui.StreamTextMsg(footer))
+			}
+
+			a.updateWorkingMemoryFromTurn(message, response)
 		}
-
-		// Evidence footer: deterministic audit-trail streamed after the model's
-		// prose answer for code-change turns. Runs AFTER done-gate so a failing
-		// verification never gets a "✓ Verified" claim under it. Skipped when
-		// the response already names every touched file + verification signal.
-		// Intentionally NOT mixed into `response` — working memory already
-		// derives its own "Files changed / Verification" lines from the raw
-		// touched-paths + commands snapshots, so folding the footer back in
-		// would produce redundant entries on the next turn.
-		if footer := a.buildEvidenceFooterIfEnabled(response); footer != "" {
-			a.safeSendToProgram(ui.StreamTextMsg(footer))
-		}
-
-		a.updateWorkingMemoryFromTurn(message, response)
+		break
 	}
 
 	// A successful recovered turn is terminal for its claimed durable record.
@@ -1348,7 +1566,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	// End-of-turn hooks: a FailOnError stop hook can request ONE bounded
 	// continuation (see runStopHooks).
-	if !formatCorrection {
+	if !formatCorrection && !headlessDirect {
 		a.runStopHooks(ctx, response)
 	}
 
@@ -1419,6 +1637,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 	// Update todos display
 	a.emitTodoUpdate()
+	a.finishGoalTurn(ctx, response, &turnUsage)
 }
 
 func (a *App) reportPendingRecoveryClearFailure(headlessTurn *headlessTerminalOutcome, recovery sideEffectRecoveryContext, clearErr error) {
@@ -1545,6 +1764,28 @@ func (a *App) executeTracked(
 	prompt string,
 	usage *turnUsageAccumulator,
 ) (newHistory []*genai.Content, response string, err error) {
+	return a.executeTrackedExchange(ctx, history, prompt, usage, false)
+}
+
+func (a *App) executeTrackedContinuation(ctx context.Context, history []*genai.Content, prompt string, usage *turnUsageAccumulator) ([]*genai.Content, string, error) {
+	return a.executeTrackedExchange(ctx, history, prompt, usage, true)
+}
+
+func (a *App) executeTrackedExchange(ctx context.Context, history []*genai.Content, prompt string, usage *turnUsageAccumulator, continuation bool) (newHistory []*genai.Content, response string, err error) {
+	defer func() {
+		if progress := goalPlanProgressFromContext(ctx); progress != nil && err != nil {
+			progress.err = err
+		}
+	}()
+	// This gate also covers internal reviews/fixes after the primary response
+	// filled the hard window. Run it before installing usage accounting, so a
+	// storage-only failure cannot re-charge the previous model exchange.
+	if a != nil && a.session != nil {
+		if err := a.ensureHistoryWindowsReady(); err != nil {
+			a.recordHeadlessTerminalOutcome("persistence_failed", err.Error())
+			return history, "", fmt.Errorf("pending history originals could not be archived: %w", err)
+		}
+	}
 	estimatedInput := estimateModelRequestInput(history, prompt)
 	defer func() {
 		if usage == nil || a == nil || a.executor == nil {
@@ -1554,6 +1795,11 @@ func (a *App) executeTracked(
 		cacheCreation, cacheRead := a.executor.GetLastCacheMetrics()
 		cost, tracked := a.executor.GetLastEstimatedCost()
 		modelRounds := a.executor.GetLastModelTurns()
+		// A shared turn/cost cap can refuse an internal exchange before its
+		// first provider round. Its local marker is not billable model output.
+		if modelRounds == 0 {
+			return
+		}
 		// A budget pricing preflight fails before any provider request. Do not
 		// feed the local diagnostic marker through the ordinary no-metadata
 		// token fallback: that would invent billable usage and session spend for
@@ -1565,9 +1811,14 @@ func (a *App) executeTracked(
 				return
 			}
 		}
+		beforeInput, beforeOutput := usage.input, usage.output
 		usage.add(input, output, cacheCreation, cacheRead, estimatedInput, response, cost, tracked)
+		client.RecordContextTokenUsage(ctx, usage.input-beforeInput, usage.output-beforeOutput)
 		usage.modelRounds += max(modelRounds, 0)
 	}()
+	if continuation {
+		return a.executor.ExecuteContinuation(ctx, history, prompt)
+	}
 	return a.executor.Execute(ctx, history, prompt)
 }
 
@@ -1726,6 +1977,7 @@ func (a *App) emitTodoUpdate() {
 // executePlanWithClearContext dispatches plan execution to either delegated
 // sub-agent mode or direct monolithic execution.
 func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *plan.Plan) {
+	planStart := time.Now()
 	execCtx, execCancel := context.WithCancel(ctx)
 	defer execCancel()
 	a.startPlanWatchdog(execCtx, execCancel, approvedPlan.ID)
@@ -1753,7 +2005,11 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 		}
 	}
 
+	boundaryOwner := a.captureConversationLineage()
 	if err := a.preparePlanExecutionBoundary(approvedPlan); err != nil {
+		if observation := goalObservation(ctx); observation != nil {
+			observation.err = err
+		}
 		logging.Warn("plan execution blocked: context boundary was not durable", "error", err)
 		if a.planManager != nil {
 			a.planManager.PausePlan()
@@ -1769,6 +2025,28 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 		a.safeSendToProgram(ui.ResponseDoneMsg{})
 		return
 	}
+	var adopted bool
+	ctx, adopted = a.adoptGoalPlanBoundary(ctx, boundaryOwner)
+	if !adopted {
+		a.recordHeadlessTerminalOutcome("conversation_changed", errRecoveryConversationChanged.Error())
+		return
+	}
+	execCtx = withConversationLineage(execCtx, a.session.GetID(), a.recoveryEpoch.Load())
+	// Approval starts a new execution request. Its schema must reflect the
+	// restored execution mode, rather than the read-only planning request that
+	// created it. The separate invocation capability ceiling remains binding.
+	executionTools := a.toolsForMessage(approvedPlan.Request)
+	if inherited, restricted := tools.ToolCapabilityCeilingFromContext(execCtx); restricted {
+		executionTools = tools.FilterGeminiToolsByCapability(executionTools, inherited)
+	}
+	execCtx = tools.ContextWithToolSchemaCeiling(execCtx, a.executor, toolSchemaDeclarationNames(executionTools))
+	if a.client != nil {
+		a.client.SetTools(executionTools)
+	}
+	progress := &goalPlanProgress{}
+	counter := &client.TokenUsageCounter{}
+	execCtx = client.ContextWithTokenUsageCounter(execCtx, counter)
+	execCtx = context.WithValue(execCtx, goalPlanProgressKey{}, progress)
 
 	// Capture the exact shared undo-history delta for this execution segment.
 	// The plan may pause and resume across multiple turns; the plan extension
@@ -1802,6 +2080,7 @@ func (a *App) executePlanWithClearContext(ctx context.Context, approvedPlan *pla
 	} else {
 		a.executePlanDirectly(execCtx, approvedPlan)
 	}
+	a.finishGoalPlan(ctx, approvedPlan, planStart, counter, progress)
 }
 
 func (a *App) preparePlanExecutionBoundary(approvedPlan *plan.Plan) error {
@@ -1830,7 +2109,7 @@ func (a *App) preparePlanExecutionBoundary(approvedPlan *plan.Plan) error {
 			return fmt.Errorf("save approved plan before context replacement: %w", err)
 		}
 	}
-	if _, err := a.replaceConversationPersistenceBoundary(func() {
+	if _, err := a.replacePlanConversationPersistenceBoundary(func() {
 		a.session.AddUserMessage(planPrompt)
 		a.session.AddModelMessage("I understand the approved plan. I will execute each step as instructed.")
 	}); err != nil {
@@ -2054,6 +2333,9 @@ func (a *App) executePlanDirectly(ctx context.Context, approvedPlan *plan.Plan) 
 		if err := a.sessionManager.SaveAfterMessage(); err != nil {
 			logging.Warn("failed to save session after message", "error", err)
 		}
+	}
+	if progress := goalPlanProgressFromContext(ctx); progress != nil {
+		progress.completed = true
 	}
 }
 
@@ -2748,6 +3030,9 @@ func (a *App) executePlanDelegated(ctx context.Context, approvedPlan *plan.Plan)
 			logging.Warn("failed to save session after message", "error", err)
 		}
 	}
+	if progress := goalPlanProgressFromContext(ctx); progress != nil {
+		progress.completed = true
+	}
 }
 
 // executeDelegatedStep executes a single step via sub-agent delegation.
@@ -2951,6 +3236,9 @@ func (a *App) executeDelegatedStep(ctx context.Context, step *plan.Step, approve
 			// the success-path assignment, but those attempts were still billed.
 			step.TokensUsed = delegatedTokensUsed
 			approvedPlan.SetStepUsage(step.ID, step.TokensUsed)
+		}
+		if progress := goalPlanProgressFromContext(ctx); progress != nil && err != nil {
+			progress.err = err
 		}
 
 		if err != nil {
@@ -3290,7 +3578,7 @@ func nextRetryMessageAfterProgress(originalMessage string, preAttempt, cleaned [
 // the persisted user turn. Executor.Execute appends the exact message it was
 // given at priorLen; keep the optimization provider-visible while session
 // resume, memory extraction, and user-facing history retain the user's text.
-func restoreDirectPromptScaffolding(newHistory []*genai.Content, priorLen int, originalMessage string) []*genai.Content {
+func restoreDirectPromptScaffolding(newHistory []*genai.Content, priorLen int, originalMessage string, sent ...string) []*genai.Content {
 	if priorLen < 0 || priorLen >= len(newHistory) {
 		return newHistory
 	}
@@ -3301,6 +3589,9 @@ func restoreDirectPromptScaffolding(newHistory []*genai.Content, priorLen int, o
 	part := injected.Parts[0]
 	if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.Text == "" {
 		return newHistory
+	}
+	if len(sent) > 0 && sent[0] != "" && strings.HasPrefix(part.Text, sent[0]) {
+		originalMessage += strings.TrimPrefix(part.Text, sent[0])
 	}
 	newHistory[priorLen] = genai.NewContentFromText(originalMessage, genai.RoleUser)
 	return newHistory
@@ -3714,6 +4005,12 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 	if len(required) == 0 {
 		return "", "", false, fmt.Sprintf("step %d is missing verify_commands contract", step.ID)
 	}
+	// Native verification is still part of the invocation. Plan approval cannot
+	// grant a shell capability that the caller explicitly excluded.
+	if ceiling, restricted := tools.ToolCapabilityCeilingFromContext(ctx); restricted &&
+		len(intersectCapabilityNames(ceiling, []string{"bash"})) == 0 {
+		return "", "", false, "verify command blocked: bash is outside this invocation's capability ceiling"
+	}
 
 	bashTool, ok := a.registry.Get("bash")
 	if !ok {
@@ -3765,6 +4062,11 @@ func (a *App) runStepVerificationCommands(ctx context.Context, approvedPlan *pla
 		}
 
 		result, err := bashTool.Execute(verifyCtx, args)
+		a.mu.Lock()
+		a.responseToolsUsed = append(a.responseToolsUsed, "bash")
+		a.mu.Unlock()
+		a.recordResponseCommand("bash", args, result)
+		a.recordResponseEvidence("bash", args, result)
 		if err != nil {
 			return "", "", false, fmt.Sprintf("verify command failed: %s (%v)", cmd, err)
 		}

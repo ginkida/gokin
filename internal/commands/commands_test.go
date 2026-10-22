@@ -97,7 +97,7 @@ func TestHandlerListCommands(t *testing.T) {
 	// new slash command that ships in a release, add it here too.
 	essential := []string{
 		// core session
-		"help", "clear", "doctor", "config", "model", "plan", "stats",
+		"help", "clear", "doctor", "config", "model", "plan", "stats", "rewind",
 		// auth + setup
 		"login", "logout", "provider", "status",
 		// git inspect / action set (Sprint 9 → v0.77.x → v0.78.12 /blame → v0.78.25 /show)
@@ -132,11 +132,11 @@ func TestHelpCategoriesAreRegistered(t *testing.T) {
 	// Keep in sync — this is the whole point of the test.
 	helpCategories := map[string][]string{
 		"Getting Started": {"help", "quickstart", "shortcuts"},
-		"Session":         {"model", "thinking", "clear", "compact", "save", "resume", "sessions", "stats", "tasks", "audit", "cost", "instructions", "memory", "loop", "undo", "redo"},
+		"Session":         {"model", "thinking", "effort", "clear", "compact", "save", "resume", "sessions", "stats", "tasks", "audit", "cost", "instructions", "memory", "goal", "loop", "undo", "redo", "rewind"},
 		"Auth & Setup":    {"login", "logout", "keys", "provider", "status", "doctor", "config", "set", "settings", "update", "restart", "whats-new", "changelog"},
 		"Git":             {"init", "commit", "pr", "diff", "log", "branches", "grep", "blame", "show"},
 		"Planning":        {"plan", "resume-plan", "checkpoints", "health", "policy", "ledger", "plan-proof", "journal", "recovery", "observability", "insights", "memory-governance", "tree-stats"},
-		"Tools": {"browse", "open", "pwd", "mcp", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "timeout", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
+		"Tools": {"browse", "open", "pwd", "mcp", "lsp", "plugin", "reload-plugins", "skill", "copy", "paste", "clear-todos", "ql", "permissions", "sandbox", "timeout", "theme", "hooks", "add-dir", "remove-dir", "debug-dump",
 			"register-agent-type", "list-agent-types", "unregister-agent-type"},
 	}
 

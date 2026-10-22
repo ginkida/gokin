@@ -25,11 +25,18 @@ type ToolsChangedCallback func(name string)
 
 // Manager manages multiple MCP server connections.
 type Manager struct {
-	servers map[string]*ServerConfig // Server configurations
-	clients map[string]*Client       // Active client connections
-	tools   []tools.Tool             // All registered tools from all servers
-	health  map[string]*ServerHealth
-	mu      sync.RWMutex
+	servers            map[string]*ServerConfig // Server configurations
+	clients            map[string]*Client       // Active client connections
+	connecting         map[string]*connectionAttempt
+	tools              []tools.Tool // All registered tools from all servers
+	health             map[string]*ServerHealth
+	mu                 sync.RWMutex
+	pluginReloadMu     sync.Mutex
+	closed             bool
+	pluginWatchMu      sync.Mutex
+	pluginWatchCancel  context.CancelFunc
+	pluginWatchDone    chan struct{}
+	pluginWatchDefault bool
 
 	// Auto-healing
 	healMu        sync.Mutex // protects healingCancel and healingDone (separate from mu to avoid deadlock)
@@ -117,139 +124,45 @@ func (m *Manager) handleNotification(serverName, method string, _ any) {
 // defaultServerTimeout is the per-server connection timeout.
 const defaultServerTimeout = 15 * time.Second
 
-// serverResult holds the result of a single server connection attempt.
-type serverResult struct {
-	name   string
-	client *Client
-	tools  []tools.Tool
-	err    error
+// connectionAttempt coordinates startup and hook-triggered lazy connections.
+// Waiters can cancel independently without starting duplicate transports.
+type connectionAttempt struct {
+	done chan struct{}
+	err  error
 }
 
-// ConnectAll connects to all servers configured for auto-connect.
-// Connections are made in parallel with per-server timeouts.
 func (m *Manager) ConnectAll(ctx context.Context) error {
-	// Collect auto-connect servers under read lock
 	m.mu.RLock()
-	var toConnect []*ServerConfig
-	for name, cfg := range m.servers {
-		if cfg.Paused {
-			logging.Debug("MCP server skipped (paused)", "name", name)
-			continue
+	if m.closed {
+		m.mu.RUnlock()
+		return fmt.Errorf("MCP manager is shut down")
+	}
+	var configs []*ServerConfig
+	for _, cfg := range m.servers {
+		if cfg.AutoConnect && !cfg.Paused {
+			configs = append(configs, cfg)
 		}
-		if !cfg.AutoConnect {
-			logging.Debug("MCP server skipped (auto_connect=false)", "name", name)
-			continue
-		}
-		toConnect = append(toConnect, cfg)
 	}
 	m.mu.RUnlock()
-
-	if len(toConnect) == 0 {
-		return nil
-	}
-
-	// Connect to all servers in parallel
-	results := make(chan serverResult, len(toConnect))
-	var wg sync.WaitGroup
-
-	for _, cfg := range toConnect {
-		wg.Add(1)
+	results := make(chan error, len(configs))
+	for _, cfg := range configs {
 		go func(cfg *ServerConfig) {
-			defer wg.Done()
-
 			serverCtx, cancel := context.WithTimeout(ctx, defaultServerTimeout)
 			defer cancel()
-
-			res := serverResult{name: cfg.Name}
-
-			// Create client (no lock needed — pure network I/O)
-			client, err := NewClient(serverCtx, cfg)
-			if err != nil {
-				res.err = fmt.Errorf("failed to create client: %w", err)
-				results <- res
-				return
+			if err := m.connect(serverCtx, cfg.Name, cfg); err != nil {
+				results <- fmt.Errorf("%s: %w", cfg.Name, err)
+			} else {
+				results <- nil
 			}
-
-			// Initialize connection
-			if err := client.Initialize(serverCtx); err != nil {
-				_ = client.Close()
-				res.err = fmt.Errorf("initialization failed: %w", err)
-				results <- res
-				return
-			}
-
-			// List tools
-			mcpTools, err := client.ListTools(serverCtx)
-			if err != nil {
-				_ = client.Close()
-				res.err = fmt.Errorf("failed to list tools: %w", err)
-				results <- res
-				return
-			}
-
-			// Create tool wrappers
-			for _, t := range mcpTools {
-				if !cfg.ToolAllowed(t.Name) {
-					logging.Debug("MCP tool hidden by allowed_tools whitelist", "server", cfg.Name, "tool", t.Name)
-					continue
-				}
-				tool := NewMCPTool(client, cfg.Name, cfg.ToolPrefix, t)
-				res.tools = append(res.tools, tool)
-			}
-
-			res.client = client
-			results <- res
 		}(cfg)
 	}
-
-	// Close results channel when all goroutines complete
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logging.Warn("MCP result collector recovered from panic", "error", r)
-			}
-		}()
-		wg.Wait()
-		close(results)
-	}()
-
-	// Collect results under write lock
 	var errs []error
-	var adopted []struct {
-		name   string
-		client *Client
-	}
-	m.mu.Lock()
-	for res := range results {
-		if res.err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", res.name, res.err))
-			continue
+	for range configs {
+		if err := <-results; err != nil {
+			errs = append(errs, err)
 		}
-
-		m.clients[res.name] = res.client
-		m.tools = append(m.tools, res.tools...)
-		adopted = append(adopted, struct {
-			name   string
-			client *Client
-		}{res.name, res.client})
-
-		logging.Info("MCP server connected",
-			"name", res.name,
-			"tools", len(res.tools))
 	}
-	m.mu.Unlock()
-
-	// Install notification handlers outside the lock — SetNotificationHandler
-	// acquires client.mu which has its own ordering rules.
-	for _, a := range adopted {
-		m.wireClientNotifications(a.name, a.client)
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-
-	return nil
+	return errors.Join(errs...)
 }
 
 // dialServer performs the network handshake (NewClient + Initialize +
@@ -263,7 +176,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 // health-check loop's CheckHealth/tryReconnectUnhealthy, Disconnect,
 // AddServer, RemoveServer, a concurrent Connect) blocked on m.mu.
 func (m *Manager) dialServer(ctx context.Context, cfg *ServerConfig) (*Client, []*ToolInfo, error) {
-	client, err := NewClient(ctx, cfg)
+	client, err := newManagedClient(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create client: %w", err)
 	}
@@ -284,11 +197,41 @@ func (m *Manager) dialServer(ctx context.Context, cfg *ServerConfig) (*Client, [
 
 // Connect connects to a specific server by name.
 func (m *Manager) Connect(ctx context.Context, name string) error {
+	return m.connect(ctx, name, nil)
+}
+
+func (m *Manager) connect(ctx context.Context, name string, expected *ServerConfig) (connectionErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return fmt.Errorf("MCP manager is shut down")
+	}
 	cfg, exists := m.servers[name]
 	if !exists {
 		m.mu.Unlock()
 		return fmt.Errorf("unknown server: %s", name)
+	}
+
+	if expected != nil && cfg != expected {
+		m.mu.Unlock()
+		return fmt.Errorf("server %s changed before connecting", name)
+	}
+	if cfg.Paused {
+		m.mu.Unlock()
+		return fmt.Errorf("server %s is paused", name)
+	}
+	// A hook waits on an existing startup connection within its own deadline.
+	if pending := m.connecting[name]; pending != nil {
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pending.done:
+			return pending.err
+		}
 	}
 
 	// Check if already connected
@@ -296,7 +239,19 @@ func (m *Manager) Connect(ctx context.Context, name string) error {
 		m.mu.Unlock()
 		return nil
 	}
+	if m.connecting == nil {
+		m.connecting = make(map[string]*connectionAttempt)
+	}
+	attempt := &connectionAttempt{done: make(chan struct{})}
+	m.connecting[name] = attempt
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		attempt.err = connectionErr
+		delete(m.connecting, name)
+		close(attempt.done)
+		m.mu.Unlock()
+	}()
 
 	// Network handshake WITHOUT the lock held.
 	client, mcpTools, err := m.dialServer(ctx, cfg)
@@ -310,7 +265,7 @@ func (m *Manager) Connect(ctx context.Context, name string) error {
 	// never clobber a racing connect's client (leaking ours unclosed) or
 	// resurrect a server the user removed while we were dialing.
 	m.mu.Lock()
-	if _, stillConfigured := m.servers[name]; !stillConfigured {
+	if current, stillConfigured := m.servers[name]; m.closed || !stillConfigured || current != cfg || current.Paused {
 		m.mu.Unlock()
 		_ = client.Close()
 		return fmt.Errorf("server %s was removed while connecting", name)
@@ -343,14 +298,19 @@ func (m *Manager) Connect(ctx context.Context, name string) error {
 // Disconnect disconnects from a specific server.
 func (m *Manager) Disconnect(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	client, exists := m.clients[name]
-	if !exists {
-		return nil
+	client := m.detachClientLocked(name)
+	m.mu.Unlock()
+	if client != nil {
+		if err := client.Close(); err != nil {
+			return fmt.Errorf("failed to close client: %w", err)
+		}
 	}
+	return nil
+}
 
-	// Remove tools from this server
+func (m *Manager) detachClientLocked(name string) *Client {
+	client := m.clients[name]
+	delete(m.clients, name)
 	newTools := make([]tools.Tool, 0, len(m.tools))
 	for _, t := range m.tools {
 		if mcpTool, ok := t.(*MCPTool); ok {
@@ -362,15 +322,7 @@ func (m *Manager) Disconnect(name string) error {
 		}
 	}
 	m.tools = newTools
-
-	// Close client
-	delete(m.clients, name)
-	if err := client.Close(); err != nil {
-		return fmt.Errorf("failed to close client: %w", err)
-	}
-
-	logging.Info("MCP server disconnected", "name", name)
-	return nil
+	return client
 }
 
 // GetTools returns all tools from all connected servers.
@@ -629,6 +581,9 @@ func (m *Manager) GetAllServerConfigs() []*ServerConfig {
 func (m *Manager) AddServer(cfg *ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return fmt.Errorf("MCP manager is shut down")
+	}
 
 	if _, exists := m.servers[cfg.Name]; exists {
 		return fmt.Errorf("server already exists: %s", cfg.Name)
@@ -641,16 +596,13 @@ func (m *Manager) AddServer(cfg *ServerConfig) error {
 // RemoveServer removes a server configuration and disconnects if connected.
 func (m *Manager) RemoveServer(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Disconnect if connected
-	if client, exists := m.clients[name]; exists {
-		_ = client.Close()
-		delete(m.clients, name)
-	}
-
-	// Remove configuration
+	client := m.detachClientLocked(name)
 	delete(m.servers, name)
+	delete(m.health, name)
+	m.mu.Unlock()
+	if client != nil {
+		return client.Close()
+	}
 	return nil
 }
 
@@ -660,9 +612,15 @@ func (m *Manager) RemoveServer(name string) error {
 func (m *Manager) UpdateServer(cfg *ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return fmt.Errorf("MCP manager is shut down")
+	}
 
 	if _, exists := m.servers[cfg.Name]; !exists {
 		return fmt.Errorf("unknown server: %s", cfg.Name)
+	}
+	if m.servers[cfg.Name].pluginFingerprint != "" && cfg.pluginFingerprint == "" {
+		return fmt.Errorf("plugin MCP servers must be changed through their plugin configuration")
 	}
 	m.servers[cfg.Name] = cfg
 	return nil
@@ -685,21 +643,22 @@ func (m *Manager) SetPaused(name string, paused bool) error {
 
 // Shutdown disconnects from all servers and stops background processes.
 func (m *Manager) Shutdown(ctx context.Context) error {
-	m.StopHealthCheck()
-
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.closed = true
+	clients := m.clients
+	m.clients = make(map[string]*Client)
+	m.tools = nil
+	m.mu.Unlock()
+	m.StopHealthCheck()
+	m.StopPluginPolicyWatch()
 
 	var lastErr error
-	for name, client := range m.clients {
+	for name, client := range clients {
 		if err := client.Close(); err != nil {
 			logging.Warn("MCP client close error", "name", name, "error", err)
 			lastErr = err
 		}
 	}
-
-	m.clients = make(map[string]*Client)
-	m.tools = nil
 
 	logging.Debug("MCP manager shutdown complete")
 	return lastErr
@@ -970,6 +929,10 @@ type reconnectCandidate struct {
 func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 	// Phase 1: collect candidates and clean up old state under lock.
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
 	var candidates []reconnectCandidate
 	for name, h := range m.health {
 		if h.Healthy {
@@ -1033,7 +996,7 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 			_ = c.oldClient.Close()
 		}
 
-		client, err := NewClient(ctx, c.cfg)
+		client, err := newManagedClient(ctx, c.cfg)
 		if err != nil {
 			m.mu.Lock()
 			c.health.LastReconnectError = err.Error()
@@ -1069,7 +1032,7 @@ func (m *Manager) tryReconnectUnhealthy(ctx context.Context) {
 		// later /mcp add <same name> would reuse the stale entry instead of
 		// creating a fresh connection.
 		m.mu.Lock()
-		if _, stillConfigured := m.servers[c.name]; !stillConfigured {
+		if current, stillConfigured := m.servers[c.name]; m.closed || !stillConfigured || current != c.cfg || current.Paused || m.clients[c.name] != nil {
 			m.mu.Unlock()
 			_ = client.Close()
 			logging.Info("MCP auto-reconnect: server removed during reconnect, discarding", "name", c.name)

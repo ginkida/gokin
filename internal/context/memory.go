@@ -17,13 +17,14 @@ import (
 
 // ProjectMemory holds project-specific instructions loaded from files.
 type ProjectMemory struct {
-	workDir      string
-	instructions string
-	sourcePath   string // Path where instructions were found
-	watchPaths   []string
-	mu           sync.RWMutex
-	loadMu       sync.Mutex
-	watchMu      sync.Mutex
+	workDir         string
+	instructions    string
+	sourcePath      string // Path where instructions were found
+	watchPaths      []string
+	mu              sync.RWMutex
+	loadMu          sync.Mutex
+	additionalRoots []string // loadMu
+	watchMu         sync.Mutex
 
 	// File watching
 	watcher         *FileWatcher
@@ -62,9 +63,10 @@ const (
 )
 
 type memoryLayer struct {
-	label  string
-	paths  []string
-	origin instructionOrigin
+	label    string
+	paths    []string
+	origin   instructionOrigin
+	boundary string // Registered repositories retain their own include boundary.
 }
 
 type instructionDocument struct {
@@ -209,6 +211,13 @@ func (m *ProjectMemory) Load() error {
 	return nil
 }
 
+func (m *ProjectMemory) SetAdditionalRoots(roots []string) error {
+	m.loadMu.Lock()
+	m.additionalRoots = append([]string(nil), roots...)
+	m.loadMu.Unlock()
+	return m.Load()
+}
+
 // loadAndCommit builds a complete disk snapshot and publishes it only if the
 // originating watcher generation is still active. generation==0 is an
 // explicit/direct load and is always allowed to commit.
@@ -248,6 +257,14 @@ func (m *ProjectMemory) loadAndCommit(generation uint64) (committed, changed boo
 
 func (m *ProjectMemory) loadSnapshot() projectMemorySnapshot {
 	layers := memoryLayerPaths(m.workDir)
+	for _, directory := range m.additionalRoots {
+		for _, layer := range memoryLayerPaths(directory) {
+			if layer.origin == projectInstructionOrigin {
+				layer.boundary = directory
+				layers = append(layers, layer)
+			}
+		}
+	}
 	watchSet := make(map[string]struct{})
 	for _, layer := range layers {
 		for _, path := range layer.paths {
@@ -258,6 +275,9 @@ func (m *ProjectMemory) loadSnapshot() projectMemorySnapshot {
 	// paths yet. Watching the directory catches create/delete/rename; each
 	// discovered file is watched separately for content changes.
 	addInstructionWatchPath(watchSet, filepath.Join(m.workDir, ".gokin", "rules"))
+	for _, directory := range m.additionalRoots {
+		addInstructionWatchPath(watchSet, filepath.Join(directory, ".gokin", "rules"))
+	}
 
 	projectRoot, rootErr := canonicalInstructionRoot(m.workDir)
 	if rootErr != nil {
@@ -270,10 +290,14 @@ func (m *ProjectMemory) loadSnapshot() projectMemorySnapshot {
 		for _, path := range layer.paths {
 			containmentRoot := ""
 			if layer.origin == projectInstructionOrigin {
-				if rootErr != nil {
+				var err error
+				containmentRoot, err = projectRoot, rootErr
+				if layer.boundary != "" {
+					containmentRoot, err = canonicalInstructionRoot(layer.boundary)
+				}
+				if err != nil {
 					continue
 				}
-				containmentRoot = projectRoot
 			}
 
 			content, resolvedPath, err := readInstructionFile(path, containmentRoot, true)

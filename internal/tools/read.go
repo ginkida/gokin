@@ -210,6 +210,8 @@ type ReadTool struct {
 	proactive      ProactiveContextProvider
 	lastReadMu     sync.Mutex
 	lastReadFile   string // Track last file read for co-access learning
+	summaryMu      sync.RWMutex
+	summaryReader  func(context.Context, string) (string, error)
 }
 
 // NewReadTool creates a new ReadTool instance with the given working directory.
@@ -297,7 +299,7 @@ func (t *ReadTool) Declaration() *genai.FunctionDeclaration {
 			Properties: map[string]*genai.Schema{
 				"file_path": {
 					Type:        genai.TypeString,
-					Description: "The absolute path to the file to read",
+					Description: "Absolute file path, or a gokin://summary/<id> archive referenced by the current session",
 				},
 				"offset": {
 					Type:        genai.TypeInteger,
@@ -323,6 +325,9 @@ func (t *ReadTool) Validate(args map[string]any) error {
 
 func (t *ReadTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	filePath, _ := GetString(args, "file_path")
+	if strings.HasPrefix(filePath, "gokin://") {
+		return t.readSummaryResource(ctx, filePath, args), nil
+	}
 
 	// Validate path (mandatory for security)
 	if t.pathValidator == nil {

@@ -1,10 +1,12 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"gokin/internal/chat"
+	"gokin/internal/fileutil"
 	"gokin/internal/logging"
 )
 
@@ -31,6 +33,7 @@ func (a *App) SelectNewSessionID(newID string) error {
 	// recent conversation and silently discard the ID the caller asked for —
 	// exactly the surprise --session-id exists to prevent.
 	a.sessionPreloaded = true
+	a.setSessionStartSource("startup")
 	return nil
 }
 
@@ -62,6 +65,17 @@ func (a *App) ForkLoadedSession(newID string) error {
 	if err := probe.RestoreFromState(forkState); err != nil {
 		return fmt.Errorf("validate fork session %q: %w", newID, err)
 	}
+	checkpointRollback := func() {}
+	if a.sessionManager.PersistenceEnabled() {
+		store, err := a.turnRewindStore()
+		if err != nil {
+			return fmt.Errorf("load fork checkpoints: %w", err)
+		}
+		checkpointRollback, err = store.Fork(newID)
+		if err != nil {
+			return fmt.Errorf("copy fork checkpoints: %w", err)
+		}
+	}
 
 	err = a.sessionManager.ApplyAndSave(func() (func(), error) {
 		if err := a.session.RestoreFromState(forkState); err != nil {
@@ -77,6 +91,9 @@ func (a *App) ForkLoadedSession(newID string) error {
 		}, nil
 	})
 	if err != nil {
+		if !errors.Is(err, fileutil.ErrAtomicWriteCommitUncertain) {
+			checkpointRollback()
+		}
 		return fmt.Errorf("persist fork session %q: %w", newID, err)
 	}
 
@@ -91,6 +108,7 @@ func (a *App) ForkLoadedSession(newID string) error {
 		a.executor.SetSessionID(newID)
 	}
 	a.restoreToolCheckpoints()
+	a.setSessionStartSource("fork")
 	logging.Info("forked session",
 		"source_session_id", sourceID,
 		"session_id", newID,

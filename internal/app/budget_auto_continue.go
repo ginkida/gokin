@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"gokin/internal/goals"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
@@ -52,6 +53,11 @@ func (a *App) resetBudgetAutoContinueOnUserInput(message string) {
 // maybeAutoContinueAfterBudget runs at end of turn. Returns true when a
 // synthetic continuation was queued.
 func (a *App) maybeAutoContinueAfterBudget() bool {
+	if a.session != nil {
+		if goal := a.session.GoalState().Current; goal != nil && goal.Status == goals.Active {
+			return false
+		}
+	}
 	if !a.turnToolBudgetHit.Swap(false) {
 		return false
 	}

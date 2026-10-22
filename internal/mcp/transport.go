@@ -119,6 +119,10 @@ func NewStdioTransport(command string, args []string, env map[string]string) (*S
 // inherited by the MCP server. Both managed and third-party servers continue
 // to receive only buildSafeEnv plus explicitly configured values.
 func NewStdioTransportWithWorkDir(command string, args []string, env map[string]string, workDir string) (*StdioTransport, error) {
+	return newStdioTransport(command, args, env, workDir, false)
+}
+
+func newStdioTransport(command string, args []string, env map[string]string, workDir string, literalEnv bool) (*StdioTransport, error) {
 	cleanWorkDir, err := validateStdioWorkDir(workDir)
 	if err != nil {
 		return nil, err
@@ -143,12 +147,15 @@ func NewStdioTransportWithWorkDir(command string, args []string, env map[string]
 		}
 	}
 	for k, v := range env {
-		expanded := os.Expand(v, func(key string) string {
-			if val, ok := safeEnvMap[key]; ok {
-				return val
-			}
-			return "${" + key + "}" // keep unexpanded — don't leak parent env
-		})
+		expanded := v
+		if !literalEnv {
+			expanded = os.Expand(v, func(key string) string {
+				if val, ok := safeEnvMap[key]; ok {
+					return val
+				}
+				return "${" + key + "}" // keep unexpanded — don't leak parent env
+			})
+		}
 		cmd.Env = append(cmd.Env, k+"="+expanded)
 	}
 
@@ -408,6 +415,12 @@ func NewHTTPTransport(ctx context.Context, url string, headers map[string]string
 
 // Send sends a JSON-RPC message to the server via HTTP POST.
 func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
+	return t.SendContext(t.ctx, msg)
+}
+
+// SendContext lets a handshake or tool timeout bound the HTTP request while
+// the transport's independent lifetime still owns its long-lived connection.
+func (t *HTTPTransport) SendContext(caller context.Context, msg *JSONRPCMessage) error {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -425,8 +438,10 @@ func (t *HTTPTransport) Send(msg *JSONRPCMessage) error {
 	}
 
 	// Create request with timeout
-	ctx, cancel := context.WithTimeout(t.ctx, t.timeout)
+	ctx, cancel := context.WithTimeout(caller, t.timeout)
 	defer cancel()
+	stop := context.AfterFunc(t.ctx, cancel)
+	defer stop()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.url, bytes.NewReader(data))
 	if err != nil {

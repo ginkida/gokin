@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -64,6 +65,52 @@ func TestObserveProviderStreamRecordsSuccessfulTerminalOutcome(t *testing.T) {
 	after := getProviderHealth(provider)
 	if after.Score != before.Score+1 || after.FailureStreak != 0 {
 		t.Fatalf("health before/after = %+v/%+v, want one success", before, after)
+	}
+}
+
+func TestObserveProviderStreamPublishesDoneAfterHealthPersistence(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fallback_%t", fallback), func(t *testing.T) {
+			healthMu.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					healthMu.Unlock()
+				}
+			}()
+			source := fallbackTestStream(ResponseChunk{Text: "ready"}, ResponseChunk{Done: true})
+			var observed *StreamingResponse
+			if fallback {
+				fc := &FallbackClient{clients: []Client{&fakeFallbackClientStub{}}, providers: []string{"test-health-publication-fallback"}}
+				observed = fc.proxyStream(t.Context(), "test", []int{0}, 0, source, nil)
+			} else {
+				observed = observeProviderStream(t.Context(), "test-health-publication", source)
+			}
+			select {
+			case first := <-observed.Chunks:
+				if first.Text != "ready" {
+					t.Fatalf("first chunk=%+v", first)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("nonterminal text was delayed by health bookkeeping")
+			}
+			select {
+			case chunk := <-observed.Chunks:
+				t.Fatalf("completion published while health persistence is pending: %+v", chunk)
+			case <-time.After(30 * time.Millisecond):
+			}
+			healthMu.Unlock()
+			locked = false
+			select {
+			case chunk := <-observed.Chunks:
+				if !chunk.Done {
+					t.Fatalf("terminal chunk=%+v", chunk)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("completion was not published after health persistence")
+			}
+			<-observed.Done
+		})
 	}
 }
 

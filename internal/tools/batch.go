@@ -537,6 +537,8 @@ func (t *BatchTool) executeDelete(ctx context.Context, files []string, dryRun, p
 				change := undo.NewFileChange(path, "batch_delete", oldContent, nil, false)
 				change.Mode = oldMode
 				t.undoManager.Record(*change)
+			} else if t.undoManager != nil {
+				t.undoManager.MarkUntracked(path, "deleted contents were not snapshotted")
 			}
 		}
 	}

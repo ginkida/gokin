@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,28 @@ import (
 type fakeAppForHooks struct {
 	*fakeAppForMCP
 	mgr *hooks.Manager
+}
+
+func TestHooksCommandClaudeSettingsDiagnosticsAndDisablePolicy(t *testing.T) {
+	manager := hooks.NewManager(true, t.TempDir())
+	user := t.TempDir()
+	manager.ConfigureClaudeSettings("", user, false)
+	app := &fakeAppForHooks{fakeAppForMCP: &fakeAppForMCP{}, mgr: manager}
+	path := filepath.Join(user, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"exit 0","async":"invalid"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := (&HooksCommand{}).Execute(t.Context(), nil, app)
+	if err != nil || !strings.Contains(out, "settings hooks could not be loaded") || !strings.Contains(out, "async must be a boolean") {
+		t.Fatalf("invalid settings diagnostic=%q %v", out, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = (&HooksCommand{}).Execute(t.Context(), nil, app)
+	if err != nil || !strings.Contains(out, "disabled by disableAllHooks") {
+		t.Fatalf("disable policy diagnostic=%q %v", out, err)
+	}
 }
 
 func (f *fakeAppForHooks) GetHooksManager() *hooks.Manager { return f.mgr }
@@ -59,5 +83,39 @@ func TestHooksCommand_ListShowsSourceAndSemantics(t *testing.T) {
 		if !strings.Contains(out, needle) {
 			t.Fatalf("list missing %q:\n%s", needle, out)
 		}
+	}
+}
+
+func TestHooksCommandManagedOnlyMarksExcludedNativeHooks(t *testing.T) {
+	manager := hooks.NewManager(true, t.TempDir())
+	managed := t.TempDir()
+	manager.ConfigureClaudeManagedSettings(managed)
+	path := filepath.Join(managed, "managed-settings.json")
+	if err := os.WriteFile(path, []byte(`{"allowManagedHooksOnly":true,"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"exit 0"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.AddHook(&hooks.Hook{Name: "excluded", Type: hooks.PreTool, Enabled: true, Command: "exit 0"})
+	app := &fakeAppForHooks{fakeAppForMCP: &fakeAppForMCP{}, mgr: manager}
+	out, err := (&HooksCommand{}).Execute(t.Context(), nil, app)
+	if err != nil || !strings.Contains(out, "managed hooks only (allowManagedHooksOnly)") || !strings.Contains(out, "○ excluded") || !strings.Contains(out, "claude:managed:") {
+		t.Fatalf("managed display=%q %v", out, err)
+	}
+}
+
+func TestHooksCommandReportsExplicitPluginWithoutCallingItManaged(t *testing.T) {
+	manager := hooks.NewManager(false, t.TempDir())
+	plugin, user := t.TempDir(), t.TempDir()
+	manager.ConfigureClaudeSettings("", user, false)
+	manager.ConfigureClaudePlugins([]string{plugin})
+	path := filepath.Join(plugin, "hooks", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"exit 0"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := (&HooksCommand{}).Execute(t.Context(), nil, &fakeAppForHooks{fakeAppForMCP: &fakeAppForMCP{}, mgr: manager})
+	if err != nil || !strings.Contains(out, "session plugin hooks active; automatic hooks disabled") || !strings.Contains(out, "claude:plugin:") || strings.Contains(out, "managed hooks active") {
+		t.Fatalf("plugin diagnostics=%q %v", out, err)
 	}
 }

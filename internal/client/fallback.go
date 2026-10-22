@@ -265,10 +265,11 @@ func (fc *FallbackClient) proxyStream(
 		index := order[position]
 		stream := first
 		for {
-			committed, err := forwardFallbackCandidate(ctx, stream, chunks)
-			if err == nil {
+			committed, err := forwardFallbackCandidate(ctx, stream, chunks, func() {
 				fc.setCurrent(index)
 				recordProviderSuccess(fc.providerAt(index))
+			})
+			if err == nil {
 				return
 			}
 
@@ -325,7 +326,7 @@ func (fc *FallbackClient) proxyStream(
 // forwardFallbackCandidate forwards one provider stream. Non-content metadata
 // is held until the first meaningful chunk, so an early SSE error can be
 // discarded cleanly when the next provider is tried.
-func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, out chan<- ResponseChunk) (committed bool, err error) {
+func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, out chan<- ResponseChunk, beforeSuccess func()) (committed bool, err error) {
 	if stream == nil {
 		return false, fmt.Errorf("provider returned a nil streaming response")
 	}
@@ -354,6 +355,7 @@ func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, ou
 					// configured; enabling fallback must not regress it.
 					return false, fmt.Errorf("provider stream ended without assistant content: %w", ErrEmptyModelResponse)
 				}
+				beforeSuccess()
 				return committed, nil
 			}
 			if chunk.Error != nil {
@@ -375,6 +377,12 @@ func forwardFallbackCandidate(ctx context.Context, stream *StreamingResponse, ou
 				}
 				pending = nil
 				committed = meaningful
+			}
+			if chunk.Done {
+				if ctxErr := ContextErr(ctx); ctxErr != nil {
+					return committed, ctxErr
+				}
+				beforeSuccess()
 			}
 			if err := forwardFallbackChunk(ctx, out, chunk); err != nil {
 				return committed, err
@@ -512,10 +520,23 @@ func (fc *FallbackClient) GetProvider() string {
 	return fc.providerAt(fc.current)
 }
 
+func (fc *FallbackClient) EffectiveReasoningEffort(ctx context.Context) string {
+	return EffectiveReasoningEffort(ctx, fc.clients[fc.getCurrent()])
+}
+
 // SetModel changes the model on the current active client.
 func (fc *FallbackClient) SetModel(modelName string) {
 	idx := fc.getCurrent()
 	fc.clients[idx].SetModel(modelName)
+}
+
+func (fc *FallbackClient) WithModelOnCurrentProvider(model string) Client {
+	clone := fc.cloneForSession()
+	if isNilClient(clone) || sameClientInstance(clone, fc) {
+		return fc
+	}
+	clone.SetModel(model)
+	return clone
 }
 
 // WithModel returns a new FallbackClient with the provider matching the model

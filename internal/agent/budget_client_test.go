@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gokin/internal/client"
+	contextmgr "gokin/internal/context"
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 
@@ -18,6 +19,55 @@ import (
 func fixedInvocationCost(cost float64) invocationCostCalculator {
 	return func(string, string, int, int, int) (float64, bool) {
 		return cost, true
+	}
+}
+
+func TestInvocationBudgetClientSharesTurnCapAcrossMethodsAndAuxiliaryClone(t *testing.T) {
+	base := &auxiliaryCloneProbeClient{MockClient: testkit.NewMockClient().EnqueueText("first")}
+	metered := newInvocationBudgetClient(base)
+	ctx := tools.ContextWithMaxTurns(t.Context(), 1)
+	stream, err := metered.SendMessage(ctx, "first round")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.CollectContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	clone, ok := client.CloneForAuxiliary(metered)
+	if !ok {
+		t.Fatal("auxiliary clone missing")
+	}
+	if _, err := clone.SendMessageWithHistory(ctx, nil, "must not send"); !errors.Is(err, tools.ErrMaxTurnsExceeded) {
+		t.Fatal("clone obtained a new turn allowance", err)
+	}
+	if _, err := metered.SendFunctionResponse(ctx, nil, nil); !errors.Is(err, tools.ErrMaxTurnsExceeded) {
+		t.Fatal("function response bypassed the turn cap", err)
+	}
+	if len(base.Calls()) != 1 || len(base.lastClone.Calls()) != 0 {
+		t.Fatal("provider was called after the shared cap")
+	}
+}
+
+func TestInvocationBudgetClientDoesNotChargeAnExecutorOwnedRoundTwice(t *testing.T) {
+	base := testkit.NewMockClient().EnqueueText("verified")
+	base.SetModel("glm-5.2")
+	metered := newInvocationBudgetClient(base)
+	executor := tools.NewExecutor(tools.NewRegistry(), metered, time.Second)
+	executor.SetCostCalculator(func(string, string, int, int, int) (float64, bool) { return 0, true })
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	ctx = tools.ContextWithMaxTurns(ctx, 1)
+	ctx = tools.ContextWithMaxBudgetUSD(ctx, 1)
+	_, _, err := executor.Execute(ctx, nil, "verify")
+	if err != nil || len(base.Calls()) != 1 {
+		t.Fatal("executor and wrapper claimed the same round twice", err)
+	}
+	if used, _ := tools.InvocationModelTurnsClaimed(ctx); used != 1 {
+		t.Fatal("wrong shared round count", used)
+	}
+	ledger, _ := tools.InvocationBudgetLedgerFromContext(ctx)
+	if _, spent := ledger.Snapshot(); spent != 0 {
+		t.Fatal("wrapper repriced the executor-owned request", spent)
 	}
 }
 
@@ -299,6 +349,10 @@ type budgetTaskRunnerAdapter struct {
 	runner *Runner
 }
 
+func (a budgetTaskRunnerAdapter) ResolveSkillModelSettings(model, effort string) (string, string, error) {
+	return a.runner.ResolveSkillModelSettings(model, effort)
+}
+
 func (a budgetTaskRunnerAdapter) Spawn(
 	ctx context.Context, agentType, prompt string, maxTurns int, model string,
 ) (string, error) {
@@ -355,8 +409,9 @@ func (a budgetTaskRunnerAdapter) GetResult(agentID string) (tools.AgentResult, b
 func TestTaskToolAndRunnerInheritOneInvocationBudget(t *testing.T) {
 	base := &budgetRunnerClient{MockClient: testkit.NewMockClient()}
 	base.SetModel("glm-5.2")
-	// GLM-5.2 output costs $16 / 1M tokens, so 62,500 output tokens
-	// consume the exact $1 test budget.
+	// GLM-5.2 output costs $4.40 / 1M tokens. Keep a 62,500-token
+	// completion at the exact estimated cost limit, independent of pricing.
+	budget := contextmgr.NewTokenCounter(nil, "glm-5.2", nil).CalculateCost(0, 62_500)
 	base.EnqueueScript(testkit.ResponseScript{Chunks: []client.ResponseChunk{
 		{FunctionCalls: []*genai.FunctionCall{{
 			ID: "write-1", Name: "write", Args: map[string]any{"path": "x"},
@@ -377,7 +432,7 @@ func TestTaskToolAndRunnerInheritOneInvocationBudget(t *testing.T) {
 	task.SetRunner(budgetTaskRunnerAdapter{runner: runner})
 	task.SetAgentTypeProvider(typeRegistry)
 	task.SetBackgroundAllowed(false)
-	ctx := tools.ContextWithMaxBudgetUSD(context.Background(), 1)
+	ctx := tools.ContextWithMaxBudgetUSD(context.Background(), budget)
 	result, err := task.Execute(ctx, map[string]any{
 		"prompt":        "change a file",
 		"subagent_type": "general",
@@ -397,8 +452,8 @@ func TestTaskToolAndRunnerInheritOneInvocationBudget(t *testing.T) {
 	}
 	ledger, _ := tools.InvocationBudgetLedgerFromContext(ctx)
 	limit, spent := ledger.Snapshot()
-	if limit != 1 || spent != 1 {
-		t.Fatalf("shared ledger = limit %v spent %v, want 1/1", limit, spent)
+	if limit != budget || spent != budget {
+		t.Fatalf("shared ledger = limit %v spent %v, want %v/%v", limit, spent, budget, budget)
 	}
 	if calls := base.Calls(); len(calls) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(calls))
@@ -415,7 +470,7 @@ func TestRunnerBindsPlannerAndReflectorToMeteredAgentClient(t *testing.T) {
 	ctx := tools.ContextWithMaxBudgetUSD(context.Background(), 1)
 	configured := runner.newConfiguredAgent(
 		ctx, runner.snapshotAgentDeps(), "general", 2, "", nil)
-	metered, ok := configured.client.(*invocationBudgetClient)
+	metered, ok := client.RequestSettingsBase(configured.client).(*invocationBudgetClient)
 	if !ok || metered == nil {
 		t.Fatalf("configured client = %T, want invocationBudgetClient", configured.client)
 	}

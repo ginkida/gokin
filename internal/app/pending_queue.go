@@ -20,6 +20,8 @@ import (
 const maxPendingQueue = 5
 
 type pendingRequest struct {
+	promptSubmission    *promptSubmission
+	goal                *goalContinuation
 	message             string
 	recoveryCheckpoints []tools.ToolCheckpoint
 	recoveryID          string
@@ -164,10 +166,14 @@ func (a *App) enqueuePendingRequest(request pendingRequest) (pos int, ok bool) {
 // later type-ahead. It intentionally bypasses maxPendingQueue: the continuation
 // belongs to the command that already owns the foreground slot, while the cap
 // applies only to additional user submissions.
-func (a *App) prependPending(message string) int {
+func (a *App) prependPending(message string, submission ...*promptSubmission) int {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
-	a.pendingQueue = append([]pendingRequest{{message: message}}, a.pendingQueue...)
+	request := pendingRequest{message: message}
+	if len(submission) > 0 {
+		request.promptSubmission = submission[0]
+	}
+	a.pendingQueue = append([]pendingRequest{request}, a.pendingQueue...)
 	return len(a.pendingQueue)
 }
 

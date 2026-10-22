@@ -50,6 +50,16 @@ func (sm *SessionManager) SetOnSaveFailed(fn func(err error)) {
 	sm.mu.Unlock()
 }
 
+// PersistenceEnabled reports whether durable session writes are enabled.
+func (sm *SessionManager) PersistenceEnabled() bool {
+	if sm == nil {
+		return false
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.config.Enabled
+}
+
 // SessionManagerConfig configures session persistence behavior.
 type SessionManagerConfig struct {
 	Enabled         bool          // Enable auto-save/load

@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"gokin/internal/chat"
+	"gokin/internal/goals"
 	"gokin/internal/logging"
+	"gokin/internal/tools"
 	"gokin/internal/ui"
 )
 
@@ -57,12 +60,19 @@ func (a *App) ReleaseSessionWriterLease() error {
 	}
 	a.sessionLeaseMu.Lock()
 	defer a.sessionLeaseMu.Unlock()
-	if a.sessionLease == nil {
-		return nil
-	}
+	a.stopGoalTimer()
 	lease := a.sessionLease
 	a.sessionLease = nil
-	return lease.Release()
+	previous := a.previousClearLease
+	a.previousClearLease = nil
+	var releaseErr error
+	if lease != nil {
+		releaseErr = lease.Release()
+	}
+	if previous != nil && previous != lease {
+		releaseErr = errors.Join(releaseErr, previous.Release())
+	}
+	return releaseErr
 }
 
 // SwitchSession transactionally moves the App to selected.ID while preserving
@@ -74,6 +84,10 @@ func (a *App) ReleaseSessionWriterLease() error {
 // `/resume <id> --force`; identity validation and writer exclusivity are never
 // bypassed.
 func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, force bool) (*chat.SessionState, error) {
+	return a.switchSession(ctx, selected, force, "")
+}
+
+func (a *App) switchSession(ctx context.Context, selected *chat.SessionState, force bool, expectedPrevious string) (*chat.SessionState, error) {
 	if a == nil || a.session == nil {
 		return nil, fmt.Errorf("cannot switch without an active session")
 	}
@@ -96,6 +110,9 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 
 	a.sessionLeaseMu.Lock()
 	defer a.sessionLeaseMu.Unlock()
+	if expectedPrevious != "" && a.previousClearSessionID != expectedPrevious {
+		return nil, fmt.Errorf("previous conversation is no longer available in this process")
+	}
 
 	currentID := a.session.GetID()
 	currentLease := a.sessionLease
@@ -118,11 +135,18 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 		return a.session.GetState(), nil
 	}
 
-	targetLease, err := chat.AcquireSessionWriterLease(targetID)
-	if err != nil {
-		return nil, fmt.Errorf("acquire writer lease for target session %q: %w", targetID, err)
+	var targetLease *chat.SessionWriterLease
+	borrowedPrevious := a.previousClearLease != nil && a.previousClearLease.IsActive() && a.previousClearLease.SessionID() == targetID
+	var err error
+	if borrowedPrevious {
+		targetLease = a.previousClearLease
+	} else {
+		targetLease, err = chat.AcquireSessionWriterLease(targetID)
+		if err != nil {
+			return nil, fmt.Errorf("acquire writer lease for target session %q: %w", targetID, err)
+		}
 	}
-	targetLeaseOwned := true
+	targetLeaseOwned := !borrowedPrevious
 	defer func() {
 		if targetLeaseOwned {
 			if releaseErr := targetLease.Release(); releaseErr != nil {
@@ -162,11 +186,17 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 	}
 
 	// Validate the complete graph before touching the live Session. In
+	state.Goal = goals.Resume(state.Goal, time.Now())
+
+	// Validate the complete graph before touching the live Session. In
 	// particular, a malformed nested branch can otherwise fail after the top-
 	// level identity/history have already been replaced.
 	probe := chat.NewSession()
 	if err := probe.RestoreFromState(state); err != nil {
 		return nil, fmt.Errorf("validate target session %q: %w", targetID, err)
+	}
+	if err := tools.ValidateSkillHookRestore(a.registry, a.hooksManager, state.SkillHooks); err != nil {
+		return nil, fmt.Errorf("validate target session %q skill hooks: %w", targetID, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -209,8 +239,17 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 		return nil, err
 	}
 
-	if err := a.sessionManager.RestoreFromState(state); err != nil {
+	ending := a.captureSessionEndLocked(currentState, "resume")
+	restoreErr := a.sessionManager.RestoreFromState(state)
+	if restoreErr == nil {
+		tools.BindSkillInvocationLedger(a.registry, a.session.InvocationLedger())
+		restoreErr = tools.RestoreSkillHooks(a.registry, a.hooksManager)
+	}
+	if err := restoreErr; err != nil {
 		rollbackErr := a.session.RestoreFromState(currentState)
+		if rollbackErr == nil {
+			rollbackErr = tools.RestoreSkillHooks(a.registry, a.hooksManager)
+		}
 		if rollbackErr != nil {
 			return nil, errors.Join(
 				fmt.Errorf("restore target session %q: %w", targetID, err),
@@ -223,10 +262,24 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 	// Publish the new owner before releasing the old lease. At every point in
 	// the successful transition, each session that may be written is protected.
 	a.sessionLease = targetLease
+	previousLease := a.previousClearLease
+	a.previousClearLease = nil
+	a.previousClearSessionID = ""
+	a.previousClearState = nil
+	a.resetRewindOwner()
+	tools.ResetSkillPermissionGrants(a.registry)
 	targetLeaseOwned = false
 	switchPublished = true
+	a.invalidateSessionStartLocked()
+	a.stopGoalTimer()
+	a.runSessionEndLocked(ending)
 	if releaseErr := currentLease.Release(); releaseErr != nil {
 		logging.Warn("failed to release previous session writer lease", "session_id", currentID, "error", releaseErr)
+	}
+	if previousLease != nil && previousLease != targetLease && previousLease != currentLease {
+		if releaseErr := previousLease.Release(); releaseErr != nil {
+			logging.Warn("failed to release previous clear-session lease", "error", releaseErr)
+		}
 	}
 
 	scratchpad := a.session.GetScratchpad()
@@ -247,7 +300,25 @@ func (a *App) SwitchSession(ctx context.Context, selected *chat.SessionState, fo
 	if running {
 		a.resumePersistedRecoveries(false)
 	}
+	a.setSessionStartSource("resume")
+	a.sessionStartMu.Lock()
+	started := a.sessionStart != nil
+	a.sessionStartMu.Unlock()
+	if running || started {
+		owner := a.startSessionStartLocked("resume", true)
+		if owner != nil {
+			// Interactive /resume joins while owning the switch transaction. The
+			// worker uses no session locks; cancellation leaves its results pending
+			// for the next prompt rather than undoing an already-published owner.
+			select {
+			case <-owner.run.done:
+				a.applySessionStartLocked(owner, owner.run)
+			case <-ctx.Done():
+			}
+		}
+	}
 
+	a.publishSessionConversation()
 	return state, nil
 }
 
@@ -256,6 +327,7 @@ func sessionStateHasDurableWork(state *chat.SessionState) bool {
 		return false
 	}
 	return len(state.History) > 0 ||
+		state.Goal.Current != nil || state.Goal.LastAchieved != nil ||
 		state.Scratchpad != "" ||
 		len(state.Branches) > 0 ||
 		len(state.Checkpoints) > 0 ||

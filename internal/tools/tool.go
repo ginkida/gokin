@@ -95,6 +95,11 @@ type ToolResult struct {
 	// plan was not allowed to proceed). It is intentionally not serialized to
 	// the model; execution observers use it for reliable process status.
 	PolicyBlock *PolicyBlock
+	// HookUpdatedInput is internal execution provenance; ToMap never exposes it.
+	HookUpdatedInput map[string]any
+	// HookStopReason is trusted execution control, separate from arbitrary tool Data.
+	HookStopReason string
+	HookStopKind   string
 }
 
 // NewSuccessResult creates a successful tool result.
@@ -174,6 +179,12 @@ func (r ToolResult) ToMap() map[string]any {
 		}
 	}
 
+	if r.HookStopReason != "" {
+		result["hook_stop_reason"] = r.HookStopReason
+		if r.HookStopKind != "" {
+			result["hook_stop_kind"] = r.HookStopKind
+		}
+	}
 	return result
 }
 

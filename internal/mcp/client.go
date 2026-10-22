@@ -75,12 +75,33 @@ type Client struct {
 
 // NewClient creates a new MCP client with the specified transport.
 func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
+	return newClient(ctx, ctx, cfg)
+}
+
+// Managed clients outlive a connect command's timeout/cancellation. Manager
+// owns their Close; handshake requests still use the caller's bounded context.
+func newManagedClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
+	return newClient(ctx, context.WithoutCancel(ctx), cfg)
+}
+
+func createServerTransport(ctx context.Context, cfg *ServerConfig) (Transport, error) {
+	if err := cfg.CheckReady(ctx); err != nil {
+		return nil, err
+	}
+	if cfg.prepare != nil {
+		if err := cfg.prepare(); err != nil {
+			return nil, fmt.Errorf("prepare plugin MCP data directory: %w", err)
+		}
+	}
+	if err := cfg.CheckReady(ctx); err != nil {
+		return nil, err
+	}
 	var transport Transport
 	var err error
 
 	switch cfg.Transport {
 	case "stdio":
-		transport, err = NewStdioTransportWithWorkDir(cfg.Command, cfg.Args, cfg.Env, cfg.WorkDir)
+		transport, err = newStdioTransport(cfg.Command, cfg.Args, cfg.Env, cfg.WorkDir, cfg.literalEnv)
 	case "http":
 		transport, err = NewHTTPTransport(ctx, cfg.URL, cfg.Headers, cfg.Timeout)
 	default:
@@ -91,7 +112,22 @@ func NewClient(ctx context.Context, cfg *ServerConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	return newClientWithTransport(ctx, cfg, transport), nil
+	return transport, nil
+}
+
+func newClient(connectCtx, lifecycleCtx context.Context, cfg *ServerConfig) (*Client, error) {
+	if err := cfg.CheckReady(connectCtx); err != nil {
+		return nil, err
+	}
+	transport, err := createServerTransport(lifecycleCtx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := connectCtx.Err(); err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
+	return newClientWithTransport(lifecycleCtx, cfg, transport), nil
 }
 
 // newClientWithTransport builds a client around an already-constructed
@@ -187,6 +223,9 @@ func (c *Client) reconnect() bool {
 	// c.config is set once in newClientWithTransport and never reassigned, so
 	// reading fields on it is safe without a lock.
 	cfg := c.config
+	if cfg.Transport != "stdio" && cfg.Transport != "http" {
+		return false
+	}
 
 	logging.Info("MCP reconnecting", "server", c.serverName, "backoff", currentBackoff)
 
@@ -198,19 +237,10 @@ func (c *Client) reconnect() bool {
 		return false
 	}
 
-	// Try to recreate transport
-	var transport Transport
-	var err error
-
-	switch cfg.Transport {
-	case "stdio":
-		transport, err = NewStdioTransportWithWorkDir(cfg.Command, cfg.Args, cfg.Env, cfg.WorkDir)
-	case "http":
-		transport, err = NewHTTPTransport(c.ctx, cfg.URL, cfg.Headers, cfg.Timeout)
-	default:
-		logging.Error("MCP unknown transport for reconnect", "transport", cfg.Transport)
+	if err := cfg.CheckReady(c.ctx); err != nil {
 		return false
 	}
+	transport, err := createServerTransport(c.ctx, cfg)
 
 	if err != nil {
 		logging.Warn("MCP transport recreation failed", "error", err, "consecutive_fails", fails)
@@ -218,8 +248,13 @@ func (c *Client) reconnect() bool {
 	}
 
 	// Swap transport
-	oldTransport := c.transport
 	c.mu.Lock()
+	if c.ctx.Err() != nil {
+		c.mu.Unlock()
+		_ = transport.Close()
+		return false
+	}
+	oldTransport := c.transport
 	c.transport = transport
 	c.initialized = false
 	c.mu.Unlock()
@@ -248,6 +283,9 @@ func (c *Client) reconnect() bool {
 // Initialize() → request() path would deadlock because request() waits for
 // receiveLoop to route the response, but receiveLoop is the caller.
 func (c *Client) initializeDirect() error {
+	if err := c.config.CheckReady(c.ctx); err != nil {
+		return err
+	}
 	params := &InitializeParams{
 		ProtocolVersion: ProtocolVersion,
 		ClientInfo: &ClientInfo{
@@ -381,6 +419,12 @@ func (c *Client) SetNotificationHandler(h NotificationHandler) {
 
 // request sends a request and waits for a response.
 func (c *Client) request(ctx context.Context, method string, params any) (*JSONRPCMessage, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := c.config.CheckReady(ctx); err != nil {
+		return nil, err
+	}
 	id := atomic.AddInt64(&c.nextID, 1)
 
 	// Create response channel
@@ -410,8 +454,16 @@ func (c *Client) request(ctx context.Context, method string, params any) (*JSONR
 	transport := c.transport
 	c.mu.RUnlock()
 
-	if err := transport.Send(msg); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+	var sendErr error
+	if sender, ok := transport.(interface {
+		SendContext(context.Context, *JSONRPCMessage) error
+	}); ok {
+		sendErr = sender.SendContext(ctx, msg)
+	} else {
+		sendErr = transport.Send(msg)
+	}
+	if sendErr != nil {
+		return nil, fmt.Errorf("failed to send request: %w", sendErr)
 	}
 
 	// Wait for response with timeout
@@ -438,6 +490,9 @@ func (c *Client) request(ctx context.Context, method string, params any) (*JSONR
 
 // notify sends a notification (no response expected).
 func (c *Client) notify(method string, params any) error {
+	if err := c.config.CheckReady(c.ctx); err != nil {
+		return err
+	}
 	c.mu.RLock()
 	transport := c.transport
 	c.mu.RUnlock()
@@ -665,6 +720,12 @@ func (c *Client) ConsecutiveFails() int {
 // Close closes the client and releases resources.
 func (c *Client) Close() error {
 	c.cancel()
+	// Receive may be blocked in pipe/socket I/O. Close the owned transport
+	// before waiting for receiveLoop; cancellation alone cannot unblock it.
+	c.mu.RLock()
+	transport := c.transport
+	c.mu.RUnlock()
+	closeErr := transport.Close()
 
 	// Wait for receive loop to finish
 	closeTimer := time.NewTimer(5 * time.Second)
@@ -691,16 +752,8 @@ func (c *Client) Close() error {
 			"server", c.serverName)
 	}
 
-	// Close transport. Read the pointer under c.mu: normally receiveLoop has
-	// already exited (we waited on c.done above), but on the 5s-timeout path it
-	// may still be running inside reconnect(), which swaps c.transport under
-	// c.mu — an unlocked read here would race that write. Mirrors the locked
-	// read in request()/notify().
-	c.mu.RLock()
-	transport := c.transport
-	c.mu.RUnlock()
-	if err := transport.Close(); err != nil {
-		return fmt.Errorf("failed to close transport: %w", err)
+	if closeErr != nil {
+		return fmt.Errorf("failed to close transport: %w", closeErr)
 	}
 
 	logging.Debug("MCP client closed", "server", c.serverName)

@@ -45,6 +45,7 @@ var planModeReadOnlyTools = map[string]bool{
 	// Semantic discovery (read-only)
 	"go_to_definition": true,
 	"find_references":  true,
+	"lsp":              true,
 
 	// User interaction / todos (surface, don't mutate disk)
 	"ask_user":        true,

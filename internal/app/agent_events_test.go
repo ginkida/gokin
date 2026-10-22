@@ -138,9 +138,11 @@ func TestHandleSubAgentActivity_NilJournalAndProgramSafe(t *testing.T) {
 type capturePresenter struct {
 	stdoutPresenter // embed for the no-op surface
 	texts           []string
+	warnings        []string
 }
 
 func (p *capturePresenter) StreamText(text string) { p.texts = append(p.texts, text) }
+func (p *capturePresenter) Warning(warning string) { p.warnings = append(p.warnings, warning) }
 
 func TestDeliverUnstreamedResponse_RoutedTextReachesPresenter(t *testing.T) {
 	cp := &capturePresenter{}
@@ -206,10 +208,15 @@ func TestRunStopHooks_BlockedEnqueuesOneBoundedContinuation(t *testing.T) {
 		}
 	}
 
-	// The continuation turn must NOT re-fire stop hooks (bounded to one).
+	// The continuation is rechecked and a repeated block is surfaced, with no
+	// second automatic continuation.
+	warningsBefore := len(cp.warnings)
 	a.runStopHooks(context.Background(), "second answer")
 	if _, _, ok := a.dequeuePending(); ok {
-		t.Fatal("stop hooks must be skipped on the hook-driven continuation turn")
+		t.Fatal("a repeated Stop block must not enqueue a second continuation")
+	}
+	if len(cp.warnings) <= warningsBefore || !strings.Contains(cp.warnings[len(cp.warnings)-1], "still blocks completion") {
+		t.Fatalf("repeated Stop block was hidden: %v", cp.warnings)
 	}
 
 	// A fresh user turn after that re-arms the gate.

@@ -87,9 +87,10 @@ type ContextManager struct {
 	sessionCountRunning atomic.Bool
 
 	// Background summarization
-	summarizing    atomic.Bool   // Whether summarization is in progress (lock-free)
-	summarizeDone  chan struct{} // Signal when summarization completes
-	lastSummaryDur time.Duration // Duration of last summarization
+	summarizing    atomic.Bool     // Whether summarization is in progress (lock-free)
+	summarizeDone  chan struct{}   // Signal when summarization completes
+	lastSummaryDur time.Duration   // Duration of last summarization
+	auxiliaryOwner context.Context // mu; request that owns automatic model work
 
 	// New components
 	metrics            *ContextMetrics
@@ -109,6 +110,9 @@ type ContextManager struct {
 
 	// Plan manager for task-aware summarization
 	planManager PlanManagerProvider
+	// compactionCommitter lets the conversation owner durably archive the
+	// original span before replacing context. It runs without m.mu held.
+	compactionCommitter CompactionCommitter
 
 	// Notification callback when context is compacted
 	OnCompact func(oldTokens, newTokens, removedMessages int, reason string)
@@ -280,6 +284,22 @@ func (m *ContextManager) SetClient(c client.Client) {
 	}
 }
 
+func (m *ContextManager) SetAuxiliaryRequestContext(ctx context.Context) {
+	m.mu.Lock()
+	m.auxiliaryOwner = ctx
+	m.mu.Unlock()
+}
+
+func (m *ContextManager) auxiliaryRequestContext() context.Context {
+	m.mu.RLock()
+	owner := m.auxiliaryOwner
+	m.mu.RUnlock()
+	if owner == nil {
+		return m.ctx
+	}
+	return owner
+}
+
 // SetConfig updates the context configuration.
 func (m *ContextManager) SetConfig(cfg *config.ContextConfig) {
 	m.mu.Lock()
@@ -435,6 +455,12 @@ func (m *ContextManager) runSessionTokenCountWorker() {
 }
 
 func (m *ContextManager) startAutoCompact(currentTokens int) {
+	owner := m.auxiliaryRequestContext()
+	// One-shot callers compact synchronously in PrepareForRequest. A late
+	// token-count callback must not start new model work after that run ends.
+	if client.AuxiliaryRequestsBounded(owner) {
+		return
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -445,13 +471,19 @@ func (m *ContextManager) startAutoCompact(currentTokens int) {
 		// token-count helper's 30-second deadline: that silently overrode the
 		// live tools.model_round_timeout and made this one compaction path fail
 		// far earlier than /compact and the other background triggers.
-		m.tryAutoCompact(m.ctx, currentTokens)
+		ctx, cancel := context.WithCancel(context.WithoutCancel(owner))
+		stop := context.AfterFunc(m.ctx, cancel)
+		defer stop()
+		defer cancel()
+		defer client.CheckpointContextTokenUsage(ctx)
+		m.tryAutoCompact(ctx, currentTokens)
 	}()
 }
 
 // PrepareForRequest prepares the context before sending a request.
 // Uses fast estimation for immediate decisions; precise count runs async.
 func (m *ContextManager) PrepareForRequest(ctx context.Context) error {
+	m.SetAuxiliaryRequestContext(ctx)
 	startTime := time.Now()
 
 	history := m.session.GetHistory()
@@ -602,13 +634,13 @@ func (m *ContextManager) notifyOptimizeFailed(reason string, err error) {
 
 // backgroundOptimize runs context optimization in a background goroutine.
 // Only one optimization runs at a time; concurrent calls are no-ops.
-func (m *ContextManager) backgroundOptimize(_ context.Context) {
+func (m *ContextManager) backgroundOptimize(ctx context.Context) {
 	finish, started := m.beginSummarization()
 	if !started {
 		return // Already running
 	}
 
-	go func() {
+	run := func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logging.Error("panic in background optimization", "error", r)
@@ -616,11 +648,16 @@ func (m *ContextManager) backgroundOptimize(_ context.Context) {
 			finish()
 		}()
 
-		// Use the manager's lifecycle context, not the request context.
-		// The request context is cancelled when the API call returns, but
-		// background summarization may still be running — using the request
-		// ctx causes it to abort prematurely on fast responses.
-		sumCtx, cancel := m.compactionContext(m.ctx)
+		owner := ctx
+		if !client.AuxiliaryRequestsBounded(owner) {
+			owner = context.WithoutCancel(owner)
+		}
+		owner, stopOwner := context.WithCancel(owner)
+		stop := context.AfterFunc(m.ctx, stopOwner)
+		defer stop()
+		defer stopOwner()
+		defer client.CheckpointContextTokenUsage(owner)
+		sumCtx, cancel := m.compactionContext(owner)
 		defer cancel()
 
 		start := time.Now()
@@ -636,7 +673,12 @@ func (m *ContextManager) backgroundOptimize(_ context.Context) {
 		m.mu.Lock()
 		m.lastSummaryDur = time.Since(start)
 		m.mu.Unlock()
-	}()
+	}
+	if client.AuxiliaryRequestsBounded(ctx) {
+		run()
+	} else {
+		go run()
+	}
 }
 
 // beginSummarization serializes every LLM-backed compaction path. Session
@@ -772,9 +814,12 @@ func (m *ContextManager) OptimizeContext(ctx context.Context) error {
 	// catch it). Skip on version mismatch; the next turn re-triggers compaction
 	// against the fresh history.
 	newHistory := ApplySummaryPlan(plan, summary)
-	committedHistory, committed := m.session.SetHistoryIfVersionWithSkillCarry(
-		newHistory, historyVersion, len(plan.KeepStart)+1,
+	committedHistory, committed, err := m.commitCompaction(
+		ctx, newHistory, historyVersion, len(plan.KeepStart)+1, "Summarization",
 	)
+	if err != nil {
+		return err
+	}
 	if !committed {
 		logging.Debug("context: skipped compaction commit — history changed during summarization (retries next turn)")
 		return nil
@@ -1167,7 +1212,10 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 	// background goroutine (async token-count → tryAutoCompact) built from the
 	// snapshot above, concurrent with the foreground turn's own SetHistory. Skip
 	// on version mismatch so a stale compaction can't wipe the just-finished turn.
-	committedHistory, committed := m.session.SetHistoryIfVersionWithSkillCarry(newHistory, historyVersion, 1)
+	committedHistory, committed, err := m.commitCompaction(ctx, newHistory, historyVersion, 1, "Incremental Compaction")
+	if err != nil {
+		return err
+	}
 	if !committed {
 		logging.Debug("context: skipped incremental compaction commit — history changed during summarization (retries next turn)")
 		return nil
@@ -1217,7 +1265,7 @@ func (m *ContextManager) IncrementalCompact(ctx context.Context) error {
 // keeping the emergency path's budget guarantee (it fires precisely because we
 // blew the limit, so it must produce a result that fits).
 func (m *ContextManager) EmergencyTruncate() int {
-	history := m.session.GetHistory()
+	history, historyVersion := m.session.GetHistoryWithVersion()
 	if len(history) <= 4 {
 		return 0
 	}
@@ -1287,7 +1335,16 @@ func (m *ContextManager) EmergencyTruncate() int {
 	if regrounding != nil {
 		carryAt++
 	}
-	newHistory = m.session.SetHistoryWithSkillCarry(newHistory, carryAt)
+	committedHistory, committed, err := m.commitCompaction(m.ctx, newHistory, historyVersion, carryAt, "Emergency Truncation")
+	if err != nil {
+		logging.Warn("emergency truncation failed", "error", err)
+		m.notifyOptimizeFailed("emergency truncation", err)
+		return 0
+	}
+	if !committed {
+		return 0
+	}
+	newHistory = committedHistory
 
 	// Update cached token count — save old value BEFORE overwriting for the callback
 	tokens := EstimateContentsTokens(newHistory)

@@ -180,26 +180,26 @@ func TestNormalizeProgressFingerprint_TruncatesLongText(t *testing.T) {
 // --- mapModelName (agent.go:1284) ---
 
 func TestMapModelName_FlashShorthand(t *testing.T) {
-	if got := mapModelName("flash"); got != "glm-5-turbo" {
-		t.Fatalf("got %q, want glm-5-turbo", got)
+	if got := mapModelName("flash"); got != "glm-5.3-flash" {
+		t.Fatalf("got %q, want glm-5.3-flash", got)
 	}
 }
 
 func TestMapModelName_FastShorthand(t *testing.T) {
-	if got := mapModelName("fast"); got != "glm-5-turbo" {
-		t.Fatalf("got %q, want glm-5-turbo", got)
+	if got := mapModelName("fast"); got != "glm-5.3-flash" {
+		t.Fatalf("got %q, want glm-5.3-flash", got)
 	}
 }
 
 func TestMapModelName_ProShorthand(t *testing.T) {
-	if got := mapModelName("pro"); got != "glm-5.2" {
-		t.Fatalf("got %q, want glm-5.2", got)
+	if got := mapModelName("pro"); got != "glm-5.3" {
+		t.Fatalf("got %q, want glm-5.3", got)
 	}
 }
 
 func TestMapModelName_StrongShorthand(t *testing.T) {
-	if got := mapModelName("strong"); got != "glm-5.2" {
-		t.Fatalf("got %q, want glm-5.2", got)
+	if got := mapModelName("strong"); got != "glm-5.3" {
+		t.Fatalf("got %q, want glm-5.3", got)
 	}
 }
 
@@ -210,8 +210,8 @@ func TestMapModelName_Passthrough(t *testing.T) {
 }
 
 func TestMapModelName_CaseInsensitive(t *testing.T) {
-	if got := mapModelName("FLASH"); got != "glm-5-turbo" {
-		t.Fatalf("got %q, want glm-5-turbo (case-insensitive)", got)
+	if got := mapModelName("FLASH"); got != "glm-5.3-flash" {
+		t.Fatalf("got %q, want glm-5.3-flash (case-insensitive)", got)
 	}
 }
 

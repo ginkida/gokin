@@ -16,7 +16,9 @@ func (c *ModelCommand) Name() string        { return "model" }
 func (c *ModelCommand) Description() string { return "Switch AI model" }
 func (c *ModelCommand) Usage() string {
 	return `/model                  - Show current model and available models
-/model glm-5.2          - GLM-5.2 (default, 1M context, 131K output)
+/model glm-5.3-flash    - GLM-5.3 Flash (default, native images, 1M context)
+/model glm-5.3          - GLM-5.3 (flagship, 1M context, always-on reasoning)
+/model glm-5.2          - GLM-5.2 (previous flagship)
 /model k3               - Kimi K3 (Coding Plan flagship, 1M context)
 /model kimi-for-coding  - Kimi K2.7 Coding Plan (256K context)
 /model glm-5.1          - GLM-5.1 (previous flagship)
@@ -86,7 +88,7 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 		sb.WriteString("\nUsage: /model <name>")
 		switch activeProvider {
 		case "glm":
-			sb.WriteString("\nExamples: /model glm-5.2  or  /model glm-5.1  or  /model glm-4.7")
+			sb.WriteString("\nExamples: /model glm-5.3  or  /model glm-5.3-flash  or  /model glm-4.7")
 		case "minimax":
 			sb.WriteString("\nExamples: /model M2.7  or  /model M2.7-highspeed  or  /model M2.5")
 		case "kimi":
@@ -110,9 +112,20 @@ func (c *ModelCommand) Execute(ctx context.Context, args []string, app AppInterf
 
 	// Switch to specified model
 	newModel := args[0]
+	smallFastAlias := strings.EqualFold(strings.TrimSpace(newModel), "haiku")
+	if smallFastAlias {
+		resolved, err := config.SmallFastModel(activeProvider, currentModel)
+		if err != nil {
+			return "", err
+		}
+		newModel = resolved
+	}
 
 	matchedProvider := activeProvider
 	matchedModel, ambiguous := matchModelInProvider(newModel, providerModels)
+	if smallFastAlias {
+		matchedModel, ambiguous = newModel, false
+	}
 	if ambiguous {
 		return fmt.Sprintf("Ambiguous model name '%s'. Please be more specific.", newModel), nil
 	}

@@ -3,15 +3,19 @@ package hooks
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"gokin/internal/logging"
+	"gokin/internal/pluginpolicy"
 )
 
 const (
@@ -111,10 +115,19 @@ func (c *hookOutputCapture) String() string {
 
 // Result represents the result of running a hook.
 type Result struct {
-	Hook    *Hook
-	Output  string
-	Error   error
-	Elapsed time.Duration
+	Hook                                                           *Hook
+	Output                                                         string
+	Error                                                          error
+	Elapsed                                                        time.Duration
+	BlockReason, StopReason, AdditionalContext, PermissionDecision string
+	UpdatedInput                                                   map[string]any
+	SessionTitle, SystemMessage                                    string
+	SuppressOriginalPrompt                                         bool
+	InitialUserMessage                                             string
+	ReloadSkills                                                   bool
+	WatchPaths                                                     []string
+	skipped                                                        bool
+	asyncJob                                                       *asyncJob
 }
 
 // Handler is called when a hook produces output or errors.
@@ -129,6 +142,33 @@ type Manager struct {
 	handler Handler
 
 	mu sync.RWMutex
+
+	claudeMu                                                                            sync.Mutex
+	claudeConfigured, claudeTrusted, claudeDisabled                                     bool
+	claudeProjectDir, claudeUserDir, claudeFingerprint                                  string
+	claudeScope                                                                         *Scope
+	claudeHTTPPolicy                                                                    httpHookPolicy // guarded by mu
+	mcpHookInvoker                                                                      MCPHookInvoker // guarded by mu
+	claudeError                                                                         error
+	claudeRevision                                                                      uint64
+	claudePluginDirs                                                                    []string
+	claudeRepositoryDirs                                                                []string // claudeMu
+	claudePluginAliases                                                                 pluginpolicy.PluginAliases
+	claudeKeptPluginAliases                                                             map[string]string
+	claudePinnedPluginFlags                                                             map[string]bool
+	claudePinnedPluginConfigs                                                           map[string]json.RawMessage
+	claudeRegistryPinned                                                                bool
+	claudePinnedRegistry                                                                []byte
+	claudePinnedKnownIDs                                                                map[string]bool
+	claudePluginDiscovery                                                               bool                                 // guarded by claudeMu
+	claudeSkipDependencyChecks                                                          bool                                 // isolated manifest validation only
+	claudeSecretOptions                                                                 func(string) (map[string]any, error) // isolated validation override, guarded by claudeMu
+	claudeDependencyWarnings                                                            []string                             // guarded by claudeMu
+	claudePlugins                                                                       []ClaudePlugin                       // guarded by mu
+	claudeExplicitPlugins                                                               bool
+	claudePluginActive                                                                  bool
+	claudeManagedDir                                                                    string
+	claudeManagedPresent, claudeManagedOnly, claudeManagedDisabled, claudeManagedActive bool
 }
 
 // NewManager creates a new hooks manager.
@@ -145,14 +185,17 @@ func NewManager(enabled bool, workDir string) *Manager {
 func (m *Manager) SetEnabled(enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.enabled = enabled
+	if m.enabled != enabled {
+		m.enabled = enabled
+		m.claudeRevision++
+	}
 }
 
 // IsEnabled returns whether hooks are enabled.
 func (m *Manager) IsEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.enabled
+	return m.unmanagedHooksEnabledLocked() || m.claudeManagedActive || m.claudePluginActive
 }
 
 // SetTimeout sets the execution timeout for hooks.
@@ -192,12 +235,26 @@ func (m *Manager) ClearHooks() {
 
 // GetHooks returns a copy of all hooks.
 func (m *Manager) GetHooks() []*Hook {
+	_ = m.RefreshClaudeSettings()
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	result := make([]*Hook, len(m.hooks))
 	copy(result, m.hooks)
+	scope := m.claudeScope
+	m.mu.RUnlock()
+	result = append(result, scope.Hooks()...)
 	return result
+}
+
+// CachedClaudeHooks is a cheap discovery probe at application boundaries.
+// Execution and a live watcher still refresh policy before using a handler.
+func (m *Manager) CachedClaudeHooks(kind Type) []*Hook {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	scope := m.claudeScope
+	m.mu.RUnlock()
+	return scope.ConfiguredHooks(kind)
 }
 
 // Run executes all matching hooks for the given type and context.
@@ -208,14 +265,25 @@ func (m *Manager) GetHooks() []*Hook {
 // supplied context spans the complete chain, so callers that need a total
 // chain deadline should put that deadline on ctx.
 func (m *Manager) Run(ctx context.Context, hookType Type, hctx *Context) []Result {
-	m.mu.RLock()
-	if !m.enabled {
-		m.mu.RUnlock()
-		return nil
+	return m.run(ctx, hookType, hctx, true)
+}
+
+func (m *Manager) run(ctx context.Context, hookType Type, hctx *Context, includeClaude bool) []Result {
+	if err := m.CheckReady(); err != nil {
+		return claudeSettingsFailure(hookType, err)
 	}
+	if err := m.requiredSkillScopeError(ctx); err != nil {
+		return skillScopeFailure(hookType, err)
+	}
+	m.mu.RLock()
 	hooks := m.hooks
+	unmanagedEnabled := m.unmanagedHooksEnabledLocked()
+	if !unmanagedEnabled {
+		hooks = nil
+	}
 	timeout := m.timeout
 	handler := m.handler
+	settings := m.claudeScope
 	m.mu.RUnlock()
 
 	if hctx.WorkDir == "" {
@@ -270,6 +338,12 @@ func (m *Manager) Run(ctx context.Context, hookType Type, hctx *Context) []Resul
 		}
 	}
 
+	if includeClaude {
+		results = append(results, settings.run(ctx, m, hookType, hctx, handler)...)
+		if scope := ScopeFromContext(ctx); scope != nil {
+			results = append(results, scope.run(ctx, m, hookType, hctx, handler)...)
+		}
+	}
 	return results
 }
 
@@ -283,6 +357,45 @@ func (m *Manager) RunPreTool(ctx context.Context, toolName string, args map[stri
 func (m *Manager) RunPreToolInDir(ctx context.Context, workDir, toolName string, args map[string]any) []Result {
 	hctx := NewContext(toolName, args, workDir)
 	return m.Run(ctx, PreTool, hctx)
+}
+
+// RunScoped runs only conversation registrations. Agent callers use this
+// before permission checks for updatedInput, while preserving the native
+// configured hooks' established permission-before-hook order.
+func (m *Manager) RunScoped(ctx context.Context, kind Type, hctx *Context) []Result {
+	if err := m.CheckReady(); err != nil {
+		return claudeSettingsFailure(kind, err)
+	}
+	if err := m.requiredSkillScopeError(ctx); err != nil {
+		return skillScopeFailure(kind, err)
+	}
+	m.mu.RLock()
+	handler, settings := m.handler, m.claudeScope
+	m.mu.RUnlock()
+	results := settings.run(ctx, m, kind, hctx, handler)
+	results = append(results, ScopeFromContext(ctx).run(ctx, m, kind, hctx, handler)...)
+	return results
+}
+
+// A policy change after the model responds must not suppress required skill
+// checks at Stop or another hook boundary. Executors also guard before requests.
+func (m *Manager) requiredSkillScopeError(ctx context.Context) error {
+	scope := ScopeFromContext(ctx)
+	if err := scope.RestoreError(); err != nil {
+		return fmt.Errorf("cannot restore required skill hooks: %w", err)
+	}
+	if err := scope.PolicyError(m); err != nil {
+		return err
+	}
+	return nil
+}
+
+func skillScopeFailure(kind Type, err error) []Result {
+	return []Result{{Hook: &Hook{Name: "required skill hooks", Source: "session", Type: kind}, Error: err, StopReason: err.Error()}}
+}
+
+func claudeSettingsFailure(kind Type, err error) []Result {
+	return []Result{{Hook: &Hook{Name: "required Claude settings hooks", Source: "claude:settings", Type: kind}, Error: err, StopReason: err.Error()}}
 }
 
 // RunPostTool runs post-tool hooks.
@@ -305,6 +418,40 @@ func (m *Manager) RunOnErrorInDir(ctx context.Context, workDir, toolName string,
 	hctx := NewContext(toolName, args, workDir)
 	hctx.SetError(err)
 	return m.Run(ctx, OnError, hctx)
+}
+
+func (m *Manager) RunUserPromptSubmit(ctx context.Context, workDir, prompt string) []Result {
+	hctx := NewContext("", nil, workDir)
+	hctx.Prompt = prompt
+	return m.RunScoped(ctx, UserPromptSubmit, hctx)
+}
+
+func (m *Manager) RunSubagentStart(ctx context.Context, workDir string) []Result {
+	return m.RunScoped(ctx, SubagentStart, NewContext("", nil, workDir))
+}
+
+func (m *Manager) RunSessionStart(ctx context.Context, workDir, source string) []Result {
+	hctx := NewContext(source, nil, workDir)
+	hctx.Source = source
+	return m.RunScoped(ctx, SessionStart, hctx)
+}
+
+func (m *Manager) RunFileChanged(ctx context.Context, workDir, path, event string) []Result {
+	hctx := NewContext(filepath.Base(path), nil, workDir)
+	hctx.FilePath, hctx.FileEvent = path, event
+	return m.RunScoped(ctx, FileChanged, hctx)
+}
+
+func (m *Manager) RunCwdChanged(ctx context.Context, oldCwd, newCwd string) []Result {
+	hctx := NewContext("", nil, newCwd)
+	hctx.OldCwd, hctx.NewCwd = oldCwd, newCwd
+	return m.RunScoped(ctx, CwdChanged, hctx)
+}
+
+func (m *Manager) RunDirectoryAdded(ctx context.Context, workDir, directory, source string) []Result {
+	hctx := NewContext(source, nil, workDir)
+	hctx.Directory, hctx.Source = directory, source
+	return m.RunScoped(ctx, DirectoryAdded, hctx)
 }
 
 // RunOnStart runs on-start hooks.
@@ -353,13 +500,53 @@ func killHookProcess(cmd *exec.Cmd, gracePeriod time.Duration, done <-chan struc
 
 // executeHook executes a single hook.
 func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, timeout time.Duration) Result {
+	result := m.executeHandler(ctx, hook, hctx, timeout)
+	if result.Error != nil && hook.Claude != nil && hook.Claude.OnFailure == "block" && !hook.Claude.Async && !hook.Claude.AsyncRewake {
+		var exitErr *exec.ExitError
+		if errors.As(result.Error, &exitErr) && exitErr.ExitCode() == 2 {
+			return result
+		}
+		message := "Hook failed; blocking because onFailure is block: " + result.Error.Error()
+		if hook.Type == PreTool || hook.Type == UserPromptSubmit {
+			result.BlockReason = message
+		}
+		if hook.Type == PostTool || hook.Type == OnError {
+			result.AdditionalContext = message
+		}
+	}
+	return result
+}
+
+func (m *Manager) executeHandler(ctx context.Context, hook *Hook, hctx *Context, timeout time.Duration) Result {
+	if hook.Claude != nil && (hook.Claude.Async || hook.Claude.AsyncRewake) && asyncWorkerFromContext(ctx) == nil {
+		return m.launchAsyncHook(ctx, hook, hctx)
+	}
+	if hook.Claude != nil && hook.Claude.Handler == "agent" {
+		return m.executeAgentHook(ctx, hook, hctx, timeout)
+	}
+	if hook.Claude != nil && hook.Claude.Handler == "mcp_tool" {
+		return m.executeMCPHook(ctx, hook, hctx, timeout)
+	}
+	if hook.Claude != nil && hook.Claude.Handler == "prompt" {
+		return m.executePromptHook(ctx, hook, hctx, timeout)
+	}
+	if hook.Claude != nil && hook.Claude.Handler == "http" {
+		return m.executeHTTPHook(ctx, hook, hctx, timeout)
+	}
 	start := time.Now()
 
 	// Expand variables in command
-	command := hctx.ExpandCommand(hook.Command)
+	command := hook.Command
+	if hook.Claude == nil {
+		command = hctx.ExpandCommand(command)
+	}
 
 	// Create context with timeout that respects parent cancellation
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	execCtx, cancel := context.WithCancel(ctx)
+	if timeout > 0 {
+		cancel()
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel()
 	if err := execCtx.Err(); err != nil {
 		return Result{
@@ -376,6 +563,44 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 	// descendant may keep an inherited pipe open indefinitely. WaitDelay closes
 	// those pipes and makes cmd.Wait return within a bounded interval.
 	cmd := exec.Command("sh", "-c", command)
+	if hook.Claude != nil {
+		input, info, err := claudeInput(ctx, hook, hctx)
+		if worker := asyncWorkerFromContext(ctx); worker != nil {
+			input, info, err = worker.input, worker.info, nil
+		}
+		if err != nil {
+			return Result{Hook: hook, Error: err}
+		}
+		if hook.Claude.Args != nil {
+			args := append([]string(nil), hook.Claude.Args...)
+			for i := range args {
+				args[i] = pluginHookVariables(args[i], info, hook.claudePlugin)
+			}
+			cmd = exec.Command(pluginHookVariables(command, info, hook.claudePlugin), args...)
+		}
+		cmd.Stdin = bytes.NewReader(input)
+		for _, variable := range os.Environ() {
+			if !strings.HasPrefix(variable, "CLAUDE_PROJECT_DIR=") && !strings.HasPrefix(variable, "CLAUDE_EFFORT=") && !strings.HasPrefix(variable, "CLAUDE_PLUGIN_ROOT=") && !strings.HasPrefix(variable, "CLAUDE_PLUGIN_DATA=") && !strings.HasPrefix(variable, "CLAUDE_PLUGIN_OPTION_") {
+				cmd.Env = append(cmd.Env, variable)
+			}
+		}
+		cmd.Env = append(cmd.Env, "CLAUDE_PROJECT_DIR="+info.ProjectDir)
+		if (hook.Type == SessionStart || hook.Type == FileChanged || hook.Type == CwdChanged) && info.EnvFile != "" {
+			cmd.Env = append(cmd.Env, "CLAUDE_ENV_FILE="+info.EnvFile)
+		}
+		if plugin := hook.claudePlugin; plugin != nil {
+			if err := os.MkdirAll(plugin.Data, 0o700); err != nil {
+				return Result{Hook: hook, Error: fmt.Errorf("create plugin data directory: %w", err), StopReason: "Plugin data directory is unavailable"}
+			}
+			cmd.Env = append(cmd.Env, "CLAUDE_PLUGIN_ROOT="+filepath.ToSlash(plugin.Root), "CLAUDE_PLUGIN_DATA="+filepath.ToSlash(plugin.Data))
+			for key, value := range plugin.Options {
+				cmd.Env = append(cmd.Env, "CLAUDE_PLUGIN_OPTION_"+strings.ToUpper(key)+"="+value)
+			}
+		}
+		if info.Effort != "" {
+			cmd.Env = append(cmd.Env, "CLAUDE_EFFORT="+info.Effort)
+		}
+	}
 	cmd.WaitDelay = hookPipeWaitDelay
 	cmd.Dir = hctx.WorkDir
 	// Own process group so killHookProcess can terminate any backgrounded/
@@ -393,6 +618,9 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 			Error:   fmt.Errorf("failed to start hook '%s': %w", hook.Name, err),
 			Elapsed: time.Since(start),
 		}
+	}
+	if worker := asyncWorkerFromContext(ctx); worker != nil {
+		worker.job.started <- nil
 	}
 
 	// Keep Wait off the caller goroutine so parent cancellation can initiate
@@ -465,12 +693,31 @@ func (m *Manager) executeHook(ctx context.Context, hook *Hook, hctx *Context, ti
 		finalErr = fmt.Errorf("hook '%s' failed: %w (output: %s)", hook.Name, finalErr, output)
 	}
 
-	return Result{
+	result := Result{
 		Hook:    hook,
 		Output:  output,
 		Error:   finalErr,
 		Elapsed: elapsed,
 	}
+	if hook.Claude != nil {
+		outputCapture.mu.Lock()
+		stdout, stderr := outputCapture.stdout.String(), outputCapture.stderr.String()
+		outputCapture.mu.Unlock()
+		exitCode := 0
+		var exitErr *exec.ExitError
+		if errors.As(finalErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		if worker := asyncWorkerFromContext(ctx); worker != nil {
+			worker.job.stdout, worker.job.stderr, worker.job.exitCode = stdout, stderr, exitCode
+			return result
+		}
+		result = interpretClaudeResult(result, stdout, stderr, exitCode)
+		if hook.Claude.OnFailure != "" && exitCode != 2 && strings.HasPrefix(strings.TrimSpace(stdout), "{") && !validHTTPHookOutput([]byte(strings.TrimSpace(stdout))) {
+			result = Result{Hook: hook, Elapsed: elapsed, Error: fmt.Errorf("invalid Claude hook JSON output")}
+		}
+	}
+	return result
 }
 
 // HasHooksFor checks if there are any hooks for the given type and tool.
@@ -496,6 +743,12 @@ func (m *Manager) HasHooksFor(hookType Type, toolName string) bool {
 // model as the reason.
 func Blocked(results []Result) (Result, bool) {
 	for _, r := range results {
+		if r.Hook != nil && r.Hook.Claude != nil && (r.Hook.Claude.Async || r.Hook.Claude.AsyncRewake) {
+			continue
+		}
+		if r.BlockReason != "" {
+			return r, true
+		}
 		if r.Hook != nil && r.Hook.FailOnError && r.Error != nil {
 			return r, true
 		}
@@ -506,7 +759,11 @@ func Blocked(results []Result) (Result, bool) {
 // RunStop runs end-of-turn hooks. The final response is exposed to hook
 // commands as ${RESULT}.
 func (m *Manager) RunStop(ctx context.Context, finalResponse string) []Result {
-	hctx := &Context{WorkDir: m.workDir, Extra: make(map[string]string)}
+	return m.RunStopInDir(ctx, m.workDir, finalResponse)
+}
+
+func (m *Manager) RunStopInDir(ctx context.Context, workDir, finalResponse string) []Result {
+	hctx := &Context{WorkDir: workDir, Extra: make(map[string]string)}
 	hctx.SetResult(finalResponse)
 	return m.Run(ctx, Stop, hctx)
 }

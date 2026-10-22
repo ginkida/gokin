@@ -161,7 +161,7 @@ func clonePolicyOverrides(overrides map[string]Level) map[string]Level {
 // refreshFromParent makes an invocation-local manager follow the live parent
 // policy without inheriting ambient session allows. It returns a hard/session
 // deny when the parent has revoked this exact invocation.
-func (m *Manager) refreshFromParent(toolName string, args map[string]any, workDir string) *Response {
+func (m *Manager) refreshFromParent(ctx context.Context, toolName string, args map[string]any, workDir string) *Response {
 	if m == nil || m.parent == nil {
 		return nil
 	}
@@ -210,13 +210,13 @@ func (m *Manager) refreshFromParent(toolName string, args map[string]any, workDi
 	if !enabled {
 		return nil
 	}
-	if rules.GetPolicy(toolName) == LevelDeny {
+	if invocationToolPolicy(ctx, rules, toolName) == LevelDeny {
 		return &Response{Allowed: false, Decision: DecisionDeny, Reason: "Tool is not permitted by parent configuration"}
 	}
 
 	// A parent session denial is a revocation floor. Parent session ALLOW is not
 	// consulted: plan-step capabilities and their approvals stay invocation-local.
-	key := parent.cacheKeyWithWorkDir(toolName, args, workDir)
+	key := parent.cacheKeyWithWorkDir(invocationCacheTool(ctx, toolName), args, workDir)
 	if cached, ok := parent.sessionCache.Get(key); ok && cached.Revision == parentRevision && cached.Decision == DecisionDenySession {
 		return &Response{Allowed: false, Decision: DecisionDenySession, Reason: "Denied for parent session"}
 	}
@@ -261,7 +261,7 @@ func (m *Manager) cacheKeyWithWorkDir(toolName string, args map[string]any, work
 // Returns a Response indicating whether execution is allowed.
 func (m *Manager) Check(ctx context.Context, toolName string, args map[string]any) (*Response, error) {
 	workDir := WorkDirFromContext(ctx)
-	if denied := m.refreshFromParent(toolName, args, workDir); denied != nil {
+	if denied := m.refreshFromParent(ctx, toolName, args, workDir); denied != nil {
 		return denied, nil
 	}
 	// Snapshot config fields under lock to avoid races with SetEnabled/SetRules
@@ -278,7 +278,7 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 	// the user supplied both flags for this invocation, and the narrower rule
 	// must win. Bare/wildcard denies are also removed from model schemas by the
 	// CLI wiring; this runtime check blocks hallucinated and late-added tools.
-	if temporaryToolDenyMatchesAny(runDenies, toolName, args, workDir) {
+	if TemporaryToolRulesDenyWithIdentity(ctx, runDenies, toolName, args, workDir) {
 		return &Response{
 			Allowed:  false,
 			Decision: DecisionDeny,
@@ -292,7 +292,7 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 	}
 
 	// Get policy from rules
-	policy := rules.GetPolicy(toolName)
+	policy := invocationToolPolicy(ctx, rules, toolName)
 	// Explicit deny is the hard policy boundary and always wins over a cached
 	// decision made under an earlier/more-permissive configuration.
 	if policy == LevelDeny {
@@ -306,22 +306,25 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 	// Run-scoped allows are pre-approvals, not capability grants. Config deny
 	// above still wins, and elevated Bash calls still reach the confirmation
 	// floor below.
-	runAllowed := temporaryToolGrantMatchesAny(runAllows, toolName, args, workDir)
+	runAllowed := invocationToolAllowed(ctx, runAllows, toolName, args, workDir)
+	forceAsk := hookDecisionFor(ctx, toolName, args) == "ask"
 
 	// A normal LevelAllow is authoritative. Elevated bash commands are the one
 	// exception: an identical, explicitly session-approved call may satisfy the
 	// action-semantics confirmation floor below.
-	if policy == LevelAllow && !isElevatedBash(toolName, args) {
+	if policy == LevelAllow && !forceAsk && !isElevatedBash(toolName, args) {
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 	}
 
 	// Reusable decisions are scoped to both the normalized invocation and the
 	// current policy revision. DecisionAllow never enters this cache.
-	key := m.cacheKeyWithWorkDir(toolName, args, workDir)
+	key := m.cacheKeyWithWorkDir(invocationCacheTool(ctx, toolName), args, workDir)
 	if cached, ok := m.sessionCache.Get(key); ok && cached.Revision == revision {
 		switch cached.Decision {
 		case DecisionAllowSession:
-			return &Response{Allowed: true, Decision: cached.Decision}, nil
+			if !forceAsk {
+				return &Response{Allowed: true, Decision: cached.Decision}, nil
+			}
 		case DecisionDenySession:
 			return &Response{
 				Allowed:  false,
@@ -330,11 +333,14 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 			}, nil
 		}
 	}
-	if runAllowed && !isElevatedBash(toolName, args) {
+	if runAllowed && !forceAsk && !isElevatedBash(toolName, args) {
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 	}
+	if PermissionPromptSuppressed(ctx) {
+		return &Response{Allowed: false, Decision: DecisionDeny, Reason: "Tool requires approval; permission prompts are disabled for skill context rendering"}, nil
+	}
 	if dontAsk {
-		if toolName == "bash" && IsReadOnlyBashArgs(args) {
+		if !forceAsk && toolName == "bash" && IsReadOnlyBashArgs(args) {
 			return &Response{Allowed: true, Decision: DecisionAllow}, nil
 		}
 		return &Response{
@@ -342,6 +348,9 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 			Decision: DecisionDeny,
 			Reason:   "Tool requires approval and was auto-denied by dontAsk mode",
 		}, nil
+	}
+	if forceAsk {
+		return m.askUser(ctx, toolName, args, workDir, revision)
 	}
 
 	switch policy {
@@ -482,7 +491,7 @@ func (m *Manager) askUser(
 	}
 
 	// Generate cache key for session decisions
-	key := m.cacheKeyWithWorkDir(toolName, args, workDir)
+	key := m.cacheKeyWithWorkDir(invocationCacheTool(ctx, toolName), args, workDir)
 
 	// Handle the decision
 	switch decision {

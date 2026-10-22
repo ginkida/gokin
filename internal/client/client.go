@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"gokin/internal/config"
 	"reflect"
 	"time"
 
@@ -59,9 +60,30 @@ type ModelInfo struct {
 var AvailableModels = []ModelInfo{
 	// GLM models (via Anthropic-compatible API on Z.AI)
 	{
+		ID:          "glm-5.3",
+		Name:        "GLM-5.3",
+		Description: "Flagship coding model — 1M context, 128K output, always-on reasoning (Coding Plan)",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
+	{
+		ID:          "glm-5.3-flash",
+		Name:        "GLM-5.3 Flash",
+		Description: "Fast multimodal coding — images, 1M context, always-on reasoning (Coding Plan)",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
+	{
+		ID:          "glm-5.3-flashx",
+		Name:        "GLM-5.3 FlashX",
+		Description: "High-speed multimodal model — requires pay-as-you-go API access",
+		Provider:    "glm",
+		BaseURL:     DefaultGLMBaseURL,
+	},
+	{
 		ID:          "glm-5.2",
 		Name:        "GLM-5.2",
-		Description: "Most capable GLM model — 1M context, 131K output (Coding Plan)",
+		Description: "Previous flagship GLM model — 1M context, 131K output (Coding Plan)",
 		Provider:    "glm",
 		BaseURL:     DefaultGLMBaseURL,
 	},
@@ -274,7 +296,8 @@ type Client interface {
 	SetTurnContext(turnContext string)
 
 	// SetThinkingBudget configures the thinking/reasoning budget for the next request.
-	// budget=0 disables thinking. Positive values set max thinking tokens.
+	// budget=0 disables optional thinking. Always-on GLM models instead use
+	// low effort; positive budgets map to low/high/max, unless explicitly overridden.
 	SetThinkingBudget(budget int32)
 
 	// Close closes the client connection.
@@ -326,6 +349,10 @@ type AuxiliaryClientCloner interface {
 	CloneForAuxiliaryClient() (Client, bool)
 }
 
+type AuxiliaryModelClientCloner interface {
+	CloneForAuxiliaryModel(string) (Client, bool, error)
+}
+
 func cloneClientForSession(prototype Client) (Client, error) {
 	if isNilClient(prototype) {
 		return nil, fmt.Errorf("cannot clone nil client prototype")
@@ -355,21 +382,41 @@ func cloneClientForSession(prototype Client) (Client, error) {
 // production session-clone contract; callers may safely use the returned base
 // client in that case because this function never mutates it.
 func CloneForAuxiliary(base Client) (Client, bool) {
+	clone, isolated, err := CloneForAuxiliaryWithModel(base, "")
+	if err != nil && isolated {
+		return &auxiliaryModelErrorClient{Client: clone, err: err}, true
+	}
+	return clone, isolated
+}
+
+// CloneForAuxiliaryWithModel keeps execution guards and invocation meters while
+// an explicit hook model takes precedence over the default small-model choice.
+func CloneForAuxiliaryWithModel(base Client, selection string) (Client, bool, error) {
 	if isNilClient(base) {
-		return base, false
+		return base, false, nil
 	}
 	var clone Client
-	if cloner, ok := base.(AuxiliaryClientCloner); ok {
+	if cloner, ok := base.(AuxiliaryModelClientCloner); ok {
+		var isolated bool
+		var err error
+		clone, isolated, err = cloner.CloneForAuxiliaryModel(selection)
+		if !isolated || isNilClient(clone) || sameClientInstance(clone, base) {
+			return base, false, err
+		}
+		if err != nil {
+			return clone, true, err
+		}
+	} else if cloner, ok := base.(AuxiliaryClientCloner); ok {
 		var isolated bool
 		clone, isolated = cloner.CloneForAuxiliaryClient()
 		if !isolated || isNilClient(clone) || sameClientInstance(clone, base) {
-			return base, false
+			return base, false, nil
 		}
 	} else {
 		var err error
 		clone, err = cloneClientForSession(base)
 		if err != nil {
-			return base, false
+			return base, false, nil
 		}
 	}
 	clone.SetTools(nil)
@@ -380,7 +427,27 @@ func CloneForAuxiliary(base Client) (Client, bool) {
 		setter.SetStatusCallback(nil)
 	}
 	disableDirectHealthTracking(clone)
-	return clone, true
+	var model string
+	var err error
+	if selection == "" {
+		model, err = ResolveSmallFastModel(clone)
+	} else {
+		provider := ""
+		if identified, ok := clone.(ProviderIdentity); ok {
+			provider = identified.GetProvider()
+		}
+		model, err = config.ResolveModelAlias(provider, clone.GetModel(), selection)
+		if err == nil {
+			err = config.ValidateModelSelection(provider, clone.GetModel(), model)
+		}
+	}
+	if err != nil {
+		return clone, true, err
+	}
+	if model != clone.GetModel() {
+		clone.SetModel(model)
+	}
+	return clone, true, nil
 }
 
 // TokenCountAccuracy is an optional capability for clients whose CountTokens
@@ -478,6 +545,8 @@ type ResponseChunk struct {
 
 // Response represents a complete response from the model.
 type Response struct {
+	// MessageID identifies an observed model round without rewriting tool IDs.
+	MessageID string
 	// Text is the accumulated text response.
 	Text string
 

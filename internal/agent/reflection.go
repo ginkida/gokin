@@ -300,7 +300,7 @@ Respond with a JSON object containing:
 
 Be concise and practical. Focus on actionable solutions.`
 
-	resp, err := c.SendMessage(ctx, prompt)
+	resp, err := client.SendAuxiliaryMessage(ctx, c, prompt)
 	if err != nil {
 		logging.Debug("semantic analysis failed", "error", err)
 		return nil
@@ -310,7 +310,7 @@ Be concise and practical. Focus on actionable solutions.`
 	// A provider can close Chunks while cancellation races its terminal error;
 	// CollectContext preserves the typed timeout/partial cause instead of letting
 	// that prefix drive and populate the automatic-recovery cache.
-	collected, err := resp.CollectContext(ctx)
+	collected, err := client.CollectAuxiliaryResponse(ctx, c, resp)
 	if err != nil {
 		logging.Debug("semantic analysis stream error", "error", err)
 		return nil

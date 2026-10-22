@@ -15,7 +15,7 @@ func ReadToolDeclaration() *genai.FunctionDeclaration {
 			Properties: map[string]*genai.Schema{
 				"file_path": {
 					Type:        genai.TypeString,
-					Description: "The absolute path to the file to read",
+					Description: "Absolute file path, or a gokin://summary/<id> archive referenced by the current session",
 				},
 				"offset": {
 					Type:        genai.TypeInteger,
@@ -1229,6 +1229,7 @@ func getAllDeclarationsForWorkDir(workDir string) map[string]*genai.FunctionDecl
 		"go_to_definition":     NewGoToDefinitionTool(workDir).Declaration(),
 		"find_references":      NewFindReferencesTool(workDir).Declaration(),
 		"go_search":            NewGoSearchTool(workDir).Declaration(),
+		"lsp":                  NewLSPTool(workDir).Declaration(),
 	}
 }
 
@@ -1248,7 +1249,7 @@ func SkillToolDeclaration() *genai.FunctionDeclaration {
 				},
 				"arguments": {
 					Type:        genai.TypeString,
-					Description: "Optional arguments substituted into $ARGUMENTS and $1..$9 in the workflow.",
+					Description: "Arguments for $ARGUMENTS and $ARGUMENTS[N]. Claude skills use $0 for the first argument; native Gokin skills use $1.",
 				},
 				"query": {
 					Type:        genai.TypeString,

@@ -18,6 +18,7 @@ import (
 
 	"gokin/internal/cache"
 	"gokin/internal/git"
+	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/security"
 )
@@ -205,7 +206,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 
 	// Check cache first
 	var cacheKey string
-	if t.cache != nil {
+	if t.cache != nil && !hooks.AgentHookActive(ctx) {
 		cacheKey = cache.GrepKey(pattern, searchPath, globPattern, caseInsensitive, contextLines)
 		if cached, ok := t.cache.GetGrep(cacheKey); ok {
 			// Return cached results
@@ -350,7 +351,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	// Cache the results
-	if t.cache != nil && cacheKey != "" {
+	if t.cache != nil && cacheKey != "" && !hooks.AgentHookActive(ctx) {
 		t.cache.SetGrep(cacheKey, cache.GrepResult{
 			Matches:    cacheMatches,
 			MatchCount: matchCount, // real matches only (context excluded)
