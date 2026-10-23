@@ -178,3 +178,29 @@ func selfReviewResponseText(results []*genai.FunctionResponse) string {
 	errorText, _ := response["error"].(string)
 	return content + "\n" + errorText
 }
+
+func TestExecutorSelfReview_DisabledForInvocationOnly(t *testing.T) {
+	registry := NewRegistry()
+	registry.MustRegister(&selfReviewMutationTool{name: "edit"})
+	cl := &scriptedExecutorClient{model: "glm-5.3-flash", responses: []*client.StreamingResponse{
+		buildSelfReviewToolStream("one", "edit", map[string]any{"file_path": "one.go"}), buildExecutorTestTextStream("done"),
+		buildSelfReviewToolStream("two", "edit", map[string]any{"file_path": "two.go"}), buildExecutorTestTextStream("done"),
+	}}
+	exec := NewExecutor(registry, cl, time.Second)
+	exec.preFlightChecks = false
+	exec.SetDeltaCheckConfig(false, 0, false, 0)
+	exec.SetSelfReviewThreshold(1)
+	if _, _, err := exec.Execute(ContextWithoutSelfReview(t.Context()), nil, "fix one file"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(selfReviewResponseText(cl.functionResults[0]), "[smart-validation]") {
+		t.Fatal("disabled invocation injected verification nudge")
+	}
+	exec.ResetSideEffectLedger()
+	if _, _, err := exec.Execute(t.Context(), nil, "fix next file"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(selfReviewResponseText(cl.functionResults[1]), "[smart-validation]") {
+		t.Fatal("invocation setting leaked into next request")
+	}
+}

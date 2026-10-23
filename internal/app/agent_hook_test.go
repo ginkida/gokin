@@ -17,6 +17,7 @@ import (
 	"gokin/internal/skills"
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
+	"google.golang.org/genai"
 )
 
 func installAgentHookFixture(t *testing.T, a *App, event string, once bool) {
@@ -108,7 +109,7 @@ func TestAgentHookCannotWidenCapabilitiesOrBypassPermissionDenials(t *testing.T)
 				a.executor.SetPermissions(manager)
 			}
 			result, err := a.RunHeadlessWithOptions(ctx, "inspect evidence", HeadlessOptions{OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard, MaxTurns: 4})
-			if gate == "capability" && err != nil || gate == "permission" && (err == nil || result.Status != "policy_blocked") || write.CallCount() != 0 || len(verifier.Calls()) != 2 || verifier.Calls()[1].Responses[0].Response["success"] != false {
+			if gate == "capability" && err != nil || gate == "permission" && (err != nil || result.Status != "success" || len(result.PermissionDenials) != 1) || write.CallCount() != 0 || len(verifier.Calls()) != 2 || verifier.Calls()[1].Responses[0].Response["success"] != false {
 				t.Fatalf("agent hook bypassed %s: %+v %v", gate, result, err)
 			}
 		})
@@ -280,5 +281,42 @@ func TestAgentHookSearchDoesNotReuseForegroundNegativeCache(t *testing.T) {
 	result, err := a.RunHeadlessWithOptions(t.Context(), "verify proof", HeadlessOptions{OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard, MaxTurns: 4})
 	if err != nil || !strings.Contains(fmt.Sprint(verifier.Calls()[1].Responses[0].Response), "proof.txt") {
 		t.Fatalf("verifier reused stale search cache: %+v %v calls=%+v", result, err, verifier.Calls())
+	}
+}
+
+func TestStrictPermissionStopsNestedHookBeforeOtherCalls(t *testing.T) {
+	root := testkit.ResolvedTempDir(t)
+	worker := testkit.NewMockClient().EnqueueToolCall("read", map[string]any{"file_path": "requested.txt"}).EnqueueText("Finished")
+	verifier := testkit.NewMockClient().EnqueueScript(testkit.ResponseScript{Chunks: []client.ResponseChunk{{FunctionCalls: []*genai.FunctionCall{
+		{ID: "denied", Name: "write", Args: map[string]any{"file_path": filepath.Join(root, "denied.txt"), "content": "denied"}},
+		{ID: "allowed", Name: "write", Args: map[string]any{"file_path": filepath.Join(root, "allowed.txt"), "content": "allowed"}},
+	}}}}).EnqueueText(`{"ok":true}`)
+	a := newGoalTestApp(t, worker, verifier)
+	a.workDir = root
+	a.executor.SetWorkDir(root)
+	a.registry.MustRegister(tools.NewWriteTool(a.workDir))
+	installAgentHookFixture(t, a, "PreToolUse", false)
+	manager := permission.NewManager(nil, true)
+	manager.SetRunToolRules([]string{"write"}, []string{"write(**/denied.txt)"})
+	for path, want := range map[string]bool{"denied.txt": false, "allowed.txt": true} {
+		response, err := manager.Check(permission.ContextWithWorkDir(t.Context(), root), "write", map[string]any{"file_path": filepath.Join(root, path), "content": "fixture"})
+		if err != nil || response.Allowed != want {
+			t.Fatalf("invalid permission fixture for %s: %+v %v", path, response, err)
+		}
+	}
+	a.executor.SetPermissions(manager)
+	result, err := a.RunHeadlessWithOptions(t.Context(), "inspect evidence", HeadlessOptions{Stdout: io.Discard, Stderr: io.Discard, StrictPermissions: true, NoSelfReview: true})
+	if err == nil || result.Status != "policy_blocked" || len(result.PermissionDenials) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(verifier.Calls()) != 1 || len(worker.Calls()) != 1 {
+		t.Errorf("requests after denial: verifier=%d worker=%d", len(verifier.Calls()), len(worker.Calls()))
+	}
+	if _, err := os.Stat(filepath.Join(a.workDir, "allowed.txt")); !os.IsNotExist(err) {
+		t.Errorf("write after first denial: %v", err)
+	}
+	read, _ := a.registry.Get("read")
+	if read.(*appHeadlessScriptedTool).CallCount() != 0 {
+		t.Error("enclosing tool executed after denial")
 	}
 }

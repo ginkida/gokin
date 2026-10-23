@@ -68,10 +68,19 @@ func (a *App) runCompletionReviewIfNeeded(
 	response *string,
 	usage *turnUsageAccumulator,
 ) bool {
+	if tools.SelfReviewDisabled(ctx) {
+		return true
+	}
 	if a == nil || a.executor == nil || a.session == nil || response == nil {
 		return true
 	}
 
+	a.mu.Lock()
+	trivial := a.headlessRunActive && a.responseMutationCount == 1 && a.responseTrivialEdit && len(a.responseTouchedPaths) == 1
+	a.mu.Unlock()
+	if trivial {
+		return true
+	}
 	toolsUsed := a.snapshotResponseToolsUsed()
 	touchedPaths := a.snapshotResponseTouchedPaths()
 	commands := a.snapshotResponseCommands()

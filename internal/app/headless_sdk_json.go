@@ -14,6 +14,7 @@ import (
 	"gokin/internal/client"
 	"gokin/internal/hooks"
 	"gokin/internal/security"
+	"gokin/internal/tools"
 )
 
 // sdkJSONPresenter consumes model/history events, rather than UI callbacks:
@@ -275,7 +276,7 @@ func SDKResult(result HeadlessResult, apiDuration time.Duration, cacheCreation i
 		}
 	}
 	creation := min(max(0, cacheCreation), max(0, result.Usage.InputTokens-result.Usage.CacheReadInputTokens))
-	frame := map[string]any{"type": "result", "subtype": subtype, "duration_ms": result.DurationMS, "duration_api_ms": apiDuration.Milliseconds(), "is_error": result.Status != "success", "num_turns": result.Usage.ModelRounds, "session_id": result.SessionID, "uuid": uuid.NewString(), "result": result.Result, "total_cost_usd": result.Cost.EstimatedUSD, "cost_tracked": result.Cost.Tracked, "permission_denials": []any{}, "usage": map[string]any{"input_tokens": max(0, result.Usage.InputTokens-result.Usage.CacheReadInputTokens-creation), "output_tokens": result.Usage.OutputTokens, "cache_read_input_tokens": result.Usage.CacheReadInputTokens, "cache_creation_input_tokens": creation}}
+	frame := map[string]any{"type": "result", "subtype": subtype, "duration_ms": result.DurationMS, "duration_api_ms": apiDuration.Milliseconds(), "is_error": result.Status != "success", "num_turns": result.Usage.ModelRounds, "session_id": result.SessionID, "uuid": uuid.NewString(), "result": result.Result, "total_cost_usd": result.Cost.EstimatedUSD, "cost_tracked": result.Cost.Tracked, "permission_denials": append([]tools.PermissionDenial{}, result.PermissionDenials...), "files_changed": append([]string{}, result.FilesChanged...), "usage": map[string]any{"input_tokens": max(0, result.Usage.InputTokens-result.Usage.CacheReadInputTokens-creation), "output_tokens": result.Usage.OutputTokens, "cache_read_input_tokens": result.Usage.CacheReadInputTokens, "cache_creation_input_tokens": creation}}
 	if result.Error != nil {
 		frame["errors"] = []string{result.Error.Message}
 		frame["error"] = result.Error

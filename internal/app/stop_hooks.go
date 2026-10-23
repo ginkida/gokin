@@ -9,7 +9,7 @@ import (
 )
 
 func terminalInternalExchangeError(err error) bool {
-	return tools.IsHookStopError(err) || errors.Is(err, tools.ErrMaxTurnsExceeded) ||
+	return errors.Is(err, tools.ErrStrictPermissionDenied) || tools.IsHookStopError(err) || errors.Is(err, tools.ErrMaxTurnsExceeded) ||
 		errors.Is(err, tools.ErrBudgetExceeded) || errors.Is(err, tools.ErrCostUnavailable)
 }
 

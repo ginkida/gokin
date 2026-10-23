@@ -194,8 +194,8 @@ type AgentResult struct {
 	StatefulToolAttempts int `json:"stateful_tool_attempts,omitempty"`
 
 	// TouchedPaths lists the files this agent SUCCESSFULLY mutated (workDir-
-	// relative slash paths, deduped, sorted — the done-gate's touchedPaths
-	// ledger via GetTouchedPaths). Surfaced so /loop can record WHICH files
+	// relative slash paths, deduped, sorted via GetMutatedPaths). Surfaced so
+	// /loop can record WHICH files
 	// each iteration changed, giving the next iteration concrete anchors
 	// instead of re-grepping for its own prior work.
 	TouchedPaths []string `json:"touched_paths,omitempty"`

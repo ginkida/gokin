@@ -87,6 +87,9 @@ func (m *Manager) readCatalog(name string, marketplace Marketplace) (Catalog, er
 	return catalog, nil
 }
 func (m *Manager) fetchMarketplace(ctx context.Context, source Source, stage string, accept []string) (Catalog, string, error) {
+	if err := requireCachedSource(ctx, source); err != nil {
+		return Catalog{}, "", err
+	}
 	var root, path string
 	switch source.Kind {
 	case "directory":
@@ -208,7 +211,21 @@ func (m *Manager) AddMarketplace(ctx context.Context, input string, accept []str
 	}
 	return result, nil
 }
-func (m *Manager) addMarketplace(ctx context.Context, source Source, accept []string, update bool, expected string, declare, replace bool) (Result, error) {
+func (m *Manager) addMarketplace(ctx context.Context, source Source, accept []string, update bool, expected string, declare, replace bool) (result Result, resultErr error) {
+	if err := requireCachedSource(ctx, source); err != nil {
+		return Result{}, err
+	}
+	defer func() {
+		name := expected
+		if name == "" {
+			name = result.Marketplace
+		}
+		if name != "" && !cachedStartup(ctx) {
+			if err := m.recordMarketplaceAttempt(name, source, resultErr != nil); err != nil {
+				result.Warnings = append(result.Warnings, "could not persist marketplace retry state: "+err.Error())
+			}
+		}
+	}()
 	unlock, err := m.lock(ctx)
 	if err != nil {
 		return Result{}, err

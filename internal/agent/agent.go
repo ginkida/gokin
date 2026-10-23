@@ -272,6 +272,7 @@ type Agent struct {
 	doneGatePolicy *donegate.Policy
 	touchedSeen    map[string]bool
 	touchedPaths   []string
+	mutatedPaths   []string
 	// mutationGen counts every successful mutation (incl. re-edits of an
 	// already-touched file), so the gate re-checks after a re-edit that the
 	// touched-path SET alone would miss. Guarded by toolsMu.
@@ -1563,6 +1564,9 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 
 // Run executes the agent with the given prompt and returns the result.
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
+	a.toolsMu.Lock()
+	a.mutatedPaths = nil
+	a.toolsMu.Unlock()
 	if a.definitionError != nil {
 		return &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: a.definitionError.Error(), Completed: true}, a.definitionError
 	}
@@ -1592,13 +1596,16 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	ctx = hooks.ContextWithAsyncScope(ctx, asyncScope)
 	defer asyncScope.Close()
 	ctx = hooks.ContextWithPromptClient(ctx, a.client, func() error {
+		if err := tools.PermissionStopError(hookCtx); err != nil {
+			return err
+		}
 		return tools.SkillHooksError(tools.ContextWithSkillHooks(hookCtx, a.registry, a.hooks))
 	})
 	ctx = tools.ContextWithAgentHookDispatcher(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
 		if err := ctx.Err(); err != nil {
 			return tools.ToolResult{}, err
 		}
-		return a.executeToolResultSafely(ctx, &genai.FunctionCall{ID: fmt.Sprintf("%s-hook-%d", a.ID, time.Now().UnixNano()), Name: name, Args: args}), nil
+		return a.executeNestedToolResultSafely(ctx, &genai.FunctionCall{ID: fmt.Sprintf("%s-hook-%d", a.ID, time.Now().UnixNano()), Name: name, Args: args}), nil
 	})
 	// A reusable/resumed Agent gets fresh skill permission rules for every run.
 	// Skill instructions may persist in history; grants and denies do not.
@@ -1755,7 +1762,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		a.stateMu.Unlock()
 		result.MutatingToolCalls = a.MutatingToolCount()
 		result.StatefulToolAttempts = a.StatefulToolAttemptCount()
-		result.TouchedPaths = a.GetTouchedPaths()
+		result.TouchedPaths = a.GetMutatedPaths()
 
 		// Clear callHistory to prevent memory leak
 		a.clearCallHistory()
@@ -1787,7 +1794,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.stateMu.Unlock()
 	result.MutatingToolCalls = a.MutatingToolCount()
 	result.StatefulToolAttempts = a.StatefulToolAttemptCount()
-	result.TouchedPaths = a.GetTouchedPaths()
+	result.TouchedPaths = a.GetMutatedPaths()
 
 	// Clear callHistory to prevent memory leak on long-running sessions
 	a.clearCallHistory()
@@ -3887,6 +3894,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			for _, result := range results {
 				hookResponses = append(hookResponses, result.Response)
 			}
+			if err := tools.PermissionStopError(ctx); err != nil {
+				return a.history, output.String(), err
+			}
 			if err := tools.HookStopErrorWithContext(ctx, hookResponses); err != nil {
 				return a.history, output.String(), err
 			}
@@ -3974,7 +3984,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// if the agent changed code but never ran any verification command this
 		// run, nudge it once to build/test before finishing. Conservative — it
 		// won't nag an agent that ran any command, so false nudges are rare.
-		if !verifyNudged && a.needsVerificationNudge() {
+		if !verifyNudged && !tools.SelfReviewDisabled(ctx) && a.needsVerificationNudge() {
 			verifyNudged = true
 			a.appendVerificationNudge()
 			continue
@@ -5278,7 +5288,7 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 			for _, call := range group.Calls {
 				responses = append(responses, results[callIndex[call]].Response)
 			}
-			hookStopErr = tools.HookStopError(responses)
+			hookStopErr = errors.Join(tools.HookStopError(responses), tools.PermissionStopError(ctx))
 		} else {
 			// Execute sequentially (write tools or single tool)
 			for _, call := range group.Calls {
@@ -5292,7 +5302,7 @@ func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) [
 					continue
 				}
 				results[idx] = a.executeToolCancellable(ctx, call)
-				hookStopErr = tools.HookStopError([]*genai.FunctionResponse{results[idx].Response})
+				hookStopErr = errors.Join(tools.HookStopError([]*genai.FunctionResponse{results[idx].Response}), tools.PermissionStopError(ctx))
 			}
 		}
 	}
@@ -5381,7 +5391,25 @@ func (a *Agent) executeToolResultSafely(ctx context.Context, call *genai.Functio
 			result = tools.NewErrorResult(tools.FormatToolPanic(call.Name, recovered))
 		}
 	}()
-	return a.executeTool(ctx, call)
+	result = a.executeTool(ctx, call)
+	// Permission state belongs to this invocation, not deferred Agent
+	// bookkeeping. A sibling may still be dispatching nested tools before the
+	// parallel group joins, so strict stopping must be visible immediately.
+	if agentToolExecutionActive(ctx) {
+		result = tools.ApplyHeadlessPermissionResult(ctx, call, result)
+	}
+	return result
+}
+
+// Nested hooks and skills have no outer result-finalization step. Ordinary
+// workers retain caller-owned bookkeeping until their whole group joins.
+func (a *Agent) executeNestedToolResultSafely(ctx context.Context, call *genai.FunctionCall) tools.ToolResult {
+	result := a.executeToolResultSafely(ctx, call)
+	if agentToolExecutionActive(ctx) {
+		a.recordPolicyBlock(result.PolicyBlock)
+		a.recordToolExecution(call.Name, call.Args, result)
+	}
+	return result
 }
 
 func (a *Agent) finishToolResultSafely(ctx context.Context, call *genai.FunctionCall, raw tools.ToolResult, elapsed time.Duration) (result toolCallResult) {
@@ -5580,6 +5608,7 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 			ID: call.ID, Name: call.Name, Response: result.ToMap(),
 		}}
 	}
+	result = tools.ApplyHeadlessPermissionResult(ctx, call, result)
 	if result.PolicyBlock != nil {
 		a.recordPolicyBlock(result.PolicyBlock)
 	}
@@ -5772,6 +5801,25 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 // Named return `out` so the deferred tool-activity "end" event can report the
 // real outcome (success + a short summary) — see subAgentToolOutcome.
 func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out tools.ToolResult) {
+	if err := tools.PermissionStopError(ctx); err != nil {
+		return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, err.Error())
+	}
+
+	if ceiling, restricted := tools.AgentToolCapabilityCeilingFromContext(ctx); restricted {
+		allowed := false
+		for _, name := range ceiling {
+			if name == call.Name {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			denied := tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, fmt.Sprintf("tool %q is outside this invocation's capability ceiling", call.Name))
+			denied.PolicyBlock.Terminal = true
+			return denied
+		}
+	}
+
 	if err := checkPluginAgentExecution(ctx); err != nil {
 		return tools.NewHookStoppedResult(err.Error())
 	}
@@ -5809,6 +5857,9 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	hookDecision := ""
 	if hookManager != nil {
 		preResults = hookManager.RunScoped(ctx, hooks.PreTool, hooks.NewContext(call.Name, call.Args, workDir))
+		if err := tools.PermissionStopError(ctx); err != nil {
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, err.Error())
+		}
 		if stopped, ok := tools.HookStopResult(preResults); ok {
 			return stopped
 		}
@@ -5875,6 +5926,9 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	if hookManager != nil {
 		nativeResults := hookManager.RunNativePreToolInDir(ctx, workDir, call.Name, call.Args)
 		preResults = append(preResults, nativeResults...)
+		if err := tools.PermissionStopError(ctx); err != nil {
+			return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, err.Error())
+		}
 		if stopped, ok := tools.HookStopResult(nativeResults); ok {
 			return stopped
 		}
@@ -5923,12 +5977,12 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	var skillCommandIndex int
 	ctx = tools.ContextWithSkillToolDispatcher(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
 		skillCommandIndex++
-		return a.executeToolResultSafely(ctx, &genai.FunctionCall{ID: fmt.Sprintf("%s-skill-tool-%d", call.ID, skillCommandIndex), Name: name, Args: args}), nil
+		return a.executeNestedToolResultSafely(ctx, &genai.FunctionCall{ID: fmt.Sprintf("%s-skill-tool-%d", call.ID, skillCommandIndex), Name: name, Args: args}), nil
 	})
 	ctx = tools.ContextWithSkillModelClient(ctx, a.registry, a.client)
 	ctx = tools.ContextWithSkillShellInvoker(ctx, func(ctx context.Context, command string) (tools.ToolResult, error) {
 		skillCommandIndex++
-		return a.executeToolResultSafely(ctx, &genai.FunctionCall{
+		return a.executeNestedToolResultSafely(ctx, &genai.FunctionCall{
 			ID:   fmt.Sprintf("%s-skill-shell-%d", call.ID, skillCommandIndex),
 			Name: "bash", Args: map[string]any{"command": command},
 		}), nil
@@ -5975,7 +6029,7 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 }
 
 func (a *Agent) recordPolicyBlock(block *tools.PolicyBlock) {
-	if block == nil {
+	if block == nil || block.Recoverable {
 		return
 	}
 	a.stateMu.Lock()

@@ -199,3 +199,15 @@ func TestHeadlessUsageScopeChangesWithLifecycleOwner(t *testing.T) {
 		t.Fatalf("previous lifecycle leaked into next: usage=%+v cost=%+v", usage, cost)
 	}
 }
+
+func TestScopedAgentChangedPathsExcludeStaleCompletionAndAcceptZeroUsage(t *testing.T) {
+	app, current := activeUsageScopeApp()
+	app.accumulateScopedAgentResultUsage(&agent.AgentResult{InvocationScope: agent.NewInvocationScope(), TouchedPaths: []string{"old.go"}})
+	if len(app.headlessFilesChanged) != 0 {
+		t.Fatal("old child paths leaked into current run")
+	}
+	app.accumulateScopedAgentResultUsage(&agent.AgentResult{InvocationScope: current, TouchedPaths: []string{"child.go", "child.go", "../outside.go"}})
+	if len(app.headlessFilesChanged) != 1 || app.headlessFilesChanged[0] != "child.go" {
+		t.Fatalf("scoped zero-usage paths=%v", app.headlessFilesChanged)
+	}
+}

@@ -30,6 +30,7 @@ import (
 	"gokin/internal/memory"
 	"gokin/internal/permission"
 	"gokin/internal/plan"
+	"gokin/internal/plugins"
 	"gokin/internal/ratelimit"
 	"gokin/internal/repl"
 	"gokin/internal/router"
@@ -109,6 +110,7 @@ type Builder struct {
 	// MCP (Model Context Protocol)
 	mcpManager             *mcp.Manager
 	mcpConnectSummary      string // Deferred UI summary of initial MCP connect results
+	pluginStartupRefresh   func(context.Context) (plugins.StartupReport, error)
 	pluginStartupSummary   string
 	pluginAutoUpdater      *pluginAutoUpdater
 	pluginCommandUpdater   *pluginAutoUpdater
@@ -165,14 +167,17 @@ type BuildOptions struct {
 	// model download. It is intended for headless/automation callers.
 	NonInteractive bool
 	// SyncDeclaredPlugins reconciles explicitly declared marketplaces/plugins
-	// before runtime discovery. Interactive automatic updates run after the
-	// first user message; noninteractive hosts reconcile them during startup.
+	// from local/cache sources before discovery, then refreshes remote sources
+	// in the background with an app-owned deadline.
 	// The CLI enables this; embedding hosts opt in to fetching code and
 	// re-running previously accepted command sources.
 	SyncDeclaredPlugins bool
 	// Bare constructs the minimal Read/Edit/Bash runtime without automatic
 	// project instructions, skills, hooks, MCP, memory, or agent discovery.
-	Bare       bool
+	Bare bool
+	// NoPlugins disables plugin discovery and components, preserving native
+	// MCP, skills, hooks, settings and project instructions.
+	NoPlugins  bool
 	PluginDirs []string
 	// StartupToolCapabilityAllowed/Denied are an early, deny-only view used to
 	// avoid initializing optional runtimes the invocation cannot call. Full
@@ -191,6 +196,7 @@ func NewBuilder(cfg *config.Config, workDir string) *Builder {
 // NewBuilderWithOptions creates a Builder with explicit startup behavior.
 func NewBuilderWithOptions(cfg *config.Config, workDir string, options BuildOptions) *Builder {
 	ctx, cancel := context.WithCancel(context.Background())
+	options.NoPlugins = options.NoPlugins || os.Getenv("GOKIN_NO_PLUGINS") == "1"
 	if cfg != nil {
 		options.Bare = options.Bare || cfg.Bare
 		if options.Bare {
@@ -248,7 +254,9 @@ func (b *Builder) Build() (*App, error) {
 		return nil, b.finalizeError()
 	}
 
-	return b.assembleApp(), nil
+	application := b.assembleApp()
+	application.startPluginStartupRefresh(b.pluginStartupRefresh)
+	return application, nil
 }
 
 // initConfigDir initializes the configuration directory.
@@ -1144,7 +1152,14 @@ func (b *Builder) initManagers() error {
 		return fmt.Errorf("resolve Claude settings directory: %w", settingsDirErr)
 	}
 	b.hooksManager.ConfigureClaudeManagedSettings(hooks.ClaudeManagedSettingsDir())
-	b.hooksManager.ConfigureClaudePlugins(b.options.PluginDirs)
+	if b.options.NoPlugins {
+		if len(b.options.PluginDirs) > 0 {
+			return fmt.Errorf("--plugin-dir cannot be combined with --no-plugins")
+		}
+		b.hooksManager.DisableClaudePlugins()
+	} else {
+		b.hooksManager.ConfigureClaudePlugins(b.options.PluginDirs)
+	}
 	b.hooksManager.ConfigureClaudeSettings(b.workDir, userSettingsDir, workspaceTrusted)
 	b.syncStartupPlugins(userSettingsDir, workspaceTrusted)
 	if err := b.hooksManager.RefreshClaudeSettings(); err != nil {

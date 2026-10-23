@@ -257,6 +257,7 @@ type App struct {
 	runSystemPromptReplace     bool
 	runSystemPromptAppend      string
 	runStructuredOutputPrompt  string
+	runBriefPrompt             string
 
 	// hookFailures tracks per-hook failing streaks so a broken user hook
 	// toasts ONCE per streak, not once per tool call (see hooks_visibility.go).
@@ -347,11 +348,16 @@ type App struct {
 	costTracked              bool
 
 	// Response metadata tracking
-	responseStartTime    time.Time
-	responseToolsUsed    []string
-	responseTouchedPaths []string
-	responseCommands     []string
-	responseEvidence     responseEvidenceLedger
+	responseStartTime     time.Time
+	responseToolsUsed     []string
+	responseTouchedPaths  []string
+	responseMutationCount int
+	responseTrivialEdit   bool
+	headlessFilesChanged  []string
+	pluginStartupCancel   context.CancelFunc
+	pluginStartupDone     chan struct{}
+	responseCommands      []string
+	responseEvidence      responseEvidenceLedger
 
 	// Session persistence
 	sessionManager *chat.SessionManager

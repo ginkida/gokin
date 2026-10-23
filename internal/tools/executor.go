@@ -873,7 +873,7 @@ func (e *Executor) SetToolTimeout(timeout time.Duration) {
 // entrypoint so nested delegation retains capability ceilings, validation,
 // permissions, hooks, circuit breakers, audit callbacks, timeouts, and retry
 // safety. Tool failures remain structured ToolResults; Go errors are reserved
-// for an invalid dispatcher invocation.
+// for an invalid dispatcher invocation or an invocation-wide strict stop.
 func (e *Executor) InvokeTool(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	if e == nil || e.registry == nil {
 		return ToolResult{}, fmt.Errorf("tool executor is unavailable")
@@ -894,7 +894,11 @@ func (e *Executor) InvokeTool(ctx context.Context, name string, args map[string]
 		Name: name,
 		Args: ClonePermissionArgs(args),
 	}
-	return e.executeTool(ctx, call), nil
+	if err := PermissionStopError(ctx); err != nil {
+		return ToolResult{}, err
+	}
+	result := e.executeTool(ctx, call)
+	return result, PermissionStopError(ctx)
 }
 
 // SetToolWaitBudgetResolver wires dynamic interactive wait budgets. The
@@ -2029,7 +2033,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			// Self-review injection: if many files were mutated this turn,
 			// add a notification nudging the model to verify consistency.
-			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 {
+			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 && !SelfReviewDisabled(ctx) {
 				e.mutatedFilesMu.Lock()
 				count := len(e.mutatedFilesThisTurn)
 				var files []string
@@ -2141,6 +2145,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			historyBeforeResults := len(history)
 			history = append(history, funcResultContent)
 			client.ObserveConversationMessage(ctx, funcResultContent, cl.GetModel(), nil)
+			if err := PermissionStopError(ctx); err != nil {
+				return history, "", err
+			}
 			if err := HookStopErrorWithContext(ctx, results); err != nil {
 				return history, "", err
 			}
@@ -2835,7 +2842,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 				}(idx, call)
 			}
 			wg.Wait()
-			hookStopErr = HookStopError(results)
+			hookStopErr = errors.Join(HookStopError(results), PermissionStopError(ctx))
 		} else {
 			// Execute sequentially (write tools or single tool)
 			for _, call := range group.Calls {
@@ -2872,7 +2879,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 					result := e.executeTool(toolCtx, call)
 					results[idx] = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result.ToMap()}
 				}()
-				hookStopErr = HookStopError([]*genai.FunctionResponse{results[idx]})
+				hookStopErr = errors.Join(HookStopError([]*genai.FunctionResponse{results[idx]}), PermissionStopError(ctx))
 			}
 		}
 	}
@@ -2896,6 +2903,9 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 
 // executeTool executes a single tool call with enhanced safety and user awareness.
 func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) ToolResult {
+	if err := PermissionStopError(ctx); err != nil {
+		return newTerminalPermissionResult(err.Error())
+	}
 	// Step 0: Check circuit breaker
 	e.breakerMu.Lock()
 	breaker, ok := e.toolBreakers[call.Name]
@@ -2928,6 +2938,7 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 		// If it's not circuit open error, it's the wrapped tool error, which is already in 'result'
 	}
 
+	result = ApplyHeadlessPermissionResult(ctx, call, result)
 	if result.PolicyBlock != nil && e.handler != nil && e.handler.OnToolPolicyBlocked != nil {
 		e.handler.OnToolPolicyBlocked(call.Name, *result.PolicyBlock)
 	}
@@ -2977,10 +2988,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// authority merely because it was omitted from the advertised schema.
 	if ceiling, restricted := ToolCapabilityCeilingFromContext(ctx); restricted &&
 		!toolCapabilityAllows(ceiling, call.Name) {
-		return NewPolicyBlockedResult(
-			PolicyBlockPermission,
-			fmt.Sprintf("tool %q is outside this invocation's capability ceiling", call.Name),
-		)
+		return newTerminalPermissionResult(fmt.Sprintf("tool %q is outside this invocation's capability ceiling", call.Name))
 	}
 
 	// Enforce the exact schema advertised by this executor for this request.
@@ -2990,10 +2998,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// pass capability, plan, validation, permission, hook, and audit gates.
 	if ceiling, restricted := ToolSchemaCeilingFromContext(ctx, e); restricted &&
 		!toolCapabilityAllows(ceiling, call.Name) && !isInternalToolInvocation(ctx, e) {
-		return NewPolicyBlockedResult(
-			PolicyBlockPermission,
-			fmt.Sprintf("tool %q was not available in this request's tool schema", call.Name),
-		)
+		if e.planModeCheck != nil && e.planModeCheck() && !IsReadOnlyForPlanMode(call.Name) {
+			return NewPolicyBlockedResult(PolicyBlockPlan, "tool denied by plan mode")
+		}
+		return newTerminalPermissionResult(fmt.Sprintf("tool %q was not available in this request's tool schema", call.Name))
 	}
 
 	// Step 1: Basic tool lookup and validation
@@ -3104,6 +3112,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	originalCall := call
 	if e.hooks != nil {
 		preResults = e.hooks.RunPreTool(ctx, call.Name, call.Args)
+		if err := PermissionStopError(ctx); err != nil {
+			return newTerminalPermissionResult(err.Error())
+		}
 		if stopped, ok := HookStopResult(preResults); ok {
 			return stopped
 		}
@@ -3646,6 +3657,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		result.HookStopReason = hookStopReason
 		result.HookStopKind = hookStopKind
 	}
+
+	// Restore provenance after compactors that construct fresh presentation results.
+	result.mutation = &mutation
 
 	// Step 12.5: Cache result or invalidate cache for write operations
 	if isWriteOperation(call.Name) {
@@ -4270,6 +4284,9 @@ func writtenPathsFromResult(result ToolResult) []string {
 // mode carry no path args) into the touched-path set. Same defensive contract:
 // any non-conforming Data shape yields nil.
 func WrittenPathsFromResult(result ToolResult) []string {
+	if result.mutation != nil {
+		return append([]string(nil), result.mutation.Paths...)
+	}
 	return writtenPathsFromResult(result)
 }
 
@@ -5326,4 +5343,19 @@ func toolExecutionTimeout(base, p95 time.Duration, haveStats bool, toolName stri
 		return requested + toolTimeoutCompletionGrace
 	}
 	return timeout
+}
+
+// MutationPathsFromResult reports confirmed file mutations, excluding read-side
+// inputs, explicit no-ops, and batch/refactor previews. Legacy scalar tools
+// without provenance still report their successful mutation target.
+func MutationPathsFromResult(name string, args map[string]any, result ToolResult) []string {
+	if !result.Success {
+		return nil
+	}
+	mutation := result.mutation
+	if mutation == nil {
+		snapshot := snapshotGoMutation(result)
+		mutation = &snapshot
+	}
+	return selfReviewMutationPaths(&genai.FunctionCall{Name: name, Args: args}, *mutation)
 }

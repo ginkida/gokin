@@ -503,6 +503,8 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	if !isStructuredOutputCorrection(ctx) {
 		a.responseToolsUsed = nil
 		a.responseTouchedPaths = nil
+		a.responseMutationCount = 0
+		a.responseTrivialEdit = false
 		a.responseCommands = nil
 		a.responseEvidence = responseEvidenceLedger{}
 	}

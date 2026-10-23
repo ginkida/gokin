@@ -68,7 +68,7 @@ func (a *App) hasRunSystemPromptCustomization() bool {
 		return false
 	}
 	a.runSystemPromptMu.RLock()
-	custom := a.runSystemPromptReplace || a.runSystemPromptAppend != ""
+	custom := a.runSystemPromptReplace || a.runSystemPromptAppend != "" || a.runBriefPrompt != ""
 	a.runSystemPromptMu.RUnlock()
 	return custom
 }
@@ -82,6 +82,7 @@ func (a *App) composeRunSystemInstruction(base string) string {
 	replacement := a.runSystemPromptReplacement
 	appended := a.runSystemPromptAppend
 	structured := a.runStructuredOutputPrompt
+	brief := a.runBriefPrompt
 	a.runSystemPromptMu.RUnlock()
 
 	result := base
@@ -93,6 +94,12 @@ func (a *App) composeRunSystemInstruction(base string) string {
 			result = strings.TrimRight(result, "\r\n") + "\n\n"
 		}
 		result += strings.TrimLeft(appended, "\r\n")
+	}
+	if brief != "" {
+		if result != "" {
+			result = strings.TrimRight(result, "\r\n") + "\n\n"
+		}
+		result += brief
 	}
 	if structured != "" {
 		if result != "" {

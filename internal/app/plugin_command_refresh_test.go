@@ -356,7 +356,7 @@ func TestCommandRefreshBackgroundPromptsForCacheCost(t *testing.T) {
 	}
 }
 
-func TestBuilderNoninteractiveRefreshesAcceptedCommandsBeforeDiscovery(t *testing.T) {
+func TestBuilderNoninteractiveUsesCachedCommandsBeforeBackgroundRefresh(t *testing.T) {
 	a, _, producer, counter := appCommandRefreshFixture(t)
 	old, _ := a.hooksManager.ClaudePlugins()
 	if err := os.WriteFile(filepath.Join(producer, "new.txt"), []byte("changed"), 0600); err != nil {
@@ -373,11 +373,11 @@ func TestBuilderNoninteractiveRefreshesAcceptedCommandsBeforeDiscovery(t *testin
 		t.Fatal("headless builder scheduled interactive worker")
 	}
 	selected, err := authority.ClaudePlugins()
-	if err != nil || len(selected) != 1 || selected[0].Root() == old[0].Root() {
-		t.Fatalf("headless source not refreshed=%+v %v", selected, err)
+	if err != nil || len(selected) != 1 || selected[0].Root() != old[0].Root() {
+		t.Fatalf("headless did not retain cached source=%+v %v", selected, err)
 	}
 	data, _ := os.ReadFile(counter)
-	if string(data) != "x" {
+	if string(data) != "" {
 		t.Fatalf("headless runs=%q", data)
 	}
 }

@@ -71,6 +71,9 @@ func (m *Manager) findEntry(input string, known map[string]json.RawMessage) (str
 }
 
 func (m *Manager) fetchPlugin(ctx context.Context, source Source, marketplace Marketplace, entry Entry, stage string, opts InstallOptions) (string, string, error) {
+	if err := requireCachedSource(ctx, source); err != nil {
+		return "", "", err
+	}
 	switch source.Kind {
 	case "relative":
 		if marketplace.Source.Kind == "url" || marketplace.Source.Kind == "settings" {

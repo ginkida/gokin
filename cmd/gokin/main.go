@@ -24,6 +24,7 @@ import (
 	"gokin/internal/plugins"
 	"gokin/internal/security"
 	"gokin/internal/setup"
+	"gokin/internal/tools"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -71,6 +72,10 @@ var (
 	appendSystemFile     string
 	jsonSchema           string
 	bare                 bool
+	noPlugins            bool
+	strictPermissions    bool
+	brief                bool
+	noSelfReview         bool
 	debugCategories      string
 	debugFile            string
 	rootInvocationArgs   []string
@@ -90,7 +95,7 @@ editing files, running commands, and orchestrating multi-agent
 workflows — with zero proxies between you and the provider you
 choose.`
 
-func main() {
+func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:          "gokin",
 		Short:        "AI-powered CLI assistant for code",
@@ -138,6 +143,10 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&appendSystemFile, "append-system-prompt-file", "", "append instructions from a UTF-8 file for this run")
 	rootCmd.PersistentFlags().StringVar(&jsonSchema, "json-schema", "", "validate the final headless result against an inline JSON Schema")
 	rootCmd.PersistentFlags().BoolVar(&bare, "bare", false, "start a minimal Read/Edit/Bash runtime without auto-discovery (Claude-compatible)")
+	rootCmd.PersistentFlags().BoolVar(&noPlugins, "no-plugins", false, "disable plugin discovery and components, preserving MCP, skills, hooks and settings (GOKIN_NO_PLUGINS=1)")
+	rootCmd.PersistentFlags().BoolVar(&strictPermissions, "strict-permissions", false, "end headless execution with policy_blocked on the first permission denial")
+	rootCmd.PersistentFlags().BoolVar(&brief, "brief", false, "request a single-line headless summary; text output also lists changed files")
+	rootCmd.PersistentFlags().BoolVar(&noSelfReview, "no-self-review", false, "disable optional headless completion review and verification nudges; keep the hard done-gate (GOKIN_NO_SELF_REVIEW=1)")
 	rootCmd.PersistentFlags().StringVar(&debugCategories, "debug", "", "enable file debug logging with optional categories, for example api,mcp")
 	rootCmd.PersistentFlags().Lookup("debug").NoOptDefVal = "*"
 	rootCmd.PersistentFlags().StringVar(&debugFile, "debug-file", "", "write debug logs to this file (implicitly enables --debug)")
@@ -181,6 +190,11 @@ func main() {
 	rootCmd.AddCommand(newBackgroundSendCmd())
 	rootCmd.AddCommand(newBackgroundAttachCmd())
 
+	return rootCmd
+}
+
+func main() {
+	rootCmd := newRootCommand()
 	rootInvocationArgs = normalizeOptionalDebugArgs(os.Args[1:])
 	rootCmd.SetArgs(rootInvocationArgs)
 	if err := rootCmd.Execute(); err != nil {
@@ -206,6 +220,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	effectiveHeadless := headless || printMode
+	if !effectiveHeadless && (brief || strictPermissions || noSelfReview) {
+		return fmt.Errorf("--brief, --strict-permissions and --no-self-review require --headless or --print")
+	}
 	headlessFormat, err := resolveHeadlessOutputFormat(effectiveHeadless, outputFormat)
 	if err != nil {
 		return err
@@ -477,12 +494,16 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		NonInteractive:               effectiveHeadless,
 		SyncDeclaredPlugins:          true,
 		Bare:                         bare,
+		NoPlugins:                    noPlugins,
 		PluginDirs:                   pluginDirs,
 		StartupToolCapabilityAllowed: toolCeiling,
 		StartupToolCapabilityDenied:  startupToolDenies,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create application: %w", err)
+	}
+	if effectiveHeadless {
+		defer application.ClosePluginStartupRefresh()
 	}
 	logging.Debug("application initialized",
 		"category", "startup",
@@ -555,13 +576,17 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		failureKind = "execution"
 		jsonEnvelopeWritten = isStructuredHeadlessOutput(headlessFormat)
 		opts := app.HeadlessOptions{
-			OutputFormat: headlessFormat,
-			Stdout:       os.Stdout,
-			Stderr:       os.Stderr,
-			JSONSchema:   resolvedJSONSchema,
-			MaxTurns:     headlessTurns,
-			Timeout:      headlessLimit,
-			MaxBudgetUSD: headlessBudget,
+			OutputFormat:      headlessFormat,
+			Stdout:            os.Stdout,
+			Stderr:            os.Stderr,
+			JSONSchema:        resolvedJSONSchema,
+			MaxTurns:          headlessTurns,
+			Timeout:           headlessLimit,
+			MaxBudgetUSD:      headlessBudget,
+			StrictPermissions: strictPermissions,
+			PermissionMode:    string(resolvedPermissionMode),
+			Brief:             brief,
+			NoSelfReview:      noSelfReview,
 		}
 		if headlessInputFormat == headlessInputStreamJSON {
 			failureKind = "input"
@@ -573,15 +598,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 			return runBackgroundHeadlessLoop(
 				cmd.Context(), application, resolvedPrompt, opts, backgroundWorker)
 		}
-		_, err := application.RunHeadlessWithOptions(cmd.Context(), resolvedPrompt, app.HeadlessOptions{
-			OutputFormat: opts.OutputFormat,
-			Stdout:       opts.Stdout,
-			Stderr:       opts.Stderr,
-			JSONSchema:   opts.JSONSchema,
-			MaxTurns:     opts.MaxTurns,
-			Timeout:      opts.Timeout,
-			MaxBudgetUSD: opts.MaxBudgetUSD,
-		})
+		_, err := application.RunHeadlessWithOptions(cmd.Context(), resolvedPrompt, opts)
 		return err
 	}
 
@@ -1624,11 +1641,13 @@ func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error) er
 		kind = "startup"
 	}
 	result := app.HeadlessResult{
-		SchemaVersion: app.HeadlessSchemaVersion,
-		Type:          "result",
-		Result:        "",
-		SessionID:     sessionID,
-		Status:        "error",
+		PermissionDenials: []tools.PermissionDenial{},
+		FilesChanged:      []string{},
+		SchemaVersion:     app.HeadlessSchemaVersion,
+		Type:              "result",
+		Result:            "",
+		SessionID:         sessionID,
+		Status:            "error",
 		Error: &app.HeadlessError{
 			Kind:    kind,
 			Message: failure.Error(),

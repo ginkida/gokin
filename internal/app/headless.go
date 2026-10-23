@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 )
+
+const briefResultInstruction = "Final answer style: give a single-line summary of the result. Omit verification narration and changed-file lists (the caller receives files_changed separately). Report any material failure or limitation honestly in that line. If a structured output schema is specified, follow it and keep string summaries concise."
 
 // headlessPolicyFailure is the first policy refusal observed during one
 // RunHeadless invocation. First-wins keeps the exit error deterministic even
@@ -86,10 +89,18 @@ const (
 	HeadlessSchemaVersion = 1
 )
 
-// HeadlessOptions controls presentation without changing the execution path.
+// HeadlessOptions controls presentation and invocation-scoped execution policy.
 // Nil writers use the process stdout/stderr. Callers that intentionally want
 // to discard a stream should pass io.Discard explicitly.
 type HeadlessOptions struct {
+	// StrictPermissions makes the first ordinary tool denial terminal.
+	StrictPermissions bool
+	// PermissionMode labels denial diagnostics; CLI config enforces the mode.
+	PermissionMode string
+	// Brief requests a one-line final answer and buffers text until completion.
+	Brief bool
+	// NoSelfReview skips optional reviews/nudges while retaining hard checks.
+	NoSelfReview bool
 	OutputFormat HeadlessOutputFormat
 	Stdout       io.Writer
 	Stderr       io.Writer
@@ -143,18 +154,20 @@ type HeadlessError struct {
 
 // HeadlessResult is the versioned, single-object automation envelope.
 type HeadlessResult struct {
-	Goal             *goals.Goal    `json:"goal,omitempty"`
-	SchemaVersion    int            `json:"schema_version"`
-	Type             string         `json:"type"`
-	Result           string         `json:"result"`
-	StructuredOutput *any           `json:"structured_output,omitempty"`
-	SessionID        string         `json:"session_id"`
-	Status           string         `json:"status"`
-	Error            *HeadlessError `json:"error,omitempty"`
-	Usage            HeadlessUsage  `json:"usage"`
-	Cost             HeadlessCost   `json:"cost"`
-	DurationMS       int64          `json:"duration_ms"`
-	Warnings         []string       `json:"warnings,omitempty"`
+	PermissionDenials []tools.PermissionDenial `json:"permission_denials"`
+	FilesChanged      []string                 `json:"files_changed"`
+	Goal              *goals.Goal              `json:"goal,omitempty"`
+	SchemaVersion     int                      `json:"schema_version"`
+	Type              string                   `json:"type"`
+	Result            string                   `json:"result"`
+	StructuredOutput  *any                     `json:"structured_output,omitempty"`
+	SessionID         string                   `json:"session_id"`
+	Status            string                   `json:"status"`
+	Error             *HeadlessError           `json:"error,omitempty"`
+	Usage             HeadlessUsage            `json:"usage"`
+	Cost              HeadlessCost             `json:"cost"`
+	DurationMS        int64                    `json:"duration_ms"`
+	Warnings          []string                 `json:"warnings,omitempty"`
 }
 
 // RunHeadless executes one user prompt through the normal request pipeline
@@ -176,9 +189,11 @@ func (a *App) RunHeadless(ctx context.Context, prompt string) error {
 func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts HeadlessOptions) (HeadlessResult, error) {
 	started := time.Now()
 	result := HeadlessResult{
-		SchemaVersion: HeadlessSchemaVersion,
-		Type:          "result",
-		Status:        "error",
+		PermissionDenials: []tools.PermissionDenial{},
+		FilesChanged:      []string{},
+		SchemaVersion:     HeadlessSchemaVersion,
+		Type:              "result",
+		Status:            "error",
 	}
 
 	format := opts.OutputFormat
@@ -261,6 +276,20 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// untouched: in particular, a headless caller must never replace another
 	// turn's cancellation owner and later clear its processing flag.
 	runCtx, cancel := context.WithCancel(ctx)
+	permissionMode := opts.PermissionMode
+	if permissionMode == "" {
+		a.mu.Lock()
+		if a.planningModeEnabled {
+			permissionMode = "plan"
+		} else if a.config != nil && a.config.Permission.DontAsk {
+			permissionMode = "dontAsk"
+		}
+		a.mu.Unlock()
+	}
+	runCtx, permissionState := tools.ContextWithHeadlessPermissions(runCtx, opts.StrictPermissions, permissionMode)
+	if opts.NoSelfReview || os.Getenv("GOKIN_NO_SELF_REVIEW") == "1" {
+		runCtx = tools.ContextWithoutSelfReview(runCtx)
+	}
 	runCtx = tools.ContextWithMaxTurns(runCtx, opts.MaxTurns)
 	runCtx = tools.ContextWithMaxBudgetUSD(runCtx, opts.MaxBudgetUSD)
 	claim, err := a.claimHeadlessForeground(cancel)
@@ -345,7 +374,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		sp = newStreamJSONPresenter(opts.Stdout, result.SessionID, opts.StreamState)
 	default:
 		presenterWriter := io.Discard
-		if format == HeadlessOutputText && !goalTextMode {
+		if format == HeadlessOutputText && !goalTextMode && !opts.Brief {
 			presenterWriter = opts.Stdout
 		}
 		sp = newStdoutPresenter(presenterWriter)
@@ -358,6 +387,21 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 	}()
 	finishOutput := sp.Finish
+	a.runSystemPromptMu.Lock()
+	if opts.Brief {
+		a.runBriefPrompt = briefResultInstruction
+	}
+	a.runSystemPromptMu.Unlock()
+	defer func() {
+		a.runSystemPromptMu.Lock()
+		a.runBriefPrompt = ""
+		a.runSystemPromptMu.Unlock()
+		if opts.Brief {
+			if current := a.clientSnapshot(); current != nil {
+				a.applySystemInstruction(current, a.session.GetSystemInstruction(), false)
+			}
+		}
+	}()
 	a.prepareHeadlessRuntime()
 	restoreStructuredInstruction := a.installStructuredOutputInstruction(opts.JSONSchema)
 	defer restoreStructuredInstruction()
@@ -577,6 +621,9 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		case "cost_unavailable":
 			runErr = &headlessCostUnavailableError{message: terminal.Message}
 			result.Status = "error"
+		case "hook_stopped":
+			runErr = errors.New(terminal.Message)
+			result.Status = "policy_blocked"
 		default:
 			runErr = errors.New(terminal.Message)
 			result.Status = "error"
@@ -652,10 +699,25 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 	}
 
+	result.PermissionDenials = permissionState.Denials()
+	a.mu.Lock()
+	result.FilesChanged = append([]string{}, a.headlessFilesChanged...)
+	a.mu.Unlock()
+	sort.Strings(result.FilesChanged)
+	if opts.Brief && opts.JSONSchema == nil {
+		result.Result = strings.Join(strings.Fields(result.Result), " ")
+	}
 	result.Goal = a.session.GoalState().Current
-	if goalTextMode && format == HeadlessOutputText && result.Result != "" {
+	if (goalTextMode || opts.Brief) && format == HeadlessOutputText && result.Result != "" {
 		if _, err := fmt.Fprintln(opts.Stdout, result.Result); err != nil {
 			return result, errors.Join(runErr, err)
+		}
+	}
+	if opts.Brief && format == HeadlessOutputText {
+		for _, path := range result.FilesChanged {
+			if _, err := fmt.Fprintln(opts.Stdout, path); err != nil {
+				return result, errors.Join(runErr, err)
+			}
 		}
 	}
 	if format == HeadlessOutputJSON || format == HeadlessOutputStreamJSON {
@@ -818,6 +880,7 @@ func (a *App) beginHeadlessPolicyTrackingLocked() {
 	// is still active before recording a terminal condition.
 	a.headlessTerminal = &headlessTerminalOutcome{}
 	a.headlessFinalResult = ""
+	a.headlessFilesChanged = nil
 	a.headlessInvocationUsage = HeadlessUsage{}
 	a.headlessInvocationCost = HeadlessCost{}
 	a.headlessCostIncomplete = false
@@ -836,6 +899,7 @@ func (a *App) endHeadlessPolicyTrackingLocked() {
 	a.headlessPolicyFailure = nil
 	a.headlessTerminal = nil
 	a.headlessFinalResult = ""
+	a.headlessFilesChanged = nil
 	a.headlessInvocationUsage = HeadlessUsage{}
 	a.headlessInvocationCost = HeadlessCost{}
 	a.headlessCostIncomplete = false
@@ -861,6 +925,9 @@ func (a *App) headlessInvocationMetricsSnapshot() (HeadlessUsage, HeadlessCost) 
 // is a no-op for interactive turns and latches only the first failure in the
 // active headless invocation.
 func (a *App) recordHeadlessPolicyFailure(toolName string, block tools.PolicyBlock) {
+	if block.Recoverable {
+		return
+	}
 	// Failing closed here is deliberate: a model reaching for a tool during a
 	// "just reformat your answer" step is exactly the moment to stop. But the
 	// refusal came from the empty ceiling THIS file installs for correction

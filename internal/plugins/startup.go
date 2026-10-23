@@ -218,6 +218,12 @@ func (p startupPlan) autoUpdates(name string, market Marketplace) bool {
 // The caller owns the deadline; this runs no hook, server or helper command.
 // It leaves project declarations in the project and preserves enable overrides.
 func (m *Manager) SyncStartup(ctx context.Context) (StartupReport, error) {
+	return m.syncLifecycle(context.WithValue(ctx, explicitSyncKey{}, true), true, true)
+}
+
+// RefreshStartup is the automatic background reconciliation. Unlike explicit
+// SyncStartup, it honors persistent marketplace retry backoff.
+func (m *Manager) RefreshStartup(ctx context.Context) (StartupReport, error) {
 	return m.syncLifecycle(ctx, true, true)
 }
 
@@ -284,6 +290,11 @@ func (m *Manager) syncLifecycle(ctx context.Context, declarations, updates bool)
 				continue
 			}
 		}
+		if err == nil && !cachedStartup(ctx) && !m.marketplaceRetryAllowed(ctx, name, source) {
+			failed[name] = true
+			report.Skipped = append(report.Skipped, name+": marketplace retry backoff is active")
+			continue
+		}
 		if err == nil {
 			var result Result
 			result, err = m.addMarketplace(ctx, source, nil, false, name, false, true)
@@ -331,6 +342,10 @@ func (m *Manager) syncLifecycle(ctx context.Context, declarations, updates bool)
 				continue
 			}
 			if !registered[name] {
+				if !m.marketplaceRetryAllowed(ctx, name, known[name].Source) {
+					report.Skipped = append(report.Skipped, name+": marketplace retry backoff is active")
+					continue
+				}
 				if result, err := m.UpdateMarketplace(ctx, name, nil); err != nil {
 					report.Errors = append(report.Errors, name+": "+err.Error())
 					continue

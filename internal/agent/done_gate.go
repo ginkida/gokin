@@ -73,7 +73,7 @@ func agentDoneGateMaxFixes(p *donegate.Policy) int {
 }
 
 // recordToolExecution feeds the per-run usage trackers from the tool
-// execution chokepoint (executeToolWithReflection). toolsUsed records every
+// result-finalization boundary (including nested hook calls). toolsUsed records every
 // attempted call (a failed bash run still gave the model the chance to
 // verify); touchedPaths records only successful mutations — a failed edit
 // changed nothing, so it must not arm the gate.
@@ -92,6 +92,7 @@ func (a *Agent) recordToolExecution(toolName string, args map[string]any, result
 	// gate keys re-runs off this so a build-breaking re-edit after a passing
 	// gate is still caught.
 	a.mutationGen++
+	a.mutatedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.mutatedPaths, tools.MutationPathsFromResult(toolName, args, result)...))
 	rawPaths := append(donegate.ExtractTouchedPaths(args), tools.WrittenPathsFromResult(result)...)
 	paths := donegate.NormalizeTouchedPaths(a.workDir, rawPaths)
 	if len(paths) == 0 {
@@ -233,4 +234,11 @@ func (a *Agent) injectClaimCorrectionIfNeeded(finalText string) bool {
 	logging.Info("sub-agent claim verification: correction turn injected",
 		"agent_id", a.ID, "falsely_claimed", strings.Join(falselyClaimed, ","))
 	return true
+}
+
+// GetMutatedPaths excludes conservative done-gate targets that were not written.
+func (a *Agent) GetMutatedPaths() []string {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
+	return append([]string(nil), a.mutatedPaths...)
 }

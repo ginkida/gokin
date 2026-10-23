@@ -35,7 +35,7 @@ func marketplaceRoot(market Marketplace) string {
 
 // Tag resolution pins the advertised object and archives its resolved commit;
 // moving a tag is observed on the next resolve, never hidden by a version cache.
-func (m *Manager) fetchConstrainedPlugin(ctx context.Context, id string, source Source, market Marketplace, entry Entry, stage string, opts InstallOptions) (string, string, string, error) {
+func (m *Manager) fetchConstrainedPlugin(ctx context.Context, id string, source Source, market Marketplace, entry Entry, stage string, opts InstallOptions) (rootResult string, commitResult string, versionResult string, fetchErr error) {
 	constrained := false
 	for _, value := range opts.versionRanges {
 		constrained = constrained || value != ""
@@ -79,6 +79,19 @@ func (m *Manager) fetchConstrainedPlugin(ctx context.Context, id string, source 
 		return fetchCurrent() // Non-git constraints are checked against plugin.json.
 	}
 	rawURL := pluginpolicy.GitURL(gitSource)
+	// Tagged local repositories remain available offline.
+	if !strings.HasPrefix(rawURL, "file://") {
+		if err := requireCachedSource(ctx, gitSource); err != nil {
+			return "", "", "", err
+		}
+	}
+	_, marketName, _ := strings.Cut(id, "@")
+	if opts.Background && !m.marketplaceRetryAllowed(ctx, marketName, market.Source) {
+		return "", "", "", fmt.Errorf("marketplace %s retry deferred by backoff", marketName)
+	}
+	// Install owns the registry lock. Remember dependency network failures too,
+	// including those reached through a cached marketplace with updates disabled.
+	defer func() { _ = m.recordMarketplaceAttemptLocked(marketName, market.Source, fetchErr != nil) }()
 	if err := validateGitURL(rawURL); err != nil {
 		return "", "", "", err
 	}

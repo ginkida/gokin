@@ -722,7 +722,9 @@ func withAgentPolicyBlock(result ToolResult, block *PolicyBlock) ToolResult {
 	if block == nil {
 		return result
 	}
-	return WithPolicyBlock(result, block.Kind, block.Reason)
+	copy := *block
+	result.PolicyBlock = &copy
+	return result
 }
 
 func (t *TaskTool) executeResumeBackground(ctx context.Context, runner AgentRunner, agentID, prompt, description string) (ToolResult, error) {

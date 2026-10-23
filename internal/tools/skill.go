@@ -608,7 +608,7 @@ func (t *SkillTool) execute(ctx context.Context, args map[string]any, forUser bo
 		}
 		var blocked *skillRenderPolicyError
 		if errors.As(err, &blocked) {
-			return NewPolicyBlockedResult(blocked.kind, reason), nil
+			return blocked.result(reason), nil
 		}
 		return NewErrorResult(reason), nil
 	}

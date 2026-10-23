@@ -20,7 +20,7 @@ import (
 	"gokin/internal/tools"
 )
 
-func TestRunHeadless_PolicyBlockCannotBeMaskedByModelText(t *testing.T) {
+func TestRunHeadless_PolicyOutcomesDistinguishRecoverableDenials(t *testing.T) {
 	tests := []struct {
 		name      string
 		toolName  string
@@ -87,12 +87,20 @@ func TestRunHeadless_PolicyBlockCannotBeMaskedByModelText(t *testing.T) {
 			stdout, err := captureHeadlessStdoutResult(t, func() error {
 				return app.RunHeadless(context.Background(), "perform the blocked action")
 			})
-			if err == nil {
-				t.Fatal("RunHeadless returned nil after a policy block masked by model text")
+			recoverable := tt.wantKind == tools.PolicyBlockPermission || tt.wantKind == tools.PolicyBlockPlan
+			if recoverable {
+				if err != nil {
+					t.Fatalf("ordinary permission denial became terminal: %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("terminal policy block was masked by model text")
 			}
-			for _, needle := range []string{string(tt.wantKind) + " policy", `tool "` + tt.toolName + `"`} {
-				if !strings.Contains(err.Error(), needle) {
-					t.Fatalf("RunHeadless error missing %q: %v", needle, err)
+
+			if !recoverable {
+				for _, needle := range []string{string(tt.wantKind) + " policy", `tool "` + tt.toolName + `"`} {
+					if !strings.Contains(err.Error(), needle) {
+						t.Fatalf("RunHeadless error missing %q: %v", needle, err)
+					}
 				}
 			}
 			if !strings.Contains(stdout, "Everything is complete despite the refusal.") {
@@ -125,8 +133,8 @@ func TestRunHeadless_PolicyStatusIsTurnScoped(t *testing.T) {
 	_, firstErr := captureHeadlessStdoutResult(t, func() error {
 		return app.RunHeadless(context.Background(), "blocked first turn")
 	})
-	if firstErr == nil {
-		t.Fatal("first turn should fail closed")
+	if firstErr != nil {
+		t.Fatalf("ordinary denial should continue: %v", firstErr)
 	}
 
 	secondOut, secondErr := captureHeadlessStdoutResult(t, func() error {
@@ -216,7 +224,7 @@ func TestRunHeadless_OrdinaryToolFailureCanRecover(t *testing.T) {
 	}
 }
 
-func TestRunHeadless_SynchronousSubagentPolicyBlockPropagates(t *testing.T) {
+func TestRunHeadless_SynchronousSubagentPermissionDenialCanRecover(t *testing.T) {
 	mock := testkit.NewMockClient().
 		EnqueueToolCall("task", map[string]any{
 			"prompt":        "perform protected work",
@@ -237,8 +245,8 @@ func TestRunHeadless_SynchronousSubagentPolicyBlockPropagates(t *testing.T) {
 	stdout, err := captureHeadlessStdoutResult(t, func() error {
 		return app.RunHeadless(context.Background(), "delegate protected work")
 	})
-	if err == nil || !strings.Contains(err.Error(), "permission policy") {
-		t.Fatalf("subagent policy refusal was masked by parent prose: %v", err)
+	if err != nil {
+		t.Fatalf("subagent permission denial became terminal: %v", err)
 	}
 	if !strings.Contains(stdout, "delegated work is complete") {
 		t.Fatalf("parent prose should remain on stdout, got %q", stdout)

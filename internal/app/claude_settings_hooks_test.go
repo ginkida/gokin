@@ -316,7 +316,7 @@ func TestHeadlessManagedPolicyRevocationDuringModelCannotSkipRequiredStop(t *tes
 		}
 	}
 	result, err := application.RunHeadlessWithOptions(t.Context(), "Finish.", HeadlessOptions{OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard})
-	if err == nil || result.Error == nil || result.Error.Kind != "hook_stopped" || len(mock.Calls()) != 2 || !strings.Contains(result.Error.Message, "allowManagedHooksOnly") {
+	if err == nil || result.Error == nil || result.Error.Kind != "hook_stopped" || result.Status != "policy_blocked" || len(mock.Calls()) != 2 || !strings.Contains(result.Error.Message, "allowManagedHooksOnly") {
 		t.Fatalf("response silently suppressed required hooks: %+v %v calls=%d", result, err, len(mock.Calls()))
 	}
 }

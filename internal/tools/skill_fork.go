@@ -126,7 +126,7 @@ func (t *SkillTool) executeFork(ctx context.Context, skill skills.Skill, argumen
 		return NewErrorResult("forked skills require an owning task dispatcher"), nil
 	}
 	if ceiling, restricted := ToolCapabilityCeilingFromContext(ctx); restricted && !toolCapabilityAllows(ceiling, "task") {
-		return NewPolicyBlockedResult(PolicyBlockPermission, "forked skill requires task, which is outside the tool capability ceiling"), nil
+		return newTerminalPermissionResult("forked skill requires task, which is outside the tool capability ceiling"), nil
 	}
 	registered, ok := dispatcher.registry.Get("task")
 	if !ok {
@@ -196,7 +196,7 @@ func (t *SkillTool) executeFork(ctx context.Context, skill skills.Skill, argumen
 			return NewHookStoppedResult(skillPayloadRedactor.Redact(err.Error())), nil
 		}
 		if blocked, ok := err.(*skillRenderPolicyError); ok {
-			return NewPolicyBlockedResult(blocked.kind, skillPayloadRedactor.Redact(err.Error())), nil
+			return blocked.result(skillPayloadRedactor.Redact(err.Error())), nil
 		}
 		return NewErrorResult(skillPayloadRedactor.Redact(err.Error())), nil
 	}

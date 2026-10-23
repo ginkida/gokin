@@ -48,6 +48,9 @@ func ContextWithAgentHookDispatcher(ctx context.Context, registry ToolRegistry, 
 		envelopes = []*genai.Tool{{FunctionDeclarations: declarations}}
 	}
 	return hooks.ContextWithAgentHookTools(ctx, envelopes, func(ctx context.Context, call *genai.FunctionCall) (map[string]any, error) {
+		if err := PermissionStopError(ctx); err != nil {
+			return nil, err
+		}
 		if !hooks.AgentHookActive(ctx) || call == nil {
 			return nil, fmt.Errorf("invalid agent hook invocation")
 		}
@@ -65,6 +68,9 @@ func ContextWithAgentHookDispatcher(ctx context.Context, registry ToolRegistry, 
 		ctx = ContextWithToolCapabilityCeiling(ctx, names)
 		result, err := invoke(ctx, call.Name, ClonePermissionArgs(call.Args))
 		if err != nil {
+			return nil, err
+		}
+		if err := PermissionStopError(ctx); err != nil {
 			return nil, err
 		}
 		if result.HookStopReason != "" {

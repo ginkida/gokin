@@ -11,14 +11,14 @@ import (
 )
 
 func (b *Builder) syncStartupPlugins(userDir string, trusted bool) {
-	if !b.options.SyncDeclaredPlugins || b.options.Bare || b.cfg != nil && b.cfg.Bare || userDir == "" {
+	if !b.options.SyncDeclaredPlugins || b.options.Bare || b.options.NoPlugins || b.cfg != nil && b.cfg.Bare || userDir == "" {
 		return
 	}
 	ctx := b.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	managed := hooks.ClaudeManagedSettingsDir()
 	if b.hooksManager != nil {
@@ -30,22 +30,24 @@ func (b *Builder) syncStartupPlugins(userDir string, trusted bool) {
 		logging.Warn("plugin startup", "error", err)
 		return
 	}
-	var report plugins.StartupReport
-	if b.options.NonInteractive {
-		report, err = manager.SyncStartup(ctx)
-		commands, commandErr := manager.RefreshCommandSources(ctx)
-		report.Installed = append(report.Installed, commands.Installed...)
-		report.Updated = append(report.Updated, commands.Updated...)
-		report.Errors = append(report.Errors, commands.Errors...)
-		report.Skipped = append(report.Skipped, commands.Skipped...)
-		if commandErr != nil {
-			report.Errors = append(report.Errors, commandErr.Error())
-		}
+	report, err := manager.SyncCached(ctx)
+	if pinErr := b.hooksManager.PinCachedClaudePluginInstalls(); pinErr != nil {
+		report.Errors = append(report.Errors, "Could not retain session plugin versions: "+pinErr.Error())
 	} else {
-		report, err = manager.SyncDeclared(ctx)
-		if pinErr := b.hooksManager.PinClaudePluginInstalls(); pinErr != nil {
-			report.Errors = append(report.Errors, "Could not retain session plugin versions: "+pinErr.Error())
-		} else {
+		b.pluginStartupRefresh = func(ctx context.Context) (plugins.StartupReport, error) {
+			report, err := manager.RefreshStartup(ctx)
+			if b.options.NonInteractive && ctx.Err() == nil {
+				commands, commandErr := manager.RefreshCommandSources(ctx)
+				report.Installed = append(report.Installed, commands.Installed...)
+				report.Updated = append(report.Updated, commands.Updated...)
+				report.Errors = append(report.Errors, commands.Errors...)
+				if commandErr != nil {
+					report.Errors = append(report.Errors, commandErr.Error())
+				}
+			}
+			return report, err
+		}
+		if !b.options.NonInteractive {
 			b.pluginAutoUpdater = newPluginAutoUpdater(manager)
 			b.pluginCommandUpdater = newPluginCommandUpdater(manager)
 		}
@@ -66,5 +68,48 @@ func (b *Builder) syncStartupPlugins(userDir string, trusted bool) {
 	}
 	if len(issues) > 8 {
 		b.pluginStartupSummary += "\nRun `gokin plugin sync` to inspect all remaining plugin issues."
+	}
+}
+
+// Refresh only after construction has pinned the cached runtime. New installs
+// become available on the next launch/reload; this worker never emits stdout.
+func (a *App) startPluginStartupRefresh(run func(context.Context) (plugins.StartupReport, error)) {
+	if run == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
+	done := make(chan struct{})
+	a.mu.Lock()
+	a.pluginStartupCancel, a.pluginStartupDone = cancel, done
+	a.mu.Unlock()
+	a.safeGo("plugin-startup-refresh", func() {
+		defer close(done)
+		defer cancel()
+		report, err := run(ctx)
+		if err != nil {
+			logging.Debug("background plugin refresh", "error", err)
+		}
+		for _, issue := range report.Errors {
+			logging.Debug("background plugin refresh", "issue", issue)
+		}
+	})
+}
+
+// ClosePluginStartupRefresh lets one-shot CLI callers cancel and join the
+// background refresh before process exit. Interactive shutdown cancels App.ctx.
+func (a *App) ClosePluginStartupRefresh() {
+	a.mu.Lock()
+	cancel, done := a.pluginStartupCancel, a.pluginStartupDone
+	a.mu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		logging.Debug("plugin startup refresh shutdown deadline reached")
 	}
 }

@@ -54,6 +54,9 @@ func TestHeadlessStopHookContinuationSharesInvocation(t *testing.T) {
 			} else if err == nil || result.Error == nil || result.Error.Kind != scenario.kind {
 				t.Fatalf("terminal verdict: result=%+v err=%v, want %s", result, err, scenario.kind)
 			}
+			if scenario.kind == "hook_stopped" && result.Status != "policy_blocked" {
+				t.Fatalf("terminal hook stop status=%s", result.Status)
+			}
 			if scenario.kind == "max_turns" && !errors.Is(err, tools.ErrMaxTurnsExceeded) {
 				t.Fatalf("turn cap lost typed error: %v", err)
 			}
@@ -107,7 +110,7 @@ func TestHeadlessStopHookContinuationRetainsSkillDenials(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	result, err := application.RunHeadlessWithOptions(t.Context(), "Load guard and review.", HeadlessOptions{OutputFormat: HeadlessOutputJSON, Stdout: &stdout, Stderr: io.Discard})
-	if err == nil || result.Error == nil || result.Error.Kind != "policy_blocked" || write.CallCount() != 0 {
+	if err != nil || result.Status != "success" || len(result.PermissionDenials) != 1 || write.CallCount() != 0 {
 		t.Fatalf("continuation dropped skill denial: result=%+v err=%v writes=%d", result, err, write.CallCount())
 	}
 	paired := false

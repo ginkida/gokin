@@ -160,6 +160,7 @@ type Manager struct {
 	claudeRegistryPinned                                                                bool
 	claudePinnedRegistry                                                                []byte
 	claudePinnedKnownIDs                                                                map[string]bool
+	claudePluginsDisabled                                                               bool                                 // guarded by claudeMu
 	claudePluginDiscovery                                                               bool                                 // guarded by claudeMu
 	claudeSkipDependencyChecks                                                          bool                                 // isolated manifest validation only
 	claudeSecretOptions                                                                 func(string) (map[string]any, error) // isolated validation override, guarded by claudeMu

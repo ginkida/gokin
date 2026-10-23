@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gokin/internal/pluginpolicy"
+	"os"
 	"path/filepath"
 )
 
@@ -18,6 +19,7 @@ func (m *Manager) PreviewClaudePluginInstalls() (*Manager, error) {
 	m.claudeMu.Lock()
 	project, user, managed, trusted := m.claudeProjectDir, m.claudeUserDir, m.claudeManagedDir, m.claudeTrusted
 	discovery := m.claudePluginDiscovery
+	disabled := m.claudePluginsDisabled
 	directories := append([]string(nil), m.claudePluginDirs...)
 	repositories := append([]string(nil), m.claudeRepositoryDirs...)
 	secrets := m.claudeSecretOptions
@@ -26,6 +28,9 @@ func (m *Manager) PreviewClaudePluginInstalls() (*Manager, error) {
 	preview.ConfigureClaudeManagedSettings(managed)
 	preview.ConfigureClaudeSettings(project, user, trusted)
 	preview.ConfigureClaudeRepositoryDirs(repositories)
+	if disabled {
+		preview.DisableClaudePlugins()
+	}
 	if discovery {
 		preview.ConfigureClaudePlugins(directories)
 	}
@@ -40,6 +45,16 @@ func (m *Manager) PreviewClaudePluginInstalls() (*Manager, error) {
 // plugin still revokes its components. Calling it again explicitly adopts the
 // newly installed versions, as /reload-plugins does.
 func (m *Manager) PinClaudePluginInstalls() error {
+	return m.pinClaudePluginInstalls(false)
+}
+
+// PinCachedClaudePluginInstalls omits ordinary cache misses for this startup.
+// Managed requirements still fail closed; explicit reload adopts new installs.
+func (m *Manager) PinCachedClaudePluginInstalls() error {
+	return m.pinClaudePluginInstalls(true)
+}
+
+func (m *Manager) pinClaudePluginInstalls(cachedOnly bool) error {
 	if m == nil {
 		return nil
 	}
@@ -70,12 +85,32 @@ func (m *Manager) PinClaudePluginInstalls() error {
 			if !validPluginID(id) || len(records) > 256 {
 				return fmt.Errorf("invalid installed plugin record")
 			}
-			known[id] = true
+			if !cachedOnly {
+				known[id] = true
+				continue
+			}
+			best, rank := -1, 0
+			for i, record := range records {
+				candidateRank, err := m.claudePluginInstallRank(record)
+				if err != nil {
+					return err
+				}
+				if candidateRank > rank {
+					best, rank = i, candidateRank
+				}
+			}
+			// Defer an unavailable effective install; an intact lower-scope
+			// copy must not hide a missing project/local override.
+			if best >= 0 {
+				if info, err := os.Stat(records[best].InstallPath); err == nil && info.IsDir() {
+					known[id] = true
+				}
+			}
 		}
 	}
 	// New ordinary declarations belong to the next explicit reload. Remember
-	// existing declarations too, so a missing plugin still fails closed rather
-	// than disappearing merely because its install couldn't be repaired.
+	// existing declarations on explicit reload, where missing plugins fail closed.
+	// Cache-only startup selects just the available copies for this session.
 	paths := []string{filepath.Join(m.claudeUserDir, "settings.json")}
 	paths = append(paths, m.claudeProjectSettingsPaths()...)
 	for _, path := range paths {
@@ -95,7 +130,9 @@ func (m *Manager) PinClaudePluginInstalls() error {
 			return err
 		}
 		for id, on := range enabled {
-			known[id] = true
+			if !cachedOnly {
+				known[id] = true
+			}
 			pinnedFlags[id] = on
 		}
 		if path == filepath.Join(m.claudeUserDir, "settings.json") && fields.pluginConfigs != nil {
@@ -197,4 +234,24 @@ func (m *Manager) keepPinnedPluginFlags(flags map[string]bool, managed bool) {
 			}
 		}
 	}
+}
+
+// Callers hold claudeMu. Cache pinning and runtime discovery must select the
+// same effective scope, including trust and repository membership.
+func (m *Manager) claudePluginInstallRank(record claudePluginInstall) (int, error) {
+	switch record.Scope {
+	case "user":
+		return 1, nil
+	case "project":
+		if m.claudeMatchesProject(record.ProjectPath) {
+			return 2, nil
+		}
+	case "local":
+		if m.claudeMatchesProject(record.ProjectPath) {
+			return 3, nil
+		}
+	default:
+		return 0, fmt.Errorf("unsupported plugin install scope %q", record.Scope)
+	}
+	return 0, nil
 }

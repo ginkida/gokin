@@ -6,6 +6,7 @@ import (
 
 	"gokin/internal/agent"
 	appcontext "gokin/internal/context"
+	"gokin/internal/donegate"
 )
 
 // withHeadlessInvocationScope is the single headless lifecycle seam. Call it
@@ -38,6 +39,32 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 	if result == nil {
 		return
 	}
+	a.mu.Lock()
+	if a.headlessRunActive && a.headlessAgentUsageScopeOwner == a.headlessTerminal &&
+		!result.InvocationScope.IsZero() && result.InvocationScope == a.headlessAgentUsageScope {
+		paths := result.TouchedPaths
+		if isolated, _ := result.Metadata["isolated_workspace"].(bool); isolated {
+			paths = nil
+			switch applied := result.Metadata["isolated_workspace_applied_files"].(type) {
+			case []string:
+				paths = applied
+			case []any:
+				for _, value := range applied {
+					if path, ok := value.(string); ok {
+						paths = append(paths, path)
+					}
+				}
+			}
+		}
+		paths = donegate.NormalizeTouchedPaths(a.workDir, paths)
+		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, paths...))
+		if len(paths) > 0 {
+			a.responseMutationCount++
+			a.responseTrivialEdit = false
+			a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, paths...))
+		}
+	}
+	a.mu.Unlock()
 	input := max(result.InputTokens, 0)
 	output := max(result.OutputTokens, 0)
 	cacheRead := min(max(result.CacheReadInputTokens, 0), input)

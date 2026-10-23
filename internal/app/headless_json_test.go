@@ -125,7 +125,7 @@ func TestRunHeadlessWithOptions_FallbackUsageDoesNotDependOnSessionDelta(t *test
 	}
 }
 
-func TestRunHeadlessWithOptions_JSONPolicyFailureIsTypedAndNonZero(t *testing.T) {
+func TestRunHeadlessWithOptions_JSONStrictPolicyFailureIsTypedAndNonZero(t *testing.T) {
 	mock := testkit.NewMockClient().
 		EnqueueToolCall("write", map[string]any{"file_path": "blocked.txt"}).
 		EnqueueText("I claim the blocked write succeeded.")
@@ -140,9 +140,10 @@ func TestRunHeadlessWithOptions_JSONPolicyFailureIsTypedAndNonZero(t *testing.T)
 
 	var stdout, stderr bytes.Buffer
 	returned, err := app.RunHeadlessWithOptions(context.Background(), "perform blocked work", HeadlessOptions{
-		OutputFormat: HeadlessOutputJSON,
-		Stdout:       &stdout,
-		Stderr:       &stderr,
+		StrictPermissions: true,
+		OutputFormat:      HeadlessOutputJSON,
+		Stdout:            &stdout,
+		Stderr:            &stderr,
 	})
 	if err == nil {
 		t.Fatal("policy-blocked JSON run returned nil error")
@@ -154,8 +155,8 @@ func TestRunHeadlessWithOptions_JSONPolicyFailureIsTypedAndNonZero(t *testing.T)
 	if decoded.Error.Kind != "policy_blocked" || decoded.Error.PolicyKind != "permission" || decoded.Error.Tool != "write" {
 		t.Fatalf("policy error = %+v", decoded.Error)
 	}
-	if decoded.Result != "I claim the blocked write succeeded." {
-		t.Fatalf("model prose should remain inspectable inside result, got %q", decoded.Result)
+	if decoded.Result != "" || len(mock.Calls()) != 1 {
+		t.Fatalf("strict denial allowed another model round: result=%q calls=%d", decoded.Result, len(mock.Calls()))
 	}
 	if returned.Status != decoded.Status || returned.Error == nil {
 		t.Fatalf("returned result diverged from JSON: %+v", returned)

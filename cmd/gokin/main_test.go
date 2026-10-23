@@ -1621,3 +1621,25 @@ func (f *fakeResumableApplication) ForkLoadedSession(id string) error {
 	f.session.SetID(id)
 	return nil
 }
+
+func TestHeadlessAgentFlagsAreBoundAndDocumented(t *testing.T) {
+	rootCmd := newRootCommand()
+	for _, test := range []struct {
+		name  string
+		value *bool
+	}{
+		{"no-plugins", &noPlugins}, {"strict-permissions", &strictPermissions}, {"brief", &brief}, {"no-self-review", &noSelfReview},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			flag := rootCmd.PersistentFlags().Lookup(test.name)
+			if flag == nil || flag.Usage == "" {
+				t.Fatalf("missing flag/help: %s", test.name)
+			}
+			original, changed := *test.value, flag.Changed
+			defer func() { _ = flag.Value.Set(fmt.Sprint(original)); flag.Changed = changed }()
+			if err := rootCmd.PersistentFlags().Set(test.name, "true"); err != nil || !*test.value {
+				t.Fatalf("flag not bound: %v", err)
+			}
+		})
+	}
+}

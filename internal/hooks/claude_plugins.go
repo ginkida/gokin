@@ -109,6 +109,17 @@ func (m *Manager) ClaudeDependencyWarnings() []string {
 var pluginOptionPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 var pluginOptionReference = regexp.MustCompile(`\$\{user_config\.([^{}]+)\}`)
 
+// DisableClaudePlugins disables all plugin components for this runtime while
+// retaining ordinary/managed settings hooks and native skills/MCP.
+func (m *Manager) DisableClaudePlugins() {
+	m.claudeMu.Lock()
+	defer m.claudeMu.Unlock()
+	m.claudePluginsDisabled = true
+	m.claudePluginDiscovery = false
+	m.claudePluginDirs = nil
+	m.claudeFingerprint = ""
+}
+
 // ConfigureClaudePlugins supplies explicit session-only plugin roots. Project
 // settings cannot add sideload roots. Bare builders reject explicit plugins.
 func (m *Manager) ConfigureClaudePlugins(directories []string) {
@@ -265,6 +276,9 @@ func pluginChildRoots(directory string, explicit bool) ([]string, error) {
 // refreshPluginSources reads through the same hash/budget as settings. No shell,
 // package install or network access occurs during discovery or compilation.
 func (m *Manager) refreshPluginSources(sources []claudeSettingsSource, enabled, only, disabled, managedDisabled bool, read func(string) ([]byte, error), selected *[]ClaudePlugin) ([]claudeSettingsSource, error) {
+	if m.claudePluginsDisabled {
+		return nil, nil
+	}
 	m.claudeDependencyWarnings = nil
 	var policyDocuments [][]byte
 	for _, source := range sources {
@@ -393,6 +407,9 @@ func (m *Manager) refreshPluginSources(sources []claudeSettingsSource, enabled, 
 			}
 			sort.Strings(ids)
 			for _, id := range ids {
+				if m.claudeRegistryPinned && !m.claudePinnedKnownIDs[id] && !managed[id] {
+					continue
+				}
 				if _, changed, _ := aliases.Resolve(id); changed {
 					continue
 				}
@@ -419,20 +436,9 @@ func (m *Manager) refreshPluginSources(sources []claudeSettingsSource, enabled, 
 						// managed plugin after its required source changes.
 						continue
 					}
-					candidateRank := 0
-					switch record.Scope {
-					case "user":
-						candidateRank = 1
-					case "project":
-						if m.claudeMatchesProject(record.ProjectPath) {
-							candidateRank = 2
-						}
-					case "local":
-						if m.claudeMatchesProject(record.ProjectPath) {
-							candidateRank = 3
-						}
-					default:
-						return nil, fmt.Errorf("unsupported plugin install scope %q", record.Scope)
+					candidateRank, err := m.claudePluginInstallRank(record)
+					if err != nil {
+						return nil, err
 					}
 					if candidateRank > rank {
 						best, rank = i, candidateRank

@@ -149,6 +149,12 @@ func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, r
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	a.responseMutationCount++
+	a.responseTrivialEdit = isSingleLineEdit(toolName, result)
+	if a.headlessRunActive {
+		mutated := tools.MutationPathsFromResult(toolName, args, result)
+		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, mutated...))
+	}
 	seen := make(map[string]bool, len(a.responseTouchedPaths))
 	for _, existing := range a.responseTouchedPaths {
 		seen[existing] = true
@@ -366,4 +372,26 @@ func pathDepth(root, path string) int {
 // verify-command wrapping uses it.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// Only an edit with authoritative one-line diff counts qualifies. Unknown or
+// delegated mutation shapes keep the optional review; multi-file turns always do.
+func isSingleLineEdit(name string, result tools.ToolResult) bool {
+	if name != "edit" {
+		return false
+	}
+	data, ok := result.Data.(map[string]any)
+	if !ok {
+		return false
+	}
+	one := func(value any) bool {
+		switch n := value.(type) {
+		case int:
+			return n == 1
+		case float64:
+			return n == 1
+		}
+		return false
+	}
+	return one(data["diff_added"]) && one(data["diff_removed"])
 }

@@ -20,8 +20,10 @@ type skillRenderRules struct {
 }
 
 type skillRenderPolicyError struct {
-	kind   PolicyBlockKind
-	reason string
+	kind        PolicyBlockKind
+	reason      string
+	terminal    bool
+	recoverable bool
 }
 
 func (e *skillRenderPolicyError) Error() string { return e.reason }
@@ -65,6 +67,9 @@ func (e *Executor) SkillInvocationContext(ctx context.Context) context.Context {
 	if base != nil {
 		hookCtx := ctx
 		ctx = hooks.ContextWithPromptClient(ctx, SkillScopedClient(base, e.registry), func() error {
+			if err := PermissionStopError(hookCtx); err != nil {
+				return err
+			}
 			return SkillHooksError(ContextWithSkillHooks(hookCtx, e.registry, e.hooks))
 		})
 	}
@@ -111,7 +116,7 @@ func (t *SkillTool) renderSkill(ctx context.Context, skill skills.Skill, argumen
 		return "", fmt.Errorf("dynamic context requires an owning tool executor")
 	}
 	if ceiling, restricted := ToolCapabilityCeilingFromContext(ctx); restricted && !toolCapabilityAllows(ceiling, "bash") {
-		return "", &skillRenderPolicyError{PolicyBlockPermission, "dynamic context requires bash, which is outside the tool capability ceiling"}
+		return "", &skillRenderPolicyError{kind: PolicyBlockPermission, reason: "dynamic context requires bash, which is outside the tool capability ceiling", terminal: true}
 	}
 	// Parse and expand every source fragment before starting the first command.
 	// Inserted arguments and command output are never parsed as shell blocks.
@@ -172,7 +177,7 @@ func (t *SkillTool) renderSkill(ctx context.Context, skill skills.Skill, argumen
 		if i%2 == 1 {
 			denies := append(t.ActivePermissionDenies(), rules.denies...)
 			if permission.TemporaryToolRulesDeny(denies, "bash", map[string]any{"command": fragment}, t.workDir) {
-				return "", &skillRenderPolicyError{PolicyBlockPermission, fmt.Sprintf("dynamic context command %d is denied by the skill", i/2+1)}
+				return "", &skillRenderPolicyError{kind: PolicyBlockPermission, reason: fmt.Sprintf("dynamic context command %d is denied by the skill", i/2+1)}
 			}
 			result, err := invoke(ctx, fragment)
 			if err != nil {
@@ -183,7 +188,7 @@ func (t *SkillTool) renderSkill(ctx context.Context, skill skills.Skill, argumen
 			}
 			if !result.Success {
 				if result.PolicyBlock != nil {
-					return "", &skillRenderPolicyError{result.PolicyBlock.Kind, fmt.Sprintf("dynamic context command %d blocked: %s", i/2+1, result.Error)}
+					return "", &skillRenderPolicyError{kind: result.PolicyBlock.Kind, reason: fmt.Sprintf("dynamic context command %d blocked: %s", i/2+1, result.Error), terminal: result.PolicyBlock.Terminal, recoverable: result.PolicyBlock.Recoverable}
 				}
 				return "", fmt.Errorf("dynamic context command %d failed: %s", i/2+1, skillPayloadRedactor.Redact(result.Error))
 			}
@@ -199,4 +204,11 @@ func (t *SkillTool) renderSkill(ctx context.Context, skill skills.Skill, argumen
 		}
 	}
 	return body.String(), nil
+}
+
+func (e *skillRenderPolicyError) result(reason string) ToolResult {
+	r := NewPolicyBlockedResult(e.kind, reason)
+	r.PolicyBlock.Terminal = e.terminal
+	r.PolicyBlock.Recoverable = e.recoverable
+	return r
 }

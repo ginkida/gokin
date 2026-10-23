@@ -64,12 +64,20 @@ const (
 // It is runtime metadata only: ToolResult.ToMap still exposes the actionable
 // Error to the model and does not add protocol fields providers may reject.
 type PolicyBlock struct {
-	Kind   PolicyBlockKind `json:"kind"`
-	Reason string          `json:"reason"`
+	// Terminal distinguishes invocation/schema ceilings from recoverable permission denials.
+	Terminal bool `json:"terminal,omitempty"`
+	// Recoverable keeps authorization refusals out of automatic error repair without failing the turn.
+	Recoverable bool            `json:"recoverable,omitempty"`
+	Kind        PolicyBlockKind `json:"kind"`
+	Reason      string          `json:"reason"`
 }
 
 // ToolResult represents the result of a tool execution.
 type ToolResult struct {
+	// mutation is runtime provenance captured before result redaction and
+	// compaction. It is immutable and never exposed by ToMap or JSON encoding.
+	mutation *goMutationSnapshot
+
 	// Content is the main result content (usually text).
 	Content string
 
