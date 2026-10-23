@@ -84,6 +84,13 @@ func (a *Agent) recordToolExecution(toolName string, args map[string]any, result
 	a.toolsMu.Lock()
 	defer a.toolsMu.Unlock()
 	a.toolsUsed = append(a.toolsUsed, toolName)
+	if result.Success {
+		written := tools.WrittenPathsFromResult(result)
+		if donegate.IsMutationTool(toolName) {
+			written = tools.MutationPathsFromResult(toolName, args, result)
+		}
+		a.filesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.filesChanged, written...))
+	}
 	if !result.Success || !donegate.IsMutationTool(toolName) {
 		return
 	}
@@ -241,4 +248,12 @@ func (a *Agent) GetMutatedPaths() []string {
 	a.toolsMu.Lock()
 	defer a.toolsMu.Unlock()
 	return append([]string(nil), a.mutatedPaths...)
+}
+
+// GetFilesChanged includes confirmed writes outside the done-gate's tool set.
+// A known empty slice distinguishes this snapshot from older result producers.
+func (a *Agent) GetFilesChanged() []string {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
+	return append([]string{}, a.filesChanged...)
 }

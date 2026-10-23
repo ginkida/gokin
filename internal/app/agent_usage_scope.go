@@ -42,7 +42,11 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 	a.mu.Lock()
 	if a.headlessRunActive && a.headlessAgentUsageScopeOwner == a.headlessTerminal &&
 		!result.InvocationScope.IsZero() && result.InvocationScope == a.headlessAgentUsageScope {
-		paths := result.TouchedPaths
+		gatePaths := result.TouchedPaths
+		paths := result.FilesChanged
+		if paths == nil {
+			paths = gatePaths
+		}
 		if isolated, _ := result.Metadata["isolated_workspace"].(bool); isolated {
 			paths = nil
 			switch applied := result.Metadata["isolated_workspace_applied_files"].(type) {
@@ -55,14 +59,15 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 					}
 				}
 			}
+			gatePaths = paths
 		}
 		paths = donegate.NormalizeTouchedPaths(a.workDir, paths)
 		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, paths...))
 		if len(paths) > 0 {
 			a.responseMutationCount++
 			a.responseTrivialEdit = false
-			a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, paths...))
 		}
+		a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, gatePaths...))
 	}
 	a.mu.Unlock()
 	input := max(result.InputTokens, 0)

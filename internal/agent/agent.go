@@ -273,6 +273,7 @@ type Agent struct {
 	touchedSeen    map[string]bool
 	touchedPaths   []string
 	mutatedPaths   []string
+	filesChanged   []string
 	// mutationGen counts every successful mutation (incl. re-edits of an
 	// already-touched file), so the gate re-checks after a re-edit that the
 	// touched-path SET alone would miss. Guarded by toolsMu.
@@ -1566,6 +1567,7 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.toolsMu.Lock()
 	a.mutatedPaths = nil
+	a.filesChanged = nil
 	a.toolsMu.Unlock()
 	if a.definitionError != nil {
 		return &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: a.definitionError.Error(), Completed: true}, a.definitionError
@@ -1763,6 +1765,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		result.MutatingToolCalls = a.MutatingToolCount()
 		result.StatefulToolAttempts = a.StatefulToolAttemptCount()
 		result.TouchedPaths = a.GetMutatedPaths()
+		result.FilesChanged = a.GetFilesChanged()
 
 		// Clear callHistory to prevent memory leak
 		a.clearCallHistory()
@@ -1795,6 +1798,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	result.MutatingToolCalls = a.MutatingToolCount()
 	result.StatefulToolAttempts = a.StatefulToolAttemptCount()
 	result.TouchedPaths = a.GetMutatedPaths()
+	result.FilesChanged = a.GetFilesChanged()
 
 	// Clear callHistory to prevent memory leak on long-running sessions
 	a.clearCallHistory()

@@ -153,10 +153,10 @@ func TestAgentMutationLedgerResetsEachRun(t *testing.T) {
 	registry.MustRegister(tools.NewWriteTool(work))
 	a := NewAgent(AgentTypeGeneral, model, registry, work, 4, "", nil, nil)
 	ctx := tools.ContextWithoutSelfReview(t.Context())
-	if result, err := a.Run(ctx, "Write first.txt."); err != nil || !reflect.DeepEqual(result.TouchedPaths, []string{"first.txt"}) {
+	if result, err := a.Run(ctx, "Write first.txt."); err != nil || !reflect.DeepEqual(result.TouchedPaths, []string{"first.txt"}) || !reflect.DeepEqual(result.FilesChanged, []string{"first.txt"}) {
 		t.Fatalf("first run=%+v err=%v", result, err)
 	}
-	if result, err := a.Run(ctx, "Answer without tools."); err != nil || len(result.TouchedPaths) != 0 {
+	if result, err := a.Run(ctx, "Answer without tools."); err != nil || len(result.TouchedPaths) != 0 || len(result.FilesChanged) != 0 {
 		t.Fatalf("previous run leaked paths: %+v err=%v", result, err)
 	}
 }

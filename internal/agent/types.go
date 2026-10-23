@@ -199,6 +199,11 @@ type AgentResult struct {
 	// each iteration changed, giving the next iteration concrete anchors
 	// instead of re-grepping for its own prior work.
 	TouchedPaths []string `json:"touched_paths,omitempty"`
+
+	// FilesChanged is runtime accounting for all confirmed writes, including
+	// tools outside the done-gate's mutation set. Nil means the producer has no
+	// separate snapshot; callers may fall back to TouchedPaths in that case.
+	FilesChanged []string `json:"-"`
 }
 
 // AgentOutputWriter streams agent output to both an in-memory buffer (capped)

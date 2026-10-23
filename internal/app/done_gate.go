@@ -131,7 +131,27 @@ func (a *App) snapshotResponseTouchedPaths() []string {
 }
 
 func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, result tools.ToolResult) {
-	if !result.Success || !donegate.IsMutationTool(toolName) {
+	if !result.Success {
+		return
+	}
+	isMutation := donegate.IsMutationTool(toolName)
+	// Reporting accepts explicit writes from every tool; check targeting keeps
+	// its existing supported-tool boundary and conservative argument paths.
+	mutated := tools.WrittenPathsFromResult(result)
+	if isMutation {
+		mutated = tools.MutationPathsFromResult(toolName, args, result)
+	}
+	mutated = donegate.NormalizeTouchedPaths(a.workDir, mutated)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.headlessRunActive && len(mutated) > 0 {
+		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, mutated...))
+		if !isMutation {
+			a.responseMutationCount++
+			a.responseTrivialEdit = false
+		}
+	}
+	if !isMutation {
 		return
 	}
 
@@ -146,15 +166,8 @@ func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, r
 		return
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	a.responseMutationCount++
 	a.responseTrivialEdit = isSingleLineEdit(toolName, result)
-	if a.headlessRunActive {
-		mutated := tools.MutationPathsFromResult(toolName, args, result)
-		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, mutated...))
-	}
 	seen := make(map[string]bool, len(a.responseTouchedPaths))
 	for _, existing := range a.responseTouchedPaths {
 		seen[existing] = true

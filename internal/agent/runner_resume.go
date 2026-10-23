@@ -732,6 +732,7 @@ func (r *Runner) publishResumedAgentPanic(
 		MutatingToolCalls:    agent.MutatingToolCount(),
 		StatefulToolAttempts: agent.StatefulToolAttemptCount(),
 		TouchedPaths:         agent.GetMutatedPaths(),
+		FilesChanged:         agent.GetFilesChanged(),
 	}
 	agent.populateResultIdentity(result)
 	r.finalizeAgentWorkspace(agent, result)

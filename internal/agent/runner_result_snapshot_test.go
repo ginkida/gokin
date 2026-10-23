@@ -17,6 +17,7 @@ func TestRunnerResultSnapshot_DoesNotAliasMutableFields(t *testing.T) {
 		Completed:            true,
 		StatefulToolAttempts: 2,
 		TouchedPaths:         []string{"original.go"},
+		FilesChanged:         []string{"reported.go"},
 		Metadata: map[string]any{
 			"nested": map[string]any{"value": "original"},
 			"files":  []string{"original.go"},
@@ -31,12 +32,13 @@ func TestRunnerResultSnapshot_DoesNotAliasMutableFields(t *testing.T) {
 	snapshot.Status = AgentStatusFailed
 	snapshot.StatefulToolAttempts = 0
 	snapshot.TouchedPaths[0] = "mutated.go"
+	snapshot.FilesChanged[0] = "mutated.go"
 	snapshot.Metadata["nested"].(map[string]any)["value"] = "mutated"
 	snapshot.Metadata["files"].([]string)[0] = "mutated.go"
 	snapshot.Metadata["items"].([]any)[0].(map[string]any)["value"] = "mutated"
 
 	fresh, _ := runner.GetResult("agent")
-	if fresh.Status != AgentStatusCompleted || fresh.StatefulToolAttempts != 2 || fresh.TouchedPaths[0] != "original.go" {
+	if fresh.Status != AgentStatusCompleted || fresh.StatefulToolAttempts != 2 || fresh.TouchedPaths[0] != "original.go" || fresh.FilesChanged[0] != "reported.go" {
 		t.Fatalf("snapshot mutation reached stored scalars/slice: %+v", fresh)
 	}
 	if got := fresh.Metadata["nested"].(map[string]any)["value"]; got != "original" {
@@ -97,19 +99,29 @@ func TestRunnerResultCallbacksReceiveOwnedSnapshots(t *testing.T) {
 	result := &AgentResult{
 		AgentID: "agent", Status: AgentStatusCompleted, Completed: true,
 		TouchedPaths: []string{"original.go"},
+		FilesChanged: []string{"reported.go"},
 		Metadata:     map[string]any{"value": "original"},
 	}
 
 	mutate := func(_ string, callbackResult *AgentResult) {
 		callbackResult.Status = AgentStatusFailed
 		callbackResult.TouchedPaths[0] = "mutated.go"
+		callbackResult.FilesChanged[0] = "mutated.go"
 		callbackResult.Metadata["value"] = "mutated"
 	}
 	invokeAgentComplete(mutate, result.AgentID, result)
 	runner.SetOnAgentUsage(mutate)
 	runner.reportAgentUsage(result.AgentID, result)
 
-	if result.Status != AgentStatusCompleted || result.TouchedPaths[0] != "original.go" || result.Metadata["value"] != "original" {
+	if result.Status != AgentStatusCompleted || result.TouchedPaths[0] != "original.go" || result.FilesChanged[0] != "reported.go" || result.Metadata["value"] != "original" {
 		t.Fatalf("callback mutation reached runner-owned result: %+v", result)
+	}
+}
+
+func TestRunnerResultSnapshotPreservesKnownEmptyFilesChanged(t *testing.T) {
+	result := &AgentResult{FilesChanged: []string{}}
+	clone := cloneAgentResult(result)
+	if clone.FilesChanged == nil {
+		t.Fatal("known empty snapshot became an unavailable legacy snapshot")
 	}
 }

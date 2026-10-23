@@ -236,6 +236,9 @@ func cloneAgentResult(result *AgentResult) *AgentResult {
 		clone.PolicyBlock = &policyBlock
 	}
 	clone.TouchedPaths = append([]string(nil), result.TouchedPaths...)
+	if result.FilesChanged != nil {
+		clone.FilesChanged = append([]string{}, result.FilesChanged...)
+	}
 	clone.Metadata = cloneAgentMetadata(result.Metadata)
 	return &clone
 }

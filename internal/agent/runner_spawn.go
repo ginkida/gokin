@@ -103,6 +103,7 @@ func runAgentWithPanicRecovery(agent *Agent, ctx context.Context, prompt, spawnS
 			MutatingToolCalls:    agent.MutatingToolCount(),
 			StatefulToolAttempts: agent.StatefulToolAttemptCount(),
 			TouchedPaths:         agent.GetMutatedPaths(),
+			FilesChanged:         agent.GetFilesChanged(),
 		}
 		agent.populateResultIdentity(result)
 	}()

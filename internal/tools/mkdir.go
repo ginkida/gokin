@@ -119,7 +119,7 @@ func (t *MkdirTool) Execute(ctx context.Context, args map[string]any) (ToolResul
 	// Check if path already exists
 	if info, err := os.Stat(path); err == nil {
 		if info.IsDir() {
-			return NewSuccessResult(fmt.Sprintf("Directory already exists: %s", path)), nil
+			return NewSuccessResultWithData(fmt.Sprintf("Directory already exists: %s", path), map[string]any{"changed": false}), nil
 		}
 		return NewErrorResult(fmt.Sprintf("path exists but is not a directory: %s", path)), nil
 	}
