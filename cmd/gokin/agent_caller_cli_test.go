@@ -46,10 +46,10 @@ func TestAgentCallerCLIHeadlessAndBackgroundHaveSameDeniedRoundProfile(t *testin
 					t.Fatal(err)
 				}
 			}
-			write(filepath.Join(root, "m.go"), "package main\n// before\n")
+			write(filepath.Join(root, "m.go"), "package main\n\n// before\nfunc main() {}\n")
 			write(filepath.Join(root, "go.mod"), "module example.com/agentcaller\n\ngo 1.23\n")
 			cfg := filepath.Join(root, "config.yaml")
-			write(cfg, "api: {active_provider: glm, glm_key: test-key-for-fixture}\nmodel: {provider: glm, name: glm-5.3-flash, fallback_providers: []}\nengine: {mode: tools}\nmemory: {enabled: false}\nsession_memory: {enabled: false}\nhooks: {enabled: false}\nmcp: {enabled: false}\ntools: {sandbox: false}\npermission:\n  rules: {bash: deny}\n")
+			write(cfg, "api: {active_provider: glm, glm_key: test-key-for-fixture}\nmodel: {provider: glm, name: glm-5.3-flash, fallback_providers: []}\nengine: {mode: tools}\nmemory: {enabled: false}\nsession_memory: {enabled: false}\nhooks: {enabled: false}\nmcp: {enabled: false}\ntools: {sandbox: false, delta_check: {enabled: false}}\npermission:\n  rules: {bash: deny}\n")
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				round := requests.Add(1)
