@@ -218,7 +218,7 @@ func DetectFalselyClaimedPaths(response string, gitChanged []string) []string {
 // response. Matches tokens that look like `something/file.ext` or bare
 // `file.ext` with a known code extension. Keeps the regex simple — we
 // only need "good enough" recall with low FP on common English prose.
-var completionReviewPathToken = regexp.MustCompile(`([A-Za-z0-9_\-./]+\.(?:go|py|ts|tsx|js|jsx|rs|java|kt|rb|swift|c|cc|cpp|h|hpp|yaml|yml|toml|json|md|mod|sum))`)
+var completionReviewPathToken = regexp.MustCompile(`([A-Za-z0-9_\-./]+\.(?:go|py|ts|tsx|js|jsx|rs|java|kt|rb|swift|c|cc|cpp|h|hpp|yaml|yml|toml|json|md|mod|sum))\b`)
 
 func tokenizeResponseForPaths(response string) []string {
 	matches := completionReviewPathToken.FindAllString(response, -1)

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"google.golang.org/genai"
@@ -44,7 +43,7 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 	}
 
 	profile := donegate.DetectProfileWithTouchedPaths(a.workDir, a.snapshotResponseTouchedPaths())
-	checks := donegate.BuildChecks(a.registry, a.workDir, userMessage, toolsUsed, profile, policy)
+	checks := donegate.BuildChecks(donegate.WithToolInvoker(ctx, a.registry, a.executor.InvokeTool), a.workDir, userMessage, toolsUsed, profile, policy)
 	if len(checks) == 0 {
 		if policy.FailClosed {
 			return a.blockDoneGate("done-gate blocked finalization: no verification checks are available for this project/stack")
@@ -62,6 +61,21 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 			return true
 		}
 		a.reportDoneGateResults(results, attempt)
+		if err := donegate.StoppedError(results); err != nil {
+			a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), err)
+			return false
+		}
+		if err := tools.PermissionStopError(ctx); err != nil {
+			a.reportHeadlessStopFailure(ctx, a.activeHeadlessTerminalToken(), err)
+			return false
+		}
+
+		// Permission refusal is a verification limitation, not broken code.
+		// Keep completed work and never ask an auto-fix round to bypass policy.
+		if donegate.AllFailuresDenied(results) {
+			a.currentPresenter().Warning("Not verified: permission policy denied completion checks.")
+			return true
+		}
 
 		if donegate.Passed(results) {
 			a.journalEvent("done_gate_passed", map[string]any{
@@ -134,52 +148,33 @@ func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, r
 	if !result.Success {
 		return
 	}
+	if preview, _ := args["dry_run"].(bool); preview {
+		return
+	}
 	isMutation := donegate.IsMutationTool(toolName)
-	// Reporting accepts explicit writes from every tool; check targeting keeps
-	// its existing supported-tool boundary and conservative argument paths.
 	mutated := tools.WrittenPathsFromResult(result)
 	if isMutation {
 		mutated = tools.MutationPathsFromResult(toolName, args, result)
 	}
-	mutated = donegate.NormalizeTouchedPaths(a.workDir, mutated)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.headlessRunActive && len(mutated) > 0 {
-		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, mutated...))
-		if !isMutation {
-			a.responseMutationCount++
-			a.responseTrivialEdit = false
+	if len(mutated) > 0 {
+		if a.headlessRunActive {
+			a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, mutated...))
 		}
+		a.responseMutationCount++
+		a.responseTrivialEdit = isSingleLineEdit(toolName, result)
 	}
-	if !isMutation {
+	// Confirmed writes in granted external directories are mutation evidence,
+	// even though workspace-relative completion checks cannot target them.
+	mutated = donegate.NormalizeTouchedPaths(a.workDir, mutated)
+	// Declared writes count as evidence in either mode, without broadening
+	// the gate's supported-tool boundary. Multi-file previews have no targets.
+	if !isMutation || (toolName == "batch" || toolName == "refactor") && len(mutated) == 0 {
 		return
 	}
-
-	// Merge the tool's arg-side paths with any it self-declares via
-	// written_paths (batch/refactor pattern-mode edits carry no path args — the
-	// v0.100.45 seam is the accurate primary route for them, and without it a
-	// batch that breaks a module records zero touched paths and the module's
-	// checks are skipped → done-gate false PASS).
 	raw := append(donegate.ExtractTouchedPaths(args), tools.WrittenPathsFromResult(result)...)
-	paths := donegate.NormalizeTouchedPaths(a.workDir, raw)
-	if len(paths) == 0 {
-		return
-	}
-
-	a.responseMutationCount++
-	a.responseTrivialEdit = isSingleLineEdit(toolName, result)
-	seen := make(map[string]bool, len(a.responseTouchedPaths))
-	for _, existing := range a.responseTouchedPaths {
-		seen[existing] = true
-	}
-	for _, path := range paths {
-		if seen[path] {
-			continue
-		}
-		seen[path] = true
-		a.responseTouchedPaths = append(a.responseTouchedPaths, path)
-	}
-	sort.Strings(a.responseTouchedPaths)
+	a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, raw...))
 }
 
 func (a *App) doneGatePolicy() donegate.Policy {
@@ -397,14 +392,16 @@ func isSingleLineEdit(name string, result tools.ToolResult) bool {
 	if !ok {
 		return false
 	}
-	one := func(value any) bool {
+	lineCount := func(value any) (int, bool) {
 		switch n := value.(type) {
 		case int:
-			return n == 1
+			return n, n >= 0 && n <= 1
 		case float64:
-			return n == 1
+			return int(n), n == 0 || n == 1
 		}
-		return false
+		return 0, false
 	}
-	return one(data["diff_added"]) && one(data["diff_removed"])
+	added, addedOK := lineCount(data["diff_added"])
+	removed, removedOK := lineCount(data["diff_removed"])
+	return addedOK && removedOK && added+removed > 0
 }

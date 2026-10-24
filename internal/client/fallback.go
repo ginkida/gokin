@@ -83,7 +83,17 @@ func (fc *FallbackClient) setCurrent(index int) {
 // ResetFallbackPosition resets the fallback chain to start from the first provider.
 // This allows retrying the full chain after a delay (e.g., after stream-level retries exhaust).
 func (fc *FallbackClient) ResetFallbackPosition() {
+	if fc.getCurrent() != 0 {
+		ResetConversationCache(fc.clients[0])
+	}
 	fc.resetCurrent()
+}
+
+func (fc *FallbackClient) prepareClient(index int) Client {
+	if index != fc.getCurrent() {
+		ResetConversationCache(fc.clients[index])
+	}
+	return fc.clients[index]
 }
 
 // SendMessage sends a message, trying fallback clients on error.
@@ -121,7 +131,7 @@ func (fc *FallbackClient) sendWithFallback(ctx context.Context, operation string
 		if ctx.Err() != nil {
 			return nil, ContextErr(ctx)
 		}
-		resp, err := send(fc.clients[i])
+		resp, err := send(fc.prepareClient(i))
 		if err == nil && resp == nil {
 			err = fmt.Errorf("provider returned a nil streaming response")
 		}
@@ -290,7 +300,7 @@ func (fc *FallbackClient) proxyStream(
 					emitFallbackError(ctx, chunks, ContextErr(ctx))
 					return
 				}
-				candidate, sendErr := send(fc.clients[index])
+				candidate, sendErr := send(fc.prepareClient(index))
 				if sendErr == nil && candidate == nil {
 					sendErr = fmt.Errorf("provider returned a nil streaming response")
 				}
@@ -439,6 +449,14 @@ func (fc *FallbackClient) SetTurnContext(turnContext string) {
 	defer fc.mu.RUnlock()
 	for _, c := range fc.clients {
 		c.SetTurnContext(turnContext)
+	}
+}
+
+func (fc *FallbackClient) ResetConversationCache() {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	for _, c := range fc.clients {
+		ResetConversationCache(c)
 	}
 }
 

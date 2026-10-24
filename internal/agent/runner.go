@@ -887,6 +887,7 @@ func (r *Runner) newConfiguredAgent(
 		agentClient = newInvocationBudgetClient(deps.client)
 	}
 	var isolated *isolatedWorkspace
+	var isolationErr error
 	parentToolCeiling, parentToolsRestricted := tools.AgentToolCapabilityCeilingFromContext(ctx)
 	if parentToolsRestricted {
 		agentBaseRegistry = tools.CloneRegistryForWorkDirWithToolCeiling(
@@ -897,8 +898,9 @@ func (r *Runner) newConfiguredAgent(
 	if isolationMode != workspaceIsolationDisabled {
 		ws, err := prepareIsolatedWorkspace(agentWorkDir, isolationMode)
 		if err != nil {
+			isolationErr = fmt.Errorf("workspace isolation failed: %w", err)
 			logging.Debug("failed to prepare isolated workspace", "agent_type", agentType, "workdir", agentWorkDir, "mode", isolationMode, "error", err)
-		} else {
+		} else if ws != nil {
 			isolated = ws
 			if parentToolsRestricted {
 				agentBaseRegistry = tools.CloneRegistryForWorkDirWithToolCeiling(
@@ -952,6 +954,9 @@ func (r *Runner) newConfiguredAgent(
 		if strings.Contains(agentType, ":") {
 			agent.definitionError = fmt.Errorf("plugin agent %q is unavailable", agentType)
 		}
+	}
+	if isolationErr != nil {
+		agent.definitionError = isolationErr
 	}
 	agent.SetModelRoundTimeout(deps.modelRoundTimeout)
 

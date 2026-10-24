@@ -19,6 +19,7 @@ import (
 	"gokin/internal/config"
 	appcontext "gokin/internal/context"
 	"gokin/internal/hooks"
+	"gokin/internal/lifecycle"
 	"gokin/internal/logging"
 	"gokin/internal/permission"
 	"gokin/internal/plugins"
@@ -83,6 +84,8 @@ var (
 
 const maxHeadlessStdinBytes = 16 << 20
 
+var headlessStdinFirstByteTimeout = 3 * time.Second
+
 // rootLongHelp is the first thing a new user reads, and it names the default
 // provider — which is to say it tells them which API key to go and obtain. It
 // is a const rather than an inline literal so a test can hold it against
@@ -93,7 +96,17 @@ const rootLongHelp = `Gokin is a CLI tool for AI-assisted coding. Supports GLM
 interactive chat interface with tools for reading, writing, and
 editing files, running commands, and orchestrating multi-agent
 workflows — with zero proxies between you and the provider you
-choose.`
+choose.
+
+To read code and run checks while blocking file-edit tools:
+  gokin -p --permission-mode default --tools read,glob,grep,list_dir,tree,bash,run_tests,verify_code --allowed-tools bash,run_tests,verify_code "Run tests and analyze failures"
+Shell commands can still write files. Elevated bash commands still require
+approval and are denied in headless mode.
+
+Redirected text input waits up to 3s for the first stdin byte, then proceeds
+without stdin if none arrives. Once input starts, it reads to EOF (16 MiB limit)
+without a total deadline. Use < /dev/null to skip stdin immediately.
+--input-format stream-json waits for protocol messages without this bound.`
 
 func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
@@ -131,7 +144,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&permissionMode, "permission-mode", "", "permission mode for this run: default, acceptEdits, dontAsk, bypassPermissions, or plan")
 	rootCmd.PersistentFlags().BoolVar(&skipPermissions, "dangerously-skip-permissions", false, "bypass permission prompts for this run (sandbox, path boundaries, and hard safety checks remain active)")
 	rootCmd.PersistentFlags().StringSliceVar(&allowedToolsCompat, "allowedTools", nil, "pre-approve matching tools for this run without widening --tools (Claude-compatible)")
-	rootCmd.PersistentFlags().StringSliceVar(&allowedTools, "allowed-tools", nil, "pre-approve matching tools for this run without widening --tools")
+	rootCmd.PersistentFlags().StringSliceVar(&allowedTools, "allowed-tools", nil, "pre-approve matching tools for this run without widening --tools (see command-analysis example above)")
 	rootCmd.PersistentFlags().StringSliceVar(&toolCeiling, "tools", nil, "restrict available tools to these exact names (comma-separated; empty means no tools)")
 	rootCmd.PersistentFlags().StringSliceVar(&deniedTools, "disallowed-tools", nil, "deny matching tools/calls; bare names are also hidden from the model")
 	rootCmd.PersistentFlags().StringSliceVar(&deniedToolsCompat, "disallowedTools", nil, "deny matching tools/calls; bare names are also hidden from the model (Claude-compatible)")
@@ -185,6 +198,7 @@ func newRootCommand() *cobra.Command {
 	}))
 	rootCmd.AddCommand(newBackgroundAgentsCmd())
 	rootCmd.AddCommand(newBackgroundLogsCmd())
+	rootCmd.AddCommand(newBackgroundResultCmd())
 	rootCmd.AddCommand(newBackgroundStopCmd())
 	rootCmd.AddCommand(newBackgroundRespawnCmd())
 	rootCmd.AddCommand(newBackgroundSendCmd())
@@ -198,12 +212,17 @@ func main() {
 	rootInvocationArgs = normalizeOptionalDebugArgs(os.Args[1:])
 	rootCmd.SetArgs(rootInvocationArgs)
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }
 
 func runApp(cmd *cobra.Command, args []string) (runErr error) {
-	backgroundWorker, err := beginBackgroundWorker()
+	var trace *lifecycle.Trace
+	if headless || printMode || os.Getenv(backgroundJobEnv) != "" {
+		trace = lifecycle.New(os.Stderr)
+		defer trace.Finish()
+	}
+	backgroundWorker, err := beginBackgroundWorker(trace)
 	if err != nil {
 		return err
 	}
@@ -220,6 +239,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	effectiveHeadless := headless || printMode
+	trace.Phase("cli_validation")
 	if !effectiveHeadless && (brief || strictPermissions || noSelfReview) {
 		return fmt.Errorf("--brief, --strict-permissions and --no-self-review require --headless or --print")
 	}
@@ -241,7 +261,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		if runErr == nil || !effectiveHeadless || !isStructuredHeadlessOutput(headlessFormat) || jsonEnvelopeWritten {
 			return
 		}
-		if encodeErr := writeHeadlessFailure(os.Stdout, failureSessionID, failureKind, runErr); encodeErr != nil {
+		if encodeErr := writeHeadlessFailure(os.Stdout, failureSessionID, failureKind, runErr, trace.Snapshot()); encodeErr != nil {
 			runErr = errors.Join(runErr, encodeErr)
 		}
 	}()
@@ -336,7 +356,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 			resolvedDebug.path, resolvedDebug.level, resolvedDebug.filter); err != nil {
 			return fmt.Errorf("enable debug logging: %w", err)
 		}
-		defer logging.Close()
+		defer func() { trace.Phase("debug_log_close"); logging.Close() }()
 		logging.Debug("debug logging enabled",
 			"category", "startup",
 			"path", logging.CurrentLogPath(),
@@ -358,6 +378,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	resolvedPrompt := prompt
+	trace.Phase("input")
 	if effectiveHeadless {
 		failureKind = "input"
 		if headlessInputFormat == headlessInputText {
@@ -413,6 +434,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 
 	// Load configuration
 	failureKind = "configuration"
+	trace.Phase("configuration")
 	cfg, err := loadConfiguredConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -491,6 +513,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	// Create the application
 	startupToolDenies := optionalRuntimeDeniesForCLIRules(resolvedDeniedToolRules)
 	application, err := app.NewWithOptions(cfg, workDir, app.BuildOptions{
+		Lifecycle:                    trace,
 		NonInteractive:               effectiveHeadless,
 		SyncDeclaredPlugins:          true,
 		Bare:                         bare,
@@ -503,8 +526,9 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		return fmt.Errorf("failed to create application: %w", err)
 	}
 	if effectiveHeadless {
-		defer application.ClosePluginStartupRefresh()
+		defer func() { trace.Phase("plugin_refresh_close"); application.ClosePluginStartupRefresh() }()
 	}
+	trace.Phase("run_policy")
 	logging.Debug("application initialized",
 		"category", "startup",
 		"work_dir", workDir,
@@ -528,6 +552,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	failureKind = "resume_failed"
+	trace.Phase("session_prepare")
 	sessionLease, selectedSessionID, err := prepareSessionForRun(
 		application, cfg.Session.Enabled, resumeID, continueLast, requestedSessionID, forkSession)
 	if selectedSessionID != "" {
@@ -544,6 +569,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		return err
 	}
 	if backgroundWorker != nil {
+		trace.Phase("background_session_publish")
 		if err := backgroundWorker.setSessionID(selectedSessionID); err != nil {
 			if sessionLease != nil {
 				_ = sessionLease.Release()
@@ -553,12 +579,14 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		}
 	}
 	if sessionLease != nil {
+		trace.Phase("session_lease_adopt")
 		if err := application.AdoptSessionWriterLease(sessionLease); err != nil {
 			_ = sessionLease.Release()
 			failureKind = "session_lease"
 			return fmt.Errorf("adopt session writer lease: %w", err)
 		}
 		defer func() {
+			trace.Phase("session_lease_release")
 			if releaseErr := application.ReleaseSessionWriterLease(); releaseErr != nil {
 				// Descriptor-owned OS locks are released by process exit even if
 				// the explicit unlock reports an error; keep the already-emitted
@@ -569,13 +597,14 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	if effectiveHeadless {
-		defer application.CloseLanguageServers()
+		defer func() { trace.Phase("language_servers_close"); application.CloseLanguageServers() }()
 	}
-	defer application.EndSessionHooks(context.Background(), "other")
+	defer func() { trace.Phase("session_end_hooks"); application.EndSessionHooks(context.Background(), "other") }()
 	if effectiveHeadless {
 		failureKind = "execution"
 		jsonEnvelopeWritten = isStructuredHeadlessOutput(headlessFormat)
 		opts := app.HeadlessOptions{
+			Lifecycle:         trace,
 			OutputFormat:      headlessFormat,
 			Stdout:            os.Stdout,
 			Stderr:            os.Stderr,
@@ -1122,9 +1151,11 @@ func parseHeadlessStreamInput(data []byte) (string, error) {
 	return content, nil
 }
 
-// readHeadlessStdin reads redirected input but never touches a live terminal.
-// That distinction keeps `gokin --headless --prompt ...` non-blocking while
-// still supporting `cat build.log | gokin -p "diagnose this"`.
+// readHeadlessStdin bounds only the first byte of redirected text input.
+// A timed-out read may remain blocked until EOF or one byte arrives. It can
+// consume at most that byte, and its buffered result never blocks on delivery.
+// Text headless startup owns stdin for the process and never reads it again;
+// do not reuse this helper for stream-json or a reader with another consumer.
 func readHeadlessStdin(cmd *cobra.Command) (string, error) {
 	if cmd == nil {
 		return "", nil
@@ -1136,7 +1167,32 @@ func readHeadlessStdin(cmd *cobra.Command) (string, error) {
 	if file, ok := reader.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
 		return "", nil
 	}
-	data, err := io.ReadAll(io.LimitReader(reader, maxHeadlessStdinBytes+1))
+	type firstRead struct {
+		data []byte
+		err  error
+	}
+	ready := make(chan firstRead, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(reader, 1))
+		ready <- firstRead{data, err}
+	}()
+	wait := headlessStdinFirstByteTimeout
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	var first firstRead
+	select {
+	case first = <-ready:
+		if first.err != nil {
+			return "", fmt.Errorf("read headless stdin: %w", first.err)
+		}
+		if len(first.data) == 0 {
+			return "", nil // Immediate EOF, including /dev/null.
+		}
+	case <-timer.C:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: no stdin data received in %s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null\n", wait)
+		return "", nil
+	}
+	data, err := io.ReadAll(io.LimitReader(io.MultiReader(strings.NewReader(string(first.data)), reader), maxHeadlessStdinBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read headless stdin: %w", err)
 	}
@@ -1630,7 +1686,7 @@ func sessionPreparationErrorKind(err error, resuming bool) string {
 	return "resume_failed"
 }
 
-func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error) error {
+func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error, timing ...lifecycle.Timing) error {
 	if w == nil {
 		return fmt.Errorf("write headless JSON failure: output is nil")
 	}
@@ -1641,6 +1697,8 @@ func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error) er
 		kind = "startup"
 	}
 	result := app.HeadlessResult{
+		Verification:      tools.VerificationSummary{Status: "not_run"},
+		Incomplete:        true,
 		PermissionDenials: []tools.PermissionDenial{},
 		FilesChanged:      []string{},
 		SchemaVersion:     app.HeadlessSchemaVersion,
@@ -1654,6 +1712,9 @@ func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error) er
 		},
 		Usage: app.HeadlessUsage{},
 		Cost:  app.HeadlessCost{},
+	}
+	if len(timing) > 0 {
+		result.Timing = timing[0]
 	}
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		return fmt.Errorf("write headless JSON failure: %w", err)

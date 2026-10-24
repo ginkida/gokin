@@ -505,6 +505,16 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		a.responseTouchedPaths = nil
 		a.responseMutationCount = 0
 		a.responseTrivialEdit = false
+		a.responseClaimMismatch = false
+		a.responseClaimCorrectionAttempted = false
+		a.responsePermissionDenied = false
+		a.responseClaimRequested = requestedFileChange(memoryQuery)
+		a.responseClaimBaseline = nil
+		a.responseAgentScope = agent.InvocationScopeFromContext(ctx)
+		if a.responseAgentScope.IsZero() {
+			a.responseAgentScope = agent.NewInvocationScope()
+		}
+		ctx = agent.WithInvocationScope(ctx, a.responseAgentScope)
 		a.responseCommands = nil
 		a.responseEvidence = responseEvidenceLedger{}
 	}
@@ -513,7 +523,15 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	a.messageCount++
 	a.diffBatchDecision = ui.DiffPending
 	currentMsgCount := a.messageCount
+	trackClaims := a.headlessRunActive && a.responseClaimRequested
 	a.mu.Unlock()
+
+	if !isStructuredOutputCorrection(ctx) && trackClaims {
+		snapshot := snapshotClaimWorkspace(ctx, a.workDir)
+		a.mu.Lock()
+		a.responseClaimBaseline = snapshot
+		a.mu.Unlock()
+	}
 
 	// A fresh user turn owns a fresh side-effect ledger. An automatic retry
 	// instead restores the exact checkpoint generation captured when its failed

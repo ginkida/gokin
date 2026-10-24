@@ -2033,7 +2033,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			// Self-review injection: if many files were mutated this turn,
 			// add a notification nudging the model to verify consistency.
-			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 && !SelfReviewDisabled(ctx) {
+			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 && !SelfReviewDisabled(ctx) && !HeadlessPermissionDenied(ctx) {
 				e.mutatedFilesMu.Lock()
 				count := len(e.mutatedFilesThisTurn)
 				var files []string
@@ -2132,10 +2132,15 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						// a future compressor that resets ID can't break
 						// the tool-call/result pairing.
 						compressed.FunctionResponse.ID = result.ID
+						compressed.FunctionResponse.Name = result.Name
 						part = compressed
 					}
 				}
 				funcResultParts[j] = part
+				// Initial delivery must equal the response retained for replay.
+				// Sending the uncompressed original would rewrite the next
+				// request's earlier prefix when history supplies this part.
+				results[j] = part.FunctionResponse
 			}
 			funcResultContent := &genai.Content{
 				Role:  genai.RoleUser,
@@ -2420,7 +2425,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// and the nudge is suppressed (don't shove the model into implementation
 		// the discuss-gate is holding back). Nil gate (tests/headless/autonomous)
 		// -> always action.
-		actionMode := e.discussGate == nil || !e.discussGate()
+		actionMode := (e.discussGate == nil || !e.discussGate()) && !HeadlessPermissionDenied(ctx)
 		incDec := DecideIncompleteWorkContinuation(e.registry,
 			resp.FinishReason == genai.FinishReasonMaxTokens, len(toolsUsed),
 			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, actionMode)
@@ -2939,6 +2944,7 @@ func (e *Executor) executeTool(ctx context.Context, call *genai.FunctionCall) To
 	}
 
 	result = ApplyHeadlessPermissionResult(ctx, call, result)
+	ObserveHeadlessToolResult(ctx, call, result)
 	if result.PolicyBlock != nil && e.handler != nil && e.handler.OnToolPolicyBlocked != nil {
 		e.handler.OnToolPolicyBlocked(call.Name, *result.PolicyBlock)
 	}
@@ -3110,6 +3116,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	var preResults []hooks.Result
 	hookDecision := ""
 	originalCall := call
+	hookInputUpdated := false
 	if e.hooks != nil {
 		preResults = e.hooks.RunPreTool(ctx, call.Name, call.Args)
 		if err := PermissionStopError(ctx); err != nil {
@@ -3134,6 +3141,13 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		ownedCall := *call
 		call = &ownedCall
 		hookDecision = ApplyHookInput(call, preResults)
+		for _, hookResult := range preResults {
+			if hookResult.UpdatedInput != nil {
+				hookInputUpdated = true
+				defer func() { result.HookUpdatedInput = call.Args }()
+				break
+			}
+		}
 		if err := tool.Validate(call.Args); err != nil {
 			return NewErrorResult("hook updatedInput validation: " + err.Error())
 		}
@@ -3908,6 +3922,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		"safety_level", execInfo.SafetyLevel)
 
 	// Key retry outcomes by the provider input retained in conversation history.
+	if hookInputUpdated {
+		result.HookUpdatedInput = call.Args
+	}
 	e.recordSideEffect(originalCall, result)
 
 	// Record in checkpoint journal for API failure recovery (write operations only).
@@ -4608,11 +4625,12 @@ func isStagnationRecoverySafe(name string) bool {
 // the provider calls, never a registered tool, so the entry matched nothing and
 // the list read as covering one case more than it did.
 var idempotentStateTools = map[string]bool{
-	"memory":       true,
-	"memorize":     true,
-	"todo":         true,
-	"check_impact": true,
-	"mcp_admin":    true,
+	"memory":            true,
+	"update_scratchpad": true,
+	"memorize":          true,
+	"todo":              true,
+	"check_impact":      true,
+	"mcp_admin":         true,
 }
 
 func maxStagnationRecoveryAttempts(toolName string) int {

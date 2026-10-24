@@ -55,7 +55,7 @@ func TestIsReadOnlyForPlanMode(t *testing.T) {
 		"web_fetch", "web_search",
 		"env", "tools_list", "skill",
 		"git_status", "git_diff", "git_log", "git_blame",
-		"ask_user", "todo", "task_output", "get_plan_status",
+		"ask_user", "todo", "update_scratchpad", "task_output", "get_plan_status",
 		"history_search",
 		"enter_plan_mode", "exit_plan_mode", "update_plan_progress",
 	}
@@ -77,7 +77,7 @@ func TestIsReadOnlyForPlanMode(t *testing.T) {
 		// Git writes
 		"git_add", "git_commit", "git_pr", "git_branch",
 		// Sub-agents / delegation
-		"ask_agent", "coordinate", "shared_memory", "update_scratchpad",
+		"ask_agent", "coordinate", "shared_memory",
 		"request_tool", "task", "task_stop",
 		// Memory writes + batched ops
 		"memory", "memorize", "pin_context", "batch", "refactor", "verify_code", "check_impact",

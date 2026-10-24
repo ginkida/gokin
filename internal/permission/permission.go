@@ -161,7 +161,7 @@ func GetToolRiskLevel(toolName string) RiskLevel {
 		"git_status", "git_log", "git_diff", "git_blame",
 		"review_changes", "go_to_definition", "find_references", "lsp",
 		"history_search", "skill",
-		"web_search", "web_fetch", "todo",
+		"web_search", "web_fetch", "todo", "update_scratchpad",
 		"task_output", "task_stop":
 		return RiskLow
 	case "mcp_admin":

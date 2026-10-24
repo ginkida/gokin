@@ -1,10 +1,29 @@
 package permission
 
 import (
+	"context"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
+
+type readOnlyBashWrapperKey struct{}
+
+// ContextWithReadOnlyBashWrapper lets a trusted caller classify the inner
+// command of its own wrapper. Authority is bound to the exact shell text so
+// a hook rewrite cannot inherit it. Deny rules and elevated floors still apply.
+func ContextWithReadOnlyBashWrapper(ctx context.Context, wrapped, inner string) context.Context {
+	if !IsReadOnlyBashCommand(inner) {
+		return ctx
+	}
+	return context.WithValue(ctx, readOnlyBashWrapperKey{}, wrapped)
+}
+
+func isReadOnlyBashInvocation(ctx context.Context, args map[string]any) bool {
+	command, _ := args["command"].(string)
+	wrapped, ok := ctx.Value(readOnlyBashWrapperKey{}).(string)
+	return ok && command == wrapped || IsReadOnlyBashCommand(command)
+}
 
 // IsReadOnlyBashCommand reports whether every shell segment is a conservative,
 // allowlisted inspection command. Unknown programs, command substitution, and

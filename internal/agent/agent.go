@@ -3967,7 +3967,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// with), so the incomplete-work nudge always applies here.
 		incDec := tools.DecideIncompleteWorkContinuation(a.registry,
 			resp.FinishReason == genai.FinishReasonMaxTokens, a.ToolsUsedCount(),
-			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, true)
+			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, !tools.HeadlessPermissionDenied(ctx))
 		incompleteWorkStuck = incDec.Stuck
 		toolsUsedAtLastIncompleteNudge = incDec.LastNudge
 		if incDec.Continue {
@@ -3988,13 +3988,16 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// if the agent changed code but never ran any verification command this
 		// run, nudge it once to build/test before finishing. Conservative — it
 		// won't nag an agent that ran any command, so false nudges are rare.
-		if !verifyNudged && !tools.SelfReviewDisabled(ctx) && a.needsVerificationNudge() {
+		if !verifyNudged && !tools.SelfReviewDisabled(ctx) && !tools.HeadlessPermissionDenied(ctx) && a.needsVerificationNudge() {
 			verifyNudged = true
 			a.appendVerificationNudge()
 			continue
 		}
 
-		gateOutcome := a.runDoneGateAtBreak(ctx, prompt, output, &doneGateFixes, &doneGateCheckedAtGen)
+		gateOutcome, gateErr := a.runDoneGateAtBreak(ctx, prompt, output, &doneGateFixes, &doneGateCheckedAtGen)
+		if gateErr != nil {
+			return a.history, output.String(), gateErr
+		}
 		if gateOutcome == agentGateFixInjected {
 			continue
 		}
@@ -5412,6 +5415,7 @@ func (a *Agent) executeNestedToolResultSafely(ctx context.Context, call *genai.F
 	if agentToolExecutionActive(ctx) {
 		a.recordPolicyBlock(result.PolicyBlock)
 		a.recordToolExecution(call.Name, call.Args, result)
+		tools.ObserveHeadlessToolResult(ctx, call, result)
 	}
 	return result
 }
@@ -5617,6 +5621,7 @@ func (a *Agent) finishToolWithReflection(ctx context.Context, call *genai.Functi
 		a.recordPolicyBlock(result.PolicyBlock)
 	}
 	a.recordToolExecution(call.Name, call.Args, result)
+	tools.ObserveHeadlessToolResult(ctx, call, result)
 
 	// Feed durable tool-outcome signals into ProjectLearning. Runs on both
 	// success and failure so success-rate EMA reflects reality. Debounced

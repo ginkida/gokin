@@ -40,8 +40,8 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 		return
 	}
 	a.mu.Lock()
-	if a.headlessRunActive && a.headlessAgentUsageScopeOwner == a.headlessTerminal &&
-		!result.InvocationScope.IsZero() && result.InvocationScope == a.headlessAgentUsageScope {
+	if !result.InvocationScope.IsZero() && (!a.headlessRunActive && result.InvocationScope == a.responseAgentScope ||
+		a.headlessRunActive && a.headlessAgentUsageScopeOwner == a.headlessTerminal && result.InvocationScope == a.headlessAgentUsageScope) {
 		gatePaths := result.TouchedPaths
 		paths := result.FilesChanged
 		if paths == nil {
@@ -62,12 +62,16 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 			gatePaths = paths
 		}
 		paths = donegate.NormalizeTouchedPaths(a.workDir, paths)
-		a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, paths...))
+		if a.headlessRunActive {
+			a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, paths...))
+		}
 		if len(paths) > 0 {
 			a.responseMutationCount++
 			a.responseTrivialEdit = false
 		}
-		a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, gatePaths...))
+		if len(paths) > 0 {
+			a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, gatePaths...))
+		}
 	}
 	a.mu.Unlock()
 	input := max(result.InputTokens, 0)

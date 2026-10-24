@@ -13,14 +13,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// applyCacheControl decides what the provider bills. Its three markers — the
-// system block, the last tool, and the penultimate USER turn — are asserted
-// nowhere on the wire, and the interaction that matters most is not a property
-// of either feature alone: turn context is appended to the LAST user message,
-// while the cache boundary must sit at or before len-3. If those ever met, the
-// ephemeral per-turn snapshot would land INSIDE the cached prefix and every
-// single turn would re-bill it. That is a silent, purely monetary failure —
-// nothing breaks, the bill just grows.
+// DeepSeek accepts stable system/tool cache markers but caches conversations
+// implicitly. A moving message marker would rewrite an earlier request prefix.
 func TestCacheControlMarkersOnTheWire(t *testing.T) {
 	const marker = "EPHEMERAL-TURN-STATE"
 
@@ -100,29 +94,15 @@ func TestCacheControlMarkersOnTheWire(t *testing.T) {
 		}
 	}
 
-	// 3. Exactly one message carries the boundary, it is a user turn, and it is
-	//    at or before len-3 so the newest exchange stays uncached.
+	// 3. Implicit conversation caching needs no moving message boundary.
 	msgs, _ := got["messages"].([]any)
-	marked := []int{}
 	for i, raw := range msgs {
 		if strings.Contains(marshalString(t, raw), "cache_control") {
-			marked = append(marked, i)
+			t.Errorf("message %d carries a moving cache marker", i)
 		}
 	}
-	if len(marked) != 1 {
-		t.Fatalf("expected exactly one cached message boundary, found %v of %d messages", marked, len(msgs))
-	}
-	at := marked[0]
-	if at > len(msgs)-3 {
-		t.Errorf("cache boundary at %d of %d is too late — the newest exchange must stay uncached", at, len(msgs))
-	}
-	if role, _ := msgs[at].(map[string]any)["role"].(string); role != "user" {
-		t.Errorf("cache boundary sits on a %q turn; it must be a user turn", role)
-	}
 
-	// 4. The interaction. Turn context rides the last user message, and that
-	//    message must NOT be the cached one, or the ephemeral snapshot is
-	//    billed into the prefix on every turn.
+	// 4. Fresh turn context must not introduce an explicit message marker.
 	for i, raw := range msgs {
 		text := marshalString(t, raw)
 		if strings.Contains(text, marker) && strings.Contains(text, "cache_control") {

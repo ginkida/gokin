@@ -116,7 +116,7 @@ func TestCommandLooksLikeVerification_NodeAndPython(t *testing.T) {
 }
 
 func TestFalseFileClaims_ReadFilesAreLegitimateCitations(t *testing.T) {
-	output := "Fixed the bug in internal/config/duration.go after checking internal/app/version.go; see also internal/ghost/fake.go"
+	output := "Fixed the bug in internal/config/duration.go after checking internal/app/version.go; updated internal/ghost/fake.go"
 	changed := []string{"internal/config/duration.go"}
 	read := []string{"internal/app/version.go"}
 

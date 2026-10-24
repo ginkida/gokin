@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"gokin/internal/permission"
 )
 
 // SafetyLevel represents the safety classification of a tool
@@ -94,6 +96,22 @@ func NewDefaultSafetyValidator() *DefaultSafetyValidator {
 
 // initMetadata initializes metadata for all known tools
 func (v *DefaultSafetyValidator) initMetadata() {
+	// Use the live declaration names and canonical permission risks for the
+	// baseline. Detailed overrides below retain established UX and constraints.
+	// A new built-in therefore cannot silently miss the safety registry.
+	for _, declaration := range GetAllDeclarations() {
+		level := SafetyLevelCaution
+		switch permission.GetToolRiskLevel(declaration.Name) {
+		case permission.RiskLow:
+			level = SafetyLevelSafe
+		case permission.RiskHigh:
+			level = SafetyLevelDangerous
+		}
+		v.metadata[declaration.Name] = &ToolMetadata{
+			Name: declaration.Name, SafetyLevel: level, Category: "tool",
+			Impact: declaration.Description, RequiresConfirmation: level != SafetyLevelSafe,
+		}
+	}
 	// Read tool - safe
 	v.metadata["read"] = &ToolMetadata{
 		Name:        "read",

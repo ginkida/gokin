@@ -206,11 +206,10 @@ type Client interface {
 	// rather than being injected as a user message in the conversation history.
 	SetSystemInstruction(instruction string)
 
-	// SetTurnContext sets the per-turn ephemeral context (e.g. working
-	// memory). Unlike SetSystemInstruction it is delivered OUTSIDE the
-	// cached prefix — appended at request-build time to the latest user
-	// message and never persisted into history — so updating it every turn
-	// does not invalidate prompt caching. Empty string clears it.
+	// SetTurnContext supplies current ephemeral task state in user messages.
+	// Implicit-cache clients retain labeled point-in-time snapshots on the
+	// wire, never in persisted history. ResetConversationCache must be called
+	// at conversation ownership boundaries. Empty string clears current state.
 	SetTurnContext(turnContext string)
 
 	// SetThinkingBudget configures the thinking/reasoning budget for the next request.

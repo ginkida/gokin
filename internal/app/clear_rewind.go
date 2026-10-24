@@ -72,6 +72,7 @@ func (a *App) rotateClearedConversation(ctx context.Context) (int, error) {
 		}
 		return 0, rotateErr
 	}
+	a.resetConversationCache()
 	a.invalidateSessionStartLocked()
 	a.advanceConversationEpoch()
 	a.stopGoalTimer()
@@ -204,6 +205,7 @@ func (a *App) ResumePreviousClearSession(ctx context.Context, expected string, f
 	a.advanceConversationEpoch()
 	a.stopGoalTimer()
 	a.cancelRecoveryTimersForSession(current.ID)
+	a.resetConversationCache()
 	a.dropRecoveryPendingForSession(current.ID)
 	a.previousClearSessionID = ""
 	a.previousClearState = nil

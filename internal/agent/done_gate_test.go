@@ -88,17 +88,17 @@ func TestRunDoneGateAtBreak_SkipGuards(t *testing.T) {
 	ctx := context.Background()
 
 	a := &Agent{workDir: "/tmp/x"}
-	if got := a.runDoneGateAtBreak(ctx, "fix the bug", &output, &fixes, &gen); got != agentGateSkipped {
+	if got, err := a.runDoneGateAtBreak(ctx, "fix the bug", &output, &fixes, &gen); err != nil || got != agentGateSkipped {
 		t.Fatalf("nil policy: got %v, want agentGateSkipped", got)
 	}
 
 	a.SetDoneGatePolicy(donegate.Policy{Enabled: false})
-	if got := a.runDoneGateAtBreak(ctx, "fix the bug", &output, &fixes, &gen); got != agentGateSkipped {
+	if got, err := a.runDoneGateAtBreak(ctx, "fix the bug", &output, &fixes, &gen); err != nil || got != agentGateSkipped {
 		t.Fatalf("disabled policy: got %v, want agentGateSkipped", got)
 	}
 
 	a.SetDoneGatePolicy(donegate.Policy{Enabled: true, AutoFixAttempts: 1})
-	if got := a.runDoneGateAtBreak(ctx, "fix the bug", &output, &fixes, &gen); got != agentGateSkipped {
+	if got, err := a.runDoneGateAtBreak(ctx, "fix the bug", &output, &fixes, &gen); err != nil || got != agentGateSkipped {
 		t.Fatalf("nothing mutated: got %v, want agentGateSkipped", got)
 	}
 }

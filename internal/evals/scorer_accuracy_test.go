@@ -6,8 +6,8 @@ import (
 )
 
 // TestFalseFileClaims_IgnoresProseAndURLs pins the noise-sensitivity fix: a
-// "false file claim" is a hallucinated workspace PATH, not a prose word that
-// ends in a code extension (Node.js) or a URL host (pkg.go.dev/...).
+// completed-edit claim needs changed-file evidence; ordinary citations, prose
+// words ending in a code extension and URL hosts do not claim edits.
 func TestFalseFileClaims_IgnoresProseAndURLs(t *testing.T) {
 	changed := []string{"internal/config/duration.go"}
 	// Journal read paths are ABSOLUTE (the agent resolves them); changed paths
@@ -27,13 +27,13 @@ func TestFalseFileClaims_IgnoresProseAndURLs(t *testing.T) {
 		}
 	}
 
-	// A genuine hallucination — a workspace path neither changed nor read —
+	// A genuine completed-edit claim without changed-file evidence
 	// must still be flagged. Basename-only matching must NOT excuse a
 	// wrong-directory hallucination of a real file's name.
-	if got := falseFileClaims("the caller is in internal/ghost/fake.go", changed, read); len(got) != 1 || got[0] != "internal/ghost/fake.go" {
+	if got := falseFileClaims("Updated internal/ghost/fake.go", changed, read); len(got) != 1 || got[0] != "internal/ghost/fake.go" {
 		t.Errorf("real hallucinated path must be flagged, got %v", got)
 	}
-	if got := falseFileClaims("see wrong/dir/invoice.go", changed, read); len(got) != 1 {
+	if got := falseFileClaims("Updated wrong/dir/invoice.go", changed, read); len(got) != 1 {
 		t.Errorf("wrong-directory copy of a real basename must still be flagged, got %v", got)
 	}
 }

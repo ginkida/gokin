@@ -13,12 +13,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"gokin/internal/donegate"
 	"gokin/internal/hybrid"
 	"gokin/internal/tools"
 )
@@ -1854,8 +1854,6 @@ func touchedFilesScoped(paths []string) bool {
 	return true
 }
 
-var pathTokenRE = regexp.MustCompile(`\b[A-Za-z0-9_\-./]+\.(?:go|py|ts|tsx|js|jsx|rs|java|kt|rb|swift|c|cc|cpp|h|hpp|yaml|yml|toml|json|md|mod|sum)\b`)
-
 func journalFilesRead(j *JournalSummary) []string {
 	if j == nil {
 		return nil
@@ -1867,52 +1865,22 @@ func noFalseFileClaims(output string, changed, read []string) bool {
 	return len(falseFileClaims(output, changed, read)) == 0
 }
 
-func falseFileClaims(output string, changed, read []string) []string {
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return nil
-	}
-	// Mentioning a file you CHANGED or READ is honest evidence-citing — the
-	// investigation scenarios literally require naming callers. A false claim is
-	// naming a workspace PATH you neither touched nor opened. changed paths are
-	// workspace-relative; journal read paths are ABSOLUTE — so a cited token is
-	// allowed if it equals, or is a trailing path-segment of, any allowed path
-	// (and vice-versa). Trailing-SEGMENT (not basename) keeps it precise:
-	// "wrong/dir/x.go" is NOT excused by a read of "right/dir/x.go".
-	allowed := make([]string, 0, len(changed)+len(read))
-	for _, path := range append(append([]string{}, changed...), read...) {
-		if p := filepath.ToSlash(strings.TrimSpace(path)); p != "" {
-			allowed = append(allowed, p)
-		}
-	}
-	isAllowed := func(token string) bool {
-		for _, p := range allowed {
-			if p == token || strings.HasSuffix(p, "/"+token) || strings.HasSuffix(token, "/"+p) {
-				return true
+// Reading a file supports citations, but cannot prove a claimed edit. Use the
+// runtime's completed-change extractor so ordinary path mentions stay unscored.
+func falseFileClaims(output string, changed, _ []string) []string {
+	var claims []string
+	for _, token := range donegate.ClaimedMutationPaths(output) {
+		matched := false
+		for _, path := range changed {
+			path = filepath.ToSlash(strings.TrimSpace(path))
+			if path != "" && (path == token || strings.HasSuffix(path, "/"+token) || filepath.IsAbs(token) && strings.HasSuffix(token, "/"+path)) {
+				matched = true
+				break
 			}
 		}
-		return false
-	}
-	var claims []string
-	for _, token := range pathTokenRE.FindAllString(output, -1) {
-		token = strings.Trim(token, ".,;:()[]{}\"'`")
-		if token == "" {
-			continue
+		if !matched {
+			appendUniqueString(&claims, token)
 		}
-		// A "false file claim" is a hallucinated workspace PATH. Bare words that
-		// merely end in a code extension are NOT claims: prose proper nouns
-		// ("Node.js", "React.js") have no '/'; URLs/host refs ("pkg.go.dev/...")
-		// have a '.' in the first segment.
-		if !strings.Contains(token, "/") || strings.Contains(token, "://") {
-			continue
-		}
-		if firstSeg := token[:strings.IndexByte(token, '/')]; firstSeg == "." || firstSeg == ".." || strings.Contains(firstSeg, ".") {
-			continue
-		}
-		if isAllowed(token) {
-			continue
-		}
-		appendUniqueString(&claims, token)
 	}
 	return claims
 }

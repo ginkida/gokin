@@ -19,6 +19,7 @@ import (
 	"gokin/internal/app"
 	backgroundstore "gokin/internal/background"
 	"gokin/internal/chat"
+	"gokin/internal/lifecycle"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -31,6 +32,7 @@ type backgroundWorkerContext struct {
 	id    string
 	store *backgroundstore.Store
 	lease *backgroundstore.WorkerLease
+	trace *lifecycle.Trace
 }
 
 type steerableHeadlessRunner interface {
@@ -38,7 +40,11 @@ type steerableHeadlessRunner interface {
 	TrySteerHeadless(message string) bool
 }
 
-func beginBackgroundWorker() (*backgroundWorkerContext, error) {
+func beginBackgroundWorker(traces ...*lifecycle.Trace) (*backgroundWorkerContext, error) {
+	var trace *lifecycle.Trace
+	if len(traces) > 0 {
+		trace = traces[0]
+	}
 	id := strings.TrimSpace(os.Getenv(backgroundJobEnv))
 	if id == "" {
 		return nil, nil
@@ -46,6 +52,7 @@ func beginBackgroundWorker() (*backgroundWorkerContext, error) {
 	// A nested gokin launched by this worker is a normal independent process,
 	// not a second owner of the same durable job.
 	_ = os.Unsetenv(backgroundJobEnv)
+	trace.Phase("background_store")
 	store, err := backgroundstore.NewStore()
 	if err != nil {
 		return nil, fmt.Errorf("open background job store: %w", err)
@@ -53,15 +60,19 @@ func beginBackgroundWorker() (*backgroundWorkerContext, error) {
 	// Retry briefly: liveness probes (`gokin agents`, `gokin stop`) take this
 	// same exclusive lock for a moment, so a single non-blocking attempt could
 	// lose a race with a poll and make this worker fail to claim its own job.
+	trace.Phase("background_worker_lease")
 	lease, err := store.AcquireWorkerLeaseWithin(id, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("acquire background worker lease: %w", err)
 	}
-	if _, err := store.MarkRunning(id, os.Getpid()); err != nil {
+	trace.Phase("background_claim_publish")
+	running, err := store.MarkRunning(id, os.Getpid())
+	if err != nil {
 		_ = lease.Release()
 		return nil, fmt.Errorf("publish background worker state: %w", err)
 	}
-	return &backgroundWorkerContext{id: id, store: store, lease: lease}, nil
+	trace.IncludeLaunch(running.StartedAt)
+	return &backgroundWorkerContext{id: id, store: store, lease: lease, trace: trace}, nil
 }
 
 func (w *backgroundWorkerContext) setSessionID(sessionID string) error {
@@ -80,12 +91,39 @@ func (w *backgroundWorkerContext) finish(runErr error) {
 	if runErr != nil {
 		state, exitCode = backgroundstore.StateFailed, 1
 	}
-	if _, err := w.store.Finish(w.id, state, exitCode); err != nil {
+	w.trace.Phase("background_finalize")
+	var timing func() lifecycle.Timing
+	if w.trace != nil {
+		timing = w.trace.Finish
+	}
+	if _, err := w.store.FinishWithTiming(w.id, state, exitCode, timing); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to finalize background job metadata: %v\n", err)
 	}
 	if err := w.lease.Release(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to release background worker lease: %v\n", err)
 	}
+}
+
+func (w *backgroundWorkerContext) markTurn(start bool) error {
+	phase := "background_turn_end_publish"
+	if start {
+		phase = "background_turn_start_publish"
+	}
+	w.trace.Phase(phase)
+	_, err := w.store.Update(w.id, func(job *backgroundstore.Job) error {
+		now := time.Now()
+		if start {
+			job.TurnStartedAt, job.TurnEndedAt = &now, nil
+		} else {
+			job.TurnEndedAt = &now
+			if w.trace != nil {
+				measured := w.trace.Snapshot()
+				job.Timing = &measured
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 func runBackgroundHeadlessLoop(
@@ -106,6 +144,9 @@ func runBackgroundHeadlessLoop(
 	var claimedForTurn *backgroundstore.Control
 
 	for {
+		if err := worker.markTurn(true); err != nil {
+			return fmt.Errorf("publish background turn start: %w", err)
+		}
 		type turnResult struct {
 			err error
 		}
@@ -167,6 +208,9 @@ func runBackgroundHeadlessLoop(
 		// releasing its context now keeps one derived context per iteration
 		// from accumulating for the life of the worker.
 		cancelTurn()
+		if err := worker.markTurn(false); err != nil {
+			return fmt.Errorf("publish background turn end: %w", err)
+		}
 
 		outcome := "completed"
 		if result.err != nil {
@@ -549,7 +593,7 @@ func newBackgroundAgentsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	command.Flags().BoolVar(&asJSON, "json", false, "print jobs as JSON")
+	command.Flags().BoolVar(&asJSON, "json", false, "print jobs as JSON, including claim/turn timestamps and startup/run/shutdown timing")
 	command.Flags().BoolVar(&includeCompleted, "all", false, "include completed jobs")
 	command.Flags().StringVar(&cwd, "cwd", "", "filter by working directory (default current directory)")
 	return command
@@ -563,8 +607,8 @@ func newBackgroundLogsCmd() *cobra.Command {
 		Short: "Print output from a detached Gokin session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if lines < 1 || lines > 10_000 {
-				return fmt.Errorf("--lines must be between 1 and 10000")
+			if lines < 0 || lines > 10_000 {
+				return fmt.Errorf("--lines must be between 0 and 10000 (0 prints all lines)")
 			}
 			store, err := backgroundstore.NewStore()
 			if err != nil {
@@ -586,7 +630,7 @@ func newBackgroundLogsCmd() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVarP(&follow, "follow", "f", false, "follow output until the job exits")
-	command.Flags().IntVarP(&lines, "lines", "n", 200, "number of recent lines to print")
+	command.Flags().IntVarP(&lines, "lines", "n", 200, "number of recent lines to print (0 prints the entire log)")
 	return command
 }
 
@@ -998,6 +1042,10 @@ func printTail(w io.Writer, path string, lines int) error {
 		return err
 	}
 	defer file.Close()
+	if lines == 0 {
+		_, err = io.Copy(w, file)
+		return err
+	}
 	// Seek instead of reading the whole file: a long-running detached worker's
 	// JSONL log is unbounded, and reading it just to trim to the tail would
 	// make `gokin logs` allocate the entire file.
@@ -1050,7 +1098,10 @@ func followBackgroundLogs(ctx context.Context, stdout, stderr io.Writer, store *
 				return err
 			}
 			_, err = copyLogGrowth(stderr, stderrPath, stderrOffset)
-			return err
+			if err != nil {
+				return err
+			}
+			return backgroundTerminalError(current)
 		}
 		select {
 		case <-ctx.Done():

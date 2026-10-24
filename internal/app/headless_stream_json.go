@@ -28,6 +28,7 @@ type headlessOutputPresenter interface {
 type HeadlessStreamEvent struct {
 	SchemaVersion int            `json:"schema_version"`
 	Type          string         `json:"type"`
+	Timestamp     time.Time      `json:"timestamp"`
 	Sequence      uint64         `json:"sequence"`
 	SessionID     string         `json:"session_id,omitempty"`
 	Data          map[string]any `json:"data,omitempty"`
@@ -108,6 +109,7 @@ func (p *streamJSONPresenter) emit(eventType string, data map[string]any) {
 		return p.encoder.Encode(HeadlessStreamEvent{
 			SchemaVersion: HeadlessSchemaVersion,
 			Type:          eventType,
+			Timestamp:     time.Now().UTC(),
 			Sequence:      sequence,
 			SessionID:     p.sessionID,
 			Data:          data,

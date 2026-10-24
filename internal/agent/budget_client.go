@@ -415,6 +415,10 @@ func (c *invocationBudgetClient) SetTurnContext(value string) {
 	c.base.SetTurnContext(value)
 }
 
+func (c *invocationBudgetClient) ResetConversationCache() {
+	client.ResetConversationCache(c.base)
+}
+
 func (c *invocationBudgetClient) SetThinkingBudget(value int32) {
 	c.base.SetThinkingBudget(value)
 }

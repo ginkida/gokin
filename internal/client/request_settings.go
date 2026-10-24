@@ -252,6 +252,9 @@ func (c *requestSettingsClient) SetSystemInstruction(value string) {
 func (c *requestSettingsClient) SetTurnContext(value string) {
 	c.update(func(cl Client) { cl.SetTurnContext(value) })
 }
+func (c *requestSettingsClient) ResetConversationCache() {
+	c.update(ResetConversationCache)
+}
 func (c *requestSettingsClient) SetThinkingBudget(value int32) {
 	c.update(func(cl Client) { cl.SetThinkingBudget(value) })
 }

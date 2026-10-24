@@ -133,7 +133,11 @@ func prepareIsolatedWorkspace(baseWorkDir string, mode workspaceIsolationMode) (
 }
 
 func prepareReadOnlyIsolatedWorkspace(root string) (*isolatedWorkspace, error) {
-	if git.IsGitRepo(root) {
+	isRepo, err := git.CheckGitRepo(context.Background(), root)
+	if err != nil {
+		return nil, err
+	}
+	if isRepo {
 		ws, err := prepareGitWorktree(root, false)
 		if err == nil {
 			return ws, nil
@@ -145,8 +149,14 @@ func prepareReadOnlyIsolatedWorkspace(root string) (*isolatedWorkspace, error) {
 }
 
 func prepareApplyBackWorkspace(root string) (*isolatedWorkspace, error) {
-	if !git.IsGitRepo(root) {
-		return nil, fmt.Errorf("apply-back workspace isolation requires a git repository")
+	isRepo, err := git.CheckGitRepo(context.Background(), root)
+	if err != nil {
+		return nil, err
+	}
+	if !isRepo {
+		// Confirmed non-repositories retain primary-workspace delegation. Probe
+		// errors above still fail closed rather than silently dropping isolation.
+		return nil, nil
 	}
 	return prepareGitWorktree(root, true)
 }
@@ -238,10 +248,18 @@ func applySelectedGitWorkspaceChanges(baseWorkDir, isolatedWorkDir string, files
 }
 
 func applyGitWorkspaceChangesForPaths(baseWorkDir, isolatedWorkDir string, paths []string) (*isolatedWorkspaceApplyBackResult, error) {
-	if !git.IsGitRepo(baseWorkDir) {
+	baseRepo, err := git.CheckGitRepo(context.Background(), baseWorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if !baseRepo {
 		return nil, fmt.Errorf("base workspace is not a git repository")
 	}
-	if !git.IsGitRepo(isolatedWorkDir) {
+	isolatedRepo, err := git.CheckGitRepo(context.Background(), isolatedWorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if !isolatedRepo {
 		return nil, fmt.Errorf("isolated workspace is not a git repository")
 	}
 

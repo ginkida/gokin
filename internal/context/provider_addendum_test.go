@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestTrivialEditGuidancePreservesInvestigationVerification(t *testing.T) {
+	for _, provider := range []string{"glm", "deepseek"} {
+		t.Run(provider, func(t *testing.T) {
+			got := providerAddendum(provider)
+			for _, needle := range []string{"explicitly requested trivial edit", "Investigations still require", "tests/build before deciding"} {
+				if !strings.Contains(got, needle) {
+					t.Errorf("guidance missing %q", needle)
+				}
+			}
+		})
+	}
+}
+
 func TestProviderAddendum_NormalizesCase(t *testing.T) {
 	// SetProvider lowercases before storing; providerAddendum should be
 	// a pure map lookup on the exact family key.
@@ -25,6 +38,7 @@ func TestProviderAddendum_GLMNonEmpty(t *testing.T) {
 		"Plan:",
 		"Architecture-first",
 		"Read discipline",
+		"read it and edit immediately",
 		"Edit discipline",
 		"Verification discipline",
 		"Interruption handling",
@@ -60,6 +74,7 @@ func TestProviderAddendum_DeepSeekNonEmpty(t *testing.T) {
 		"evidence ledger",
 		"grep",
 		"targeted Read",
+		"read it and edit immediately",
 		"read-before-edit",
 		"delta-check",
 		"Verification discipline",

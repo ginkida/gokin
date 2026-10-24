@@ -142,6 +142,9 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			a.currentToolContext = ""
 			a.mu.Unlock()
 
+			if result.HookUpdatedInput != nil {
+				args = result.HookUpdatedInput
+			}
 			a.recordResponseTouchedPaths(name, args, result)
 			a.recordResponseCommand(name, args, result)
 			a.recordResponseEvidence(name, args, result)
@@ -173,6 +176,11 @@ func (a *App) buildExecutionHandler(projectMemory *appcontext.ProjectMemory) *to
 			a.safeGo("refresh-token-count", a.refreshTokenCount)
 		},
 		OnToolPolicyBlocked: func(name string, block tools.PolicyBlock) {
+			if block.Kind == tools.PolicyBlockPermission || block.Kind == tools.PolicyBlockPlan {
+				a.mu.Lock()
+				a.responsePermissionDenied = true
+				a.mu.Unlock()
+			}
 			// Interactive execution keeps its existing recoverable UX. During a
 			// headless invocation, however, a model's later prose must not turn a
 			// refused action into process exit 0.

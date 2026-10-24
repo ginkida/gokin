@@ -427,8 +427,8 @@ func (t *SSHTool) downloadFile(ctx context.Context, args map[string]any) (ToolRe
 		return NewErrorResult(fmt.Sprintf("download from %s failed: %s (check remote path exists)", config.Host, err)), nil
 	}
 
-	return NewSuccessResult(fmt.Sprintf("File downloaded successfully: %s@%s:%s -> %s",
-		config.User, config.Host, remotePath, localPath)), nil
+	return NewSuccessResultWithData(fmt.Sprintf("File downloaded successfully: %s@%s:%s -> %s",
+		config.User, config.Host, remotePath, localPath), map[string]any{"written_paths": []string{localPath}}), nil
 }
 
 func (t *SSHTool) listSessions() (ToolResult, error) {

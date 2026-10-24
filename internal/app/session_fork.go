@@ -25,6 +25,7 @@ func (a *App) SelectNewSessionID(newID string) error {
 		return fmt.Errorf("cannot replace the identity of a session that already contains work")
 	}
 	a.session.SetID(newID)
+	a.resetConversationCache()
 	if a.executor != nil {
 		a.executor.SetSessionID(newID)
 	}
@@ -90,6 +91,11 @@ func (a *App) ForkLoadedSession(newID string) error {
 			}
 		}, nil
 	})
+	// A commit-uncertain save can leave the fork visible despite returning an
+	// error. Never retain its parent's wire snapshots under that new identity.
+	if err == nil || a.session.GetID() != sourceID {
+		a.resetConversationCache()
+	}
 	if err != nil {
 		if !errors.Is(err, fileutil.ErrAtomicWriteCommitUncertain) {
 			checkpointRollback()

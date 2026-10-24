@@ -21,6 +21,7 @@ func DefaultRules() *Rules {
 			"env":                  LevelAllow,
 			"list_dir":             LevelAllow,
 			"todo":                 LevelAllow,
+			"update_scratchpad":    LevelAllow,
 			"git_status":           LevelAllow,
 			"git_log":              LevelAllow,
 			"git_diff":             LevelAllow,

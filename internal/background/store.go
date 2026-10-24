@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"gokin/internal/fileutil"
+	"gokin/internal/lifecycle"
 	"gokin/internal/securefs"
 
 	"github.com/google/uuid"
@@ -35,6 +36,10 @@ const (
 	startingGrace   = 10 * time.Second
 )
 
+const stateReadAttempts = 8
+
+var errStateFileReplaced = errors.New("background state file identity changed while opening")
+
 // Job is the durable, non-secret control record for one detached Gokin run.
 // Prompts, flags, provider credentials, and model output deliberately never
 // enter this file; stdout/stderr live in private append-only log files.
@@ -48,6 +53,11 @@ type Job struct {
 	StartedAt   time.Time `json:"started_at"`
 	EndedAt     time.Time `json:"ended_at,omitempty"`
 	ExitCode    int       `json:"exit_code,omitempty"`
+
+	RunningAt     *time.Time        `json:"running_at,omitempty"`
+	TurnStartedAt *time.Time        `json:"turn_started_at,omitempty"`
+	TurnEndedAt   *time.Time        `json:"turn_ended_at,omitempty"`
+	Timing        *lifecycle.Timing `json:"timing,omitempty"`
 	// PendingInput was accepted but never claimed. AmbiguousInput was claimed
 	// before a worker/turn ended without a delivery commit.
 	PendingInput   int `json:"pending_input,omitempty"`
@@ -341,7 +351,7 @@ func (s *Store) EnqueueControl(jobID, message string) (Control, error) {
 		return Control{}, err
 	}
 	defer lease.Release()
-	job, err := s.Load(jobID)
+	job, err := s.load(jobID, readPrivateRegular)
 	if err != nil {
 		return Control{}, err
 	}
@@ -433,7 +443,7 @@ func (s *Store) BeginFinishing(jobID string) (bool, error) {
 		return false, err
 	}
 	defer lease.Release()
-	job, err := s.Load(jobID)
+	job, err := s.load(jobID, readPrivateRegular)
 	if err != nil {
 		return false, err
 	}
@@ -552,11 +562,31 @@ func (s *Store) writeControl(control Control) error {
 }
 
 func (s *Store) Load(id string) (Job, error) {
+	return s.loadWithReader(id, readPrivateRegular)
+}
+
+func (s *Store) loadWithReader(id string, read func(string, int64) ([]byte, error)) (Job, error) {
+	job, err := s.load(id, read)
+	if !errors.Is(err, errStateFileReplaced) {
+		return job, err
+	}
+	// A busy worker may replace metadata on every optimistic attempt. Share its
+	// lock for the final read so legitimate writer churn never escapes as an
+	// identity error. Callers already holding this lock use load directly.
+	lease, err := s.acquireMetadataLease(id)
+	if err != nil {
+		return Job{}, err
+	}
+	defer lease.Release()
+	return s.load(id, read)
+}
+
+func (s *Store) load(id string, read func(string, int64) ([]byte, error)) (Job, error) {
 	path, err := s.jobPath(id)
 	if err != nil {
 		return Job{}, err
 	}
-	data, err := readPrivateRegular(path, maxJobFileBytes)
+	data, err := read(path, maxJobFileBytes)
 	if err != nil {
 		return Job{}, err
 	}
@@ -627,7 +657,7 @@ func (s *Store) Update(id string, mutate func(*Job) error) (Job, error) {
 		return Job{}, err
 	}
 	defer lease.Release()
-	job, err := s.Load(id)
+	job, err := s.load(id, readPrivateRegular)
 	if err != nil {
 		return Job{}, err
 	}
@@ -650,6 +680,8 @@ func (s *Store) MarkRunning(id string, pid int) (Job, error) {
 		}
 		job.PID = pid
 		job.State = StateRunning
+		now := time.Now()
+		job.RunningAt = &now
 		return nil
 	})
 }
@@ -662,6 +694,12 @@ func (s *Store) SetSessionID(id, sessionID string) (Job, error) {
 }
 
 func (s *Store) Finish(id, state string, exitCode int) (Job, error) {
+	return s.FinishWithTiming(id, state, exitCode, nil)
+}
+
+// FinishWithTiming captures shutdown after acquiring the metadata lock, and
+// publishes timings atomically with the terminal state.
+func (s *Store) FinishWithTiming(id, state string, exitCode int, timing func() lifecycle.Timing) (Job, error) {
 	if state != StateSucceeded && state != StateFailed {
 		return Job{}, fmt.Errorf("invalid worker terminal state %q", state)
 	}
@@ -673,6 +711,10 @@ func (s *Store) Finish(id, state string, exitCode int) (Job, error) {
 		}
 		job.ExitCode = exitCode
 		job.EndedAt = time.Now()
+		if timing != nil {
+			measured := timing()
+			job.Timing = &measured
+		}
 		if err := s.setControlCountsLocked(job); err != nil {
 			return err
 		}
@@ -796,6 +838,22 @@ func (s *Store) Reconcile(job Job) (Job, error) {
 }
 
 func readPrivateRegular(path string, limit int64) ([]byte, error) {
+	return readPrivateRegularWithOpen(path, limit, os.Open)
+}
+
+func readPrivateRegularWithOpen(path string, limit int64, open func(string) (*os.File, error)) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		data, err := readPrivateRegularOnce(path, limit, open)
+		if !errors.Is(err, errStateFileReplaced) || attempt == stateReadAttempts-1 {
+			return data, err
+		}
+		// Retry only the Lstat/Open replacement race. Each attempt closes its
+		// descriptor before backing off and repeats every validation.
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func readPrivateRegularOnce(path string, limit int64, open func(string) (*os.File, error)) ([]byte, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -803,14 +861,20 @@ func readPrivateRegular(path string, limit int64) ([]byte, error) {
 	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() > limit {
 		return nil, fmt.Errorf("background state path %q is not a bounded regular file", path)
 	}
-	file, err := os.Open(path)
+	file, err := open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	after, err := file.Stat()
-	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, fmt.Errorf("background state file identity changed while opening")
+	if err != nil {
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || after.Size() > limit {
+		return nil, fmt.Errorf("background state path %q is not a bounded regular file", path)
+	}
+	if !os.SameFile(before, after) {
+		return nil, errStateFileReplaced
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {

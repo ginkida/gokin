@@ -89,6 +89,8 @@ type ToolResult struct {
 
 	// Success indicates if the tool executed successfully.
 	Success bool
+	// VerificationSkipped distinguishes a successful no-op from a real check.
+	VerificationSkipped bool
 
 	// Execution metadata for user awareness
 	ExecutionSummary *ExecutionSummary // Summary of what was done

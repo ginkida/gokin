@@ -196,7 +196,12 @@ func (m *Manager) Close() error {
 	m.order = nil
 	m.mu.Unlock()
 	m.cancel()
-	<-m.watchDone
+	select {
+	case <-m.watchDone:
+	case <-time.After(2 * time.Second):
+		// Discovery may be stuck in a plugin filesystem read. The closed
+		// manager has withdrawn all servers, so late discovery cannot revive one.
+	}
 	for _, s := range servers {
 		s.close()
 	}

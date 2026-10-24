@@ -38,6 +38,8 @@ type SessionState struct {
 	Version           int64                    `json:"version"`
 	Summary           string                   `json:"summary,omitempty"`
 	Scratchpad        string                   `json:"scratchpad,omitempty"`
+	WorkingMemory     string                   `json:"working_memory,omitempty"`
+	SessionMemory     string                   `json:"session_memory,omitempty"`
 	SystemInstruction string                   `json:"system_instruction,omitempty"`
 	Branches          map[string]*SessionState `json:"branches,omitempty"`
 	Checkpoints       map[string]int           `json:"checkpoints,omitempty"`

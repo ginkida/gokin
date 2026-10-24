@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/permission"
 	"gokin/internal/tools"
 )
 
@@ -44,17 +45,23 @@ func requireCmd(bin, command string) string {
 }
 
 type Check struct {
-	Name     string
-	Evidence string
-	Run      func(context.Context) (tools.ToolResult, error)
+	Name                string
+	Evidence            string
+	Run                 func(context.Context) (tools.ToolResult, error)
+	VerificationSkipped bool
 }
 
 type Result struct {
-	Name        string
-	DisplayName string
-	Success     bool
-	Content     string
-	Error       string
+	Name           string
+	DisplayName    string
+	Success        bool
+	Content        string
+	Error          string
+	PolicyBlock    *tools.PolicyBlock
+	Skipped        bool
+	HookStopReason string
+	HookStopKind   string
+	stopErr        error
 }
 
 type doneGateTestTarget struct {
@@ -230,12 +237,14 @@ func BuildChecks(reg ToolGetter, workDir string, userMessage string, toolsUsed [
 		for _, moduleDir := range profile.MakeProjects {
 			name := "make_dry_run@" + relPathOrDot(workDir, moduleDir)
 			command := requireCmd("make", "make -n")
-			checks = appendUniqueDoneGateCheck(checks, seen, newBashCheckWithDir(
+			check := newBashCheckWithDir(
 				bashTool,
 				name,
 				moduleDir,
 				command,
-			))
+			)
+			check.VerificationSkipped = true
+			checks = appendUniqueDoneGateCheck(checks, seen, check)
 		}
 		for _, project := range profile.PHPProjects {
 			// Laravel / Symfony monorepos routinely have multiple
@@ -603,7 +612,12 @@ func newBashCheckWithDir(bashTool tools.Tool, name, dir, command string) Check {
 	}
 
 	wrapped := subshellCd(dir, command)
-	return newBashCheck(bashTool, name, wrapped)
+	check := newBashCheck(bashTool, name, wrapped)
+	run := check.Run
+	check.Run = func(ctx context.Context) (tools.ToolResult, error) {
+		return run(permission.ContextWithReadOnlyBashWrapper(ctx, wrapped, command))
+	}
+	return check
 }
 
 // subshellCd wraps a check command so its cd is confined to a subshell — gate
@@ -633,6 +647,7 @@ func newBashCheckWithTimeout(bashTool tools.Tool, name, dir, command string, tim
 		Name:     name,
 		Evidence: doneGateCheckEvidence(name, wrapped),
 		Run: func(ctx context.Context) (tools.ToolResult, error) {
+			ctx = permission.ContextWithReadOnlyBashWrapper(ctx, wrapped, command)
 			checkCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			return bashTool.Execute(checkCtx, map[string]any{
@@ -654,9 +669,38 @@ func RunChecks(ctx context.Context, checks []Check, checkTimeout time.Duration, 
 		if checkTimeout > 0 {
 			checkCtx, cancel = context.WithTimeout(ctx, checkTimeout)
 		}
+		checkCtx = tools.ContextWithVerificationCheck(checkCtx)
 		result, err := check.Run(checkCtx)
 		timedOut := errors.Is(checkCtx.Err(), context.DeadlineExceeded)
 		cancel()
+		status := "failed"
+		skipped := check.VerificationSkipped || result.VerificationSkipped || result.Success && strings.Contains(result.Content, "not found — skipping")
+		if command, ok := result.HookUpdatedInput["command"].(string); ok && !tools.IsVerificationCommand(command) {
+			skipped = true
+		}
+		switch {
+		case result.HookStopReason != "" || tools.IsHookStopError(err):
+			status = "not_run"
+		case result.PolicyBlock != nil:
+			status = "denied"
+		case skipped:
+			status = "not_run"
+		case err == nil && result.Success && !timedOut:
+			status = "passed"
+		}
+		if check.Name != "git_diff_check" && check.Name != "git_unmerged_paths" {
+			tools.RecordHeadlessVerification(ctx, check.Name, status)
+		}
+		if result.HookStopReason != "" {
+			results = append(results, Result{Name: check.Name, DisplayName: doneGateCheckDisplayName(check),
+				Error: result.HookStopReason, HookStopReason: result.HookStopReason, HookStopKind: result.HookStopKind})
+			break
+		}
+		if tools.IsHookStopError(err) {
+			results = append(results, Result{Name: check.Name, DisplayName: doneGateCheckDisplayName(check),
+				Error: err.Error(), stopErr: err})
+			break
+		}
 		if err != nil {
 			errMsg := strings.TrimSpace(err.Error())
 			if timedOut {
@@ -688,14 +732,47 @@ func RunChecks(ctx context.Context, checks []Check, checkTimeout time.Duration, 
 			Success:     result.Success,
 			Content:     content,
 			Error:       errContent,
+			PolicyBlock: result.PolicyBlock,
+			Skipped:     skipped,
 		})
-		if result.Success {
+		if result.Success && !skipped {
 			if onEvidence != nil {
 				onEvidence(check.Evidence)
 			}
 		}
 	}
 	return results
+}
+
+// StoppedError preserves terminal hook provenance across the check runner.
+func StoppedError(results []Result) error {
+	for _, result := range results {
+		if result.stopErr != nil {
+			return result.stopErr
+		}
+		if result.HookStopReason != "" {
+			return tools.HookStoppedError(tools.ToolResult{HookStopReason: result.HookStopReason, HookStopKind: result.HookStopKind})
+		}
+	}
+	return nil
+}
+
+// AllFailuresDenied distinguishes unavailable verification from broken code,
+// including interactive calls which have no headless permission state.
+func AllFailuresDenied(results []Result) bool {
+	denied := false
+	for _, result := range results {
+		if result.Success {
+			continue
+		}
+		block := result.PolicyBlock
+		if result.HookStopReason != "" || block == nil || block.Terminal ||
+			(block.Kind != tools.PolicyBlockPermission && block.Kind != tools.PolicyBlockPlan) {
+			return false
+		}
+		denied = true
+	}
+	return denied
 }
 
 func CountResults(results []Result) (passed, failed int) {

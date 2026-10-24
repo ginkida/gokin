@@ -84,7 +84,18 @@ func (w *WorkingMemoryManager) GetContent() string {
 	return w.content
 }
 
-// LoadFromDisk restores previously persisted working memory.
+// RestoreContent binds the live snapshot to a restored session. An empty
+// snapshot is intentional for new and legacy sessions without owned memory.
+func (w *WorkingMemoryManager) RestoreContent(content string) {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	w.mu.Lock()
+	w.content = boundContextMemoryContent(content, maxWorkingMemoryFileBytes)
+	w.mu.Unlock()
+}
+
+// LoadFromDisk reads the legacy workspace mirror. It has no session identity;
+// application startup must restore session-owned content instead.
 func (w *WorkingMemoryManager) LoadFromDisk() {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()

@@ -340,7 +340,7 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		return &Response{Allowed: false, Decision: DecisionDeny, Reason: "Tool requires approval; permission prompts are disabled for skill context rendering"}, nil
 	}
 	if dontAsk {
-		if !forceAsk && toolName == "bash" && IsReadOnlyBashArgs(args) {
+		if !forceAsk && toolName == "bash" && !isElevatedBash(toolName, args) && isReadOnlyBashInvocation(ctx, args) {
 			return &Response{Allowed: true, Decision: DecisionAllow}, nil
 		}
 		return &Response{

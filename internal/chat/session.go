@@ -64,6 +64,8 @@ type Session struct {
 	windowArchives          []HistoryWindowArchive
 	goalState               goals.State
 	scratchpad              string
+	workingMemory           string
+	sessionMemory           string
 	toolCheckpoints         []SerializedToolCheckpoint     // persisted tool checkpoint journal
 	pendingRecoveries       []SerializedPendingRecovery    // durable retry lineage, session-scoped
 	invocationLedger        *skills.InvocationLedger       // exact latest rendered Skills, session-scoped
@@ -310,6 +312,8 @@ func (s *Session) Clear() {
 	s.tokenCounts = make([]int, 0)
 	s.totalTokens = 0
 	s.title = ""
+	s.workingMemory = ""
+	s.sessionMemory = ""
 	if s.invocationLedger != nil {
 		s.invocationLedger.Clear()
 	}
@@ -752,6 +756,8 @@ func (s *Session) GetState() *SessionState {
 		TotalTokens:       s.totalTokens,
 		Version:           s.version,
 		Scratchpad:        s.scratchpad,
+		WorkingMemory:     s.workingMemory,
+		SessionMemory:     s.sessionMemory,
 		SystemInstruction: s.systemInstruction,
 	}
 	if s.invocationLedger != nil {
@@ -850,6 +856,8 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.totalTokens = state.TotalTokens
 	s.version = state.Version
 	s.scratchpad = state.Scratchpad
+	s.workingMemory = state.WorkingMemory
+	s.sessionMemory = state.SessionMemory
 	s.systemInstruction = state.SystemInstruction
 	if s.invocationLedger == nil {
 		s.invocationLedger = skills.NewInvocationLedger()

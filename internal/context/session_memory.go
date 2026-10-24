@@ -38,8 +38,8 @@ func DefaultSessionMemoryConfig() SessionMemoryConfig {
 }
 
 // SessionMemoryManager maintains a structured summary of the current session.
-// It periodically extracts key information from the conversation history and
-// writes it to .gokin/.session-memory.md for injection into per-turn context.
+// The app persists resumable snapshots with the owning session. The workspace
+// markdown file is a diagnostic mirror, never a source for new sessions.
 type SessionMemoryManager struct {
 	workDir string
 	config  SessionMemoryConfig
@@ -74,7 +74,9 @@ type SessionMemoryManager struct {
 	projectLearning *memory.ProjectLearning
 
 	// Extracted content
-	content string
+	content           string
+	sessionID         string
+	sessionGeneration uint64
 	// contentGeneration advances whenever a synchronous/newer lifecycle event
 	// replaces content. Async LLM writers capture the generation they started
 	// from and may commit only while it is still current; otherwise an older
@@ -232,12 +234,15 @@ func (s *SessionMemoryManager) ExtractAsync(history []*genai.Content, currentTok
 }
 
 func (s *SessionMemoryManager) ExtractAsyncWithContext(ctx context.Context, history []*genai.Content, currentTokens int) {
+	s.mu.RLock()
+	generation := s.sessionGeneration
+	s.mu.RUnlock()
 	snapshot := make([]*genai.Content, len(history))
 	copy(snapshot, history)
 	s.asyncWG.Add(1)
 	run := func() {
 		defer s.asyncWG.Done()
-		s.extractWithContext(ctx, snapshot, currentTokens)
+		s.extractForSession(ctx, snapshot, currentTokens, generation)
 	}
 	if client.AuxiliaryRequestsBounded(ctx) {
 		run()
@@ -276,6 +281,13 @@ func (s *SessionMemoryManager) Extract(history []*genai.Content, currentTokens i
 }
 
 func (s *SessionMemoryManager) extractWithContext(ctx context.Context, history []*genai.Content, currentTokens int) {
+	s.mu.RLock()
+	generation := s.sessionGeneration
+	s.mu.RUnlock()
+	s.extractForSession(ctx, history, currentTokens, generation)
+}
+
+func (s *SessionMemoryManager) extractForSession(ctx context.Context, history []*genai.Content, currentTokens int, generation uint64) {
 	if len(history) < 4 {
 		return // Too little history
 	}
@@ -340,6 +352,10 @@ func (s *SessionMemoryManager) extractWithContext(ctx context.Context, history [
 	durableLearnings := extractDurableSessionLearnings(history)
 
 	s.mu.Lock()
+	if s.sessionGeneration != generation {
+		s.mu.Unlock()
+		return
+	}
 	s.extractionCount++
 	s.lastExtractionTokens = currentTokens
 	s.toolCallsSinceUpdate = 0
@@ -531,7 +547,32 @@ func (s *SessionMemoryManager) GetContent() string {
 	return s.content
 }
 
-// LoadFromDisk loads previously saved session memory.
+// RestoreForSession replaces the current owner and invalidates older async
+// extractions without waiting for a model call. It never reads workspace mirrors.
+func (s *SessionMemoryManager) RestoreForSession(id, content string) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionID = id
+	s.content = boundContextMemoryContent(content, maxSessionMemoryFileBytes)
+	s.sessionGeneration++
+	s.contentGeneration++
+	s.initialized = strings.TrimSpace(s.content) != ""
+	s.lastExtractionTokens = 0
+	s.toolCallsSinceUpdate = 0
+	s.extractionCount = 0
+}
+
+// Snapshot returns content and owner atomically for session persistence.
+func (s *SessionMemoryManager) Snapshot() (id, content string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessionID, s.content
+}
+
+// LoadFromDisk reads the legacy workspace mirror, which has no session identity.
+// Application startup must restore session-owned content instead.
 func (s *SessionMemoryManager) LoadFromDisk() {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -554,17 +595,23 @@ func (s *SessionMemoryManager) LoadFromDisk() {
 // Clear resets session memory (e.g., on new session).
 func (s *SessionMemoryManager) Clear() {
 	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	s.content = ""
+	s.sessionGeneration++
 	s.contentGeneration++
 	s.initialized = false
 	s.lastExtractionTokens = 0
 	s.toolCallsSinceUpdate = 0
 	s.extractionCount = 0
+	onUpdate := s.onUpdate
 	s.mu.Unlock()
 	if err := removeContextMemoryFile(s.workDir, sessionMemoryFilename); err != nil {
 		logging.Debug("failed to remove session memory", "error", err)
+	}
+	s.writeMu.Unlock()
+	// Clear the resumable snapshot too. Call outside both locks, like extraction.
+	if onUpdate != nil {
+		onUpdate()
 	}
 }
 

@@ -885,6 +885,7 @@ This lets the user redirect before you commit to the wrong approach. If the user
 
 Read discipline:
 - Call Read on the exact file before its first Edit; auto-included related-file previews do not satisfy the read-before-edit check. Do not edit from grep snippets alone.
+- Only for an explicitly requested trivial edit in a named file: read it and edit immediately; avoid unrelated repo-wide searches. Investigations still require tracing usages and tests/build before deciding.
 - Batch independent Reads in parallel. Do not serialise Reads that don't depend on each other.
 - Do not re-read a file already loaded this session unless you changed it.
 - Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
@@ -919,6 +920,7 @@ Project-map discipline:
 
 Read discipline:
 - You MUST Read a file before Edit. The edit tool blocks edits on unread files (read-before-edit invariant). Don't edit from grep snippets.
+- Only for an explicitly requested trivial edit in a named file: read it and edit immediately; avoid unrelated repo-wide searches. Investigations still require tracing usages and tests/build before deciding.
 - Do not Re-read a file already loaded this session unless it changed.
 - Edit results include the updated region — never Read a file just to verify an edit; verify by building/testing instead.
 - Prefer: grep → targeted Read (with offset/limit). Avoid: glob → bulk Read of whole directory.

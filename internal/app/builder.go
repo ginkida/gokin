@@ -23,6 +23,7 @@ import (
 	"gokin/internal/git"
 	"gokin/internal/harness"
 	"gokin/internal/hooks"
+	"gokin/internal/lifecycle"
 	"gokin/internal/logging"
 	"gokin/internal/loops"
 	"gokin/internal/lsp"
@@ -162,6 +163,7 @@ type Builder struct {
 // BuildOptions controls behavior that must be selected before any application
 // components are initialized.
 type BuildOptions struct {
+	Lifecycle *lifecycle.Trace
 	// NonInteractive guarantees that application construction never prompts on
 	// stdin, writes human-oriented messages to stdout, or starts an implicit
 	// model download. It is intended for headless/automation callers.
@@ -217,43 +219,54 @@ func NewBuilderWithOptions(cfg *config.Config, workDir string, options BuildOpti
 // Build constructs the App instance, returning any errors encountered.
 func (b *Builder) Build() (*App, error) {
 	// Initialize core components
+	b.options.Lifecycle.Phase("config_dir")
 	if err := b.initConfigDir(); err != nil {
 		b.addError(err)
 	}
 	// Check allowed directories BEFORE creating tools and validators
 	// This ensures permissions are loaded before PathValidator is created
+	b.options.Lifecycle.Phase("workspace_policy")
 	if err := b.checkAllowedDirs(); err != nil {
 		b.addError(err)
 	}
+	b.options.Lifecycle.Phase("client_init")
 	if err := b.initClient(); err != nil {
 		b.addError(err)
 		return nil, b.finalizeError()
 	}
 	// Validate Ollama model availability (auto-pull if missing)
+	b.options.Lifecycle.Phase("ollama_health")
 	if err := b.validateOllamaModel(); err != nil {
 		b.addError(err)
 		return nil, b.finalizeError()
 	}
+	b.options.Lifecycle.Phase("tools_init")
 	if err := b.initTools(); err != nil {
 		b.addError(err)
 	}
+	b.options.Lifecycle.Phase("session_init")
 	if err := b.initSession(); err != nil {
 		b.addError(err)
 	}
+	b.options.Lifecycle.Phase("managers_init")
 	if err := b.initManagers(); err != nil {
 		b.addError(err)
 	}
+	b.options.Lifecycle.Phase("integrations_init")
 	if err := b.initIntegrations(); err != nil {
 		b.addError(err)
 	}
+	b.options.Lifecycle.Phase("ui_init")
 	if err := b.initUI(); err != nil {
 		b.addError(err)
 	}
+	b.options.Lifecycle.Phase("wire_dependencies")
 	if err := b.wireDependencies(); err != nil {
 		b.addError(err)
 		return nil, b.finalizeError()
 	}
 
+	b.options.Lifecycle.Phase("assemble_app")
 	application := b.assembleApp()
 	application.startPluginStartupRefresh(b.pluginStartupRefresh)
 	return application, nil
@@ -874,7 +887,7 @@ func (b *Builder) initSession() error {
 		}
 		b.sessionMemory = appcontext.NewSessionMemoryManager(b.workDir, smConfig)
 		b.sessionMemory.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
-		b.sessionMemory.LoadFromDisk()
+		b.sessionMemory.RestoreForSession(b.session.GetID(), "")
 		b.sessionMemory.SetSummarizer(appcontext.NewClientSessionSummarizer(b.mainClient))
 		if b.projectLearning != nil {
 			b.sessionMemory.SetProjectLearning(b.projectLearning)
@@ -882,7 +895,6 @@ func (b *Builder) initSession() error {
 		b.promptBuilder.SetSessionMemory(b.sessionMemory)
 
 		b.workingMemory = appcontext.NewWorkingMemoryManager(b.workDir)
-		b.workingMemory.LoadFromDisk()
 		b.promptBuilder.SetWorkingMemory(b.workingMemory)
 	}
 
@@ -1161,7 +1173,9 @@ func (b *Builder) initManagers() error {
 		b.hooksManager.ConfigureClaudePlugins(b.options.PluginDirs)
 	}
 	b.hooksManager.ConfigureClaudeSettings(b.workDir, userSettingsDir, workspaceTrusted)
+	b.options.Lifecycle.Phase("plugin_cache_sync")
 	b.syncStartupPlugins(userSettingsDir, workspaceTrusted)
+	b.options.Lifecycle.Phase("managers_init")
 	if err := b.hooksManager.RefreshClaudeSettings(); err != nil {
 		if len(b.options.PluginDirs) > 0 {
 			return fmt.Errorf("load plugins: %w", err)
@@ -1867,9 +1881,11 @@ func (b *Builder) initIntegrations() error {
 	if err := b.initMCP(); err != nil {
 		return err
 	}
+	b.options.Lifecycle.Phase("lsp_discovery")
 	if err := b.initLSP(); err != nil {
 		return err
 	}
+	b.options.Lifecycle.Phase("integrations_init")
 
 	return nil
 }
@@ -2044,6 +2060,7 @@ func (b *Builder) initMCP() error {
 	}
 
 	var connectErr error
+	b.options.Lifecycle.Phase("mcp_connect")
 	if err := b.mcpManager.ConnectAll(b.ctx); err != nil {
 		connectErr = err
 		logging.Warn("some MCP servers failed to connect", "error", err)
@@ -2472,6 +2489,7 @@ func (b *Builder) wireDependencies() error {
 	// which would re-bill the whole prefix on caching providers.
 	if app.sessionMemory != nil {
 		app.sessionMemory.SetOnUpdate(func() {
+			app.persistSessionMemory()
 			app.pushTurnContext()
 			app.safeSendToProgram(ui.LearningInsightMsg{Message: "Session memory updated"})
 		})

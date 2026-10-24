@@ -4,8 +4,50 @@ import (
 	"fmt"
 	"strings"
 
+	"gokin/internal/client"
 	appcontext "gokin/internal/context"
+	"gokin/internal/logging"
 )
+
+func (a *App) resetConversationCache() {
+	if a != nil {
+		client.ResetConversationCache(a.clientSnapshot())
+		a.restoreConversationMemory()
+	}
+}
+
+func (a *App) restoreConversationMemory() {
+	if a.session == nil {
+		return
+	}
+	id, working, summary := a.session.ContextMemory()
+	if a.workingMemory != nil {
+		a.workingMemory.RestoreContent(working)
+	}
+	if a.sessionMemory != nil {
+		a.sessionMemory.RestoreForSession(id, summary)
+	}
+	if a.memoryStore != nil && a.memoryStore.ClearSession() > 0 && a.promptBuilder != nil {
+		a.promptBuilder.Invalidate()
+	}
+	a.setRelevantMemoryContext("")
+}
+
+func (a *App) persistSessionMemory() {
+	if a.session == nil || a.sessionMemory == nil {
+		return
+	}
+	// Serialize snapshot and persistence with clear/resume/provider boundaries.
+	// The same session ID can own a new conversation after a root reset.
+	a.sessionLeaseMu.Lock()
+	defer a.sessionLeaseMu.Unlock()
+	id, content := a.sessionMemory.Snapshot()
+	if a.session.SetSessionMemory(id, content) && a.sessionManager != nil {
+		if err := a.sessionManager.SaveAfterMessage(); err != nil {
+			logging.Debug("failed to save extracted session memory", "error", err)
+		}
+	}
+}
 
 func (a *App) updateWorkingMemoryFromTurn(userMessage, response string) {
 	if a == nil || a.workingMemory == nil {
@@ -21,6 +63,9 @@ func (a *App) updateWorkingMemoryFromTurn(userMessage, response string) {
 	}
 	if !a.workingMemory.UpdateFromTurn(turn) {
 		return
+	}
+	if a.session != nil {
+		a.session.SetWorkingMemory(a.workingMemory.GetContent())
 	}
 
 	// Roadmap #7: working memory is delivered as per-turn context OUTSIDE the

@@ -16,6 +16,7 @@ import (
 	"gokin/internal/commands"
 	"gokin/internal/goals"
 	"gokin/internal/hooks"
+	"gokin/internal/lifecycle"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 )
@@ -93,6 +94,7 @@ const (
 // Nil writers use the process stdout/stderr. Callers that intentionally want
 // to discard a stream should pass io.Discard explicitly.
 type HeadlessOptions struct {
+	Lifecycle *lifecycle.Trace
 	// StrictPermissions makes the first ordinary tool denial terminal.
 	StrictPermissions bool
 	// PermissionMode labels denial diagnostics; CLI config enforces the mode.
@@ -168,6 +170,11 @@ type HeadlessResult struct {
 	Cost              HeadlessCost             `json:"cost"`
 	DurationMS        int64                    `json:"duration_ms"`
 	Warnings          []string                 `json:"warnings,omitempty"`
+
+	Verification  tools.VerificationSummary `json:"verification"`
+	Incomplete    bool                      `json:"incomplete"`
+	ClaimMismatch bool                      `json:"claim_mismatch,omitempty"`
+	Timing        lifecycle.Timing          `json:"timing"`
 }
 
 // RunHeadless executes one user prompt through the normal request pipeline
@@ -188,7 +195,21 @@ func (a *App) RunHeadless(ctx context.Context, prompt string) error {
 // diagnostics and persistence warnings remain on stderr.
 func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts HeadlessOptions) (HeadlessResult, error) {
 	started := time.Now()
+	trace := opts.Lifecycle
+	ownedTrace := trace == nil
+	if ownedTrace {
+		trace = lifecycle.New(nil)
+	}
+	trace.StartTurn()
+	defer func() {
+		trace.EndTurn()
+		if ownedTrace {
+			trace.Finish()
+		}
+	}()
 	result := HeadlessResult{
+		Verification:      tools.VerificationSummary{Status: "not_run"},
+		Incomplete:        true,
 		PermissionDenials: []tools.PermissionDenial{},
 		FilesChanged:      []string{},
 		SchemaVersion:     HeadlessSchemaVersion,
@@ -218,6 +239,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 		result.Error = &HeadlessError{Kind: kind, Message: failure.Error()}
 		result.DurationMS = time.Since(started).Milliseconds()
+		result.Timing = trace.Snapshot()
 		if a != nil && a.session != nil {
 			result.SessionID = a.session.GetID()
 		}
@@ -552,6 +574,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	a.restoreHeadlessDirect(claim)
 	result.Result = selectHeadlessResult(sp.Result(), a.headlessFinalResultSnapshot())
 
+	trace.Phase("async_hook_cleanup")
 	a.closeAsyncHooks()
 	// Persist the turn SYNCHRONOUSLY so a subsequent headless resume continues
 	// this conversation. The normal SaveAfterMessage path is async +
@@ -562,6 +585,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// stdout/JSON for inspection, while the process fails closed.
 	var saveErr error
 	if a.sessionManager != nil {
+		trace.Phase("session_save")
 		// Terminal paths such as a failed done-gate or recovered panic return
 		// before message_processor's normal checkpoint sync. Persist the executor
 		// journal first so an exact resume cannot repeat a mutation that already
@@ -585,6 +609,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// counts are lost in exactly the mode that runs evals and scripts — the
 	// traffic the measurement most needs. A telemetry failure must not change
 	// the headless exit status, so this is logged, not returned.
+	trace.Phase("tool_usage_flush")
 	if err := a.toolUsage.Flush(); err != nil {
 		logging.Debug("tool usage ledger flush failed in headless", "error", err)
 	}
@@ -676,6 +701,8 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		result.Cost.Tracked = !errors.Is(runErr, tools.ErrCostUnavailable)
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
+	trace.Phase("result_encoding")
+	result.Timing = trace.Snapshot()
 	result.SessionID = a.session.GetID()
 	a.journalEvent("headless_metrics", map[string]any{
 		"input_tokens":            result.Usage.InputTokens,
@@ -700,10 +727,34 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 
 	result.PermissionDenials = permissionState.Denials()
+	result.Verification = permissionState.Verification()
+	a.mu.Lock()
+	checkClaims := a.responseClaimRequested
+	a.mu.Unlock()
+	// Schema correction may replace an earlier claim or introduce a new one.
+	// Judge the final emitted answer even when the correction budget is spent.
+	if checkClaims {
+		result.ClaimMismatch = len(a.absentMutationClaim(runCtx, result.Result)) > 0
+	}
+	if result.ClaimMismatch && format == HeadlessOutputText {
+		fmt.Fprintln(opts.Stderr, "Warning: claim mismatch — the final answer claims file changes, but no successful mutation was recorded.")
+	}
+	unfinished, _ := tools.IncompleteTodoSummary(a.registry)
+	result.Incomplete = result.ClaimMismatch || result.Status != "success" || unfinished > 0 || permissionState.Incomplete()
+	for _, denial := range result.PermissionDenials {
+		if tools.IsImplementationTool(denial.Tool) {
+			result.Incomplete = true
+		}
+	}
 	a.mu.Lock()
 	result.FilesChanged = append([]string{}, a.headlessFilesChanged...)
 	a.mu.Unlock()
 	sort.Strings(result.FilesChanged)
+	if format == HeadlessOutputText && len(result.FilesChanged) > 0 && result.Verification.Status != "passed" {
+		if _, err := fmt.Fprintf(opts.Stderr, "Not verified: %s (see JSON verification checks for details).\n", result.Verification.Status); err != nil {
+			return result, errors.Join(runErr, err)
+		}
+	}
 	if opts.Brief && opts.JSONSchema == nil {
 		result.Result = strings.Join(strings.Fields(result.Result), " ")
 	}
@@ -925,7 +976,7 @@ func (a *App) headlessInvocationMetricsSnapshot() (HeadlessUsage, HeadlessCost) 
 // is a no-op for interactive turns and latches only the first failure in the
 // active headless invocation.
 func (a *App) recordHeadlessPolicyFailure(toolName string, block tools.PolicyBlock) {
-	if block.Recoverable {
+	if block.Recoverable || a.advisoryCorrectionActive.Load() {
 		return
 	}
 	// Failing closed here is deliberate: a model reaching for a tool during a

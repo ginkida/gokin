@@ -359,6 +359,13 @@ type App struct {
 	responseCommands      []string
 	responseEvidence      responseEvidenceLedger
 
+	responseClaimMismatch            bool
+	responseClaimCorrectionAttempted bool
+	responsePermissionDenied         bool
+	responseAgentScope               agent.InvocationScope
+	responseClaimRequested           bool
+	responseClaimBaseline            *claimWorkspaceSnapshot
+
 	// Session persistence
 	sessionManager *chat.SessionManager
 	// sessionLeaseMu serializes ownership changes for the active persisted
@@ -511,6 +518,9 @@ type App struct {
 	// that as the invocation's policy failure reported `policy_blocked` to the
 	// user and discarded an answer the next correction might well have fixed.
 	structuredCorrectionActive atomic.Bool
+	// A refused tool in a schema-stage advisory must leave the valid answer
+	// successful; tools are prohibited because completion gates already ran.
+	advisoryCorrectionActive atomic.Bool
 
 	// presenter is WHERE agent output goes (agent_events.go). The builder
 	// installs the TUI presenter; RunHeadless swaps in the stdout presenter.
@@ -2172,6 +2182,7 @@ func (a *App) clientSnapshot() client.Client {
 // the clientMu write so background clientSnapshot readers can't observe a torn
 // value. Order a.mu -> clientMu is preserved.
 func (a *App) setClientLocked(c client.Client) {
+	client.ResetConversationCache(c)
 	a.clientMu.Lock()
 	a.client = c
 	a.clientMu.Unlock()
@@ -3140,6 +3151,7 @@ func (a *App) restoreLoadedSession(state *chat.SessionState, info *chat.SessionI
 		_ = tools.RestoreSkillHooks(a.registry, a.hooksManager)
 		return errors.Join(fmt.Errorf("failed to restore required skill hooks: %w", err), rollbackErr)
 	}
+	a.resetConversationCache()
 
 	a.mu.Lock()
 	a.scratchpad = a.session.GetScratchpad()

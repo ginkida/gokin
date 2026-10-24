@@ -101,6 +101,7 @@ func (a *App) replaceConversationRootWithReason(rebuild func(), preserveGoal boo
 		if !preserveGoal {
 			a.invalidateSessionStartLocked()
 		}
+		a.resetConversationCache()
 		a.runSessionEndLocked(ending)
 		a.startSessionStartLocked(sessionStartResetSource(preserveGoal), !preserveGoal)
 		a.sessionLeaseMu.Unlock()
@@ -141,6 +142,7 @@ func (a *App) replaceConversationRootWithReason(rebuild func(), preserveGoal boo
 	if transactionErr != nil && !errors.Is(transactionErr, fileutil.ErrAtomicWriteCommitUncertain) {
 		return 0, transactionErr
 	}
+	a.resetConversationCache()
 	if !preserveGoal {
 		a.invalidateSessionStartLocked()
 	}

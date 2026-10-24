@@ -135,7 +135,9 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 	case "node":
 		checkName, cmd = t.nodeVerificationCommand(verifyCtx, targetDir)
 		if cmd == nil {
-			return NewSuccessResult("Verification skipped: Node project has no build/lint/typecheck/check script in package.json"), nil
+			result := NewSuccessResult("Verification skipped: Node project has no build/lint/typecheck/check script in package.json")
+			result.VerificationSkipped = true
+			return result, nil
 		}
 	case "python":
 		checkName = "python3 -m compileall -q ."

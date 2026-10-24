@@ -179,6 +179,19 @@ func (a *App) correctHeadlessStructuredOutput(ctx context.Context, schema *Struc
 		}
 		value, err := schema.Validate(result.Result)
 		if err == nil {
+			// A format correction can introduce an absent-edit claim. It shares
+			// the same single correction allowance as the primary answer.
+			var usage turnUsageAccumulator
+			corrected := result.Result
+			a.correctAbsentMutationClaim(withStructuredOutputCorrection(ctx), memoryQuery, &corrected, &usage)
+			usage.commit(a)
+			if corrected != result.Result {
+				if correctedValue, correctionErr := schema.Validate(corrected); correctionErr == nil {
+					result.Result = corrected
+					a.recordHeadlessFinalResult(corrected)
+					value = correctedValue
+				}
+			}
 			result.StructuredOutput = &value
 			return nil
 		}

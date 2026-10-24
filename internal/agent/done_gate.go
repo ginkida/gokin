@@ -139,45 +139,60 @@ func (a *Agent) mutationGeneration() int {
 // (e.g. after a claim-correction turn that only re-read files) doesn't re-run
 // the same checks — while a re-edit of an already-touched file still bumps the
 // generation and forces a re-check.
-func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *strings.Builder, fixes *int, checkedAtGen *int) agentGateOutcome {
+func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *strings.Builder, fixes *int, checkedAtGen *int) (agentGateOutcome, error) {
 	policy := a.doneGatePolicySnapshot()
 	if policy == nil || !policy.Enabled {
-		return agentGateSkipped
+		return agentGateSkipped, nil
 	}
 	// Agent being interrupted/canceled: don't run verification checks or inject
 	// a fix turn on a dying context — the checks would fail spuriously and the
 	// fix turn is pointless (the next loop iteration returns on ctx.Done). Skip;
 	// partial work is preserved by the caller.
 	if ctx.Err() != nil {
-		return agentGateSkipped
+		return agentGateSkipped, nil
 	}
 	touched := a.GetTouchedPaths()
 	if len(touched) == 0 {
-		return agentGateSkipped
+		return agentGateSkipped, nil
 	}
 	gen := a.mutationGeneration()
 	if *checkedAtGen == gen {
-		return agentGatePassed
+		return agentGatePassed, nil
 	}
 	toolsUsed := a.GetToolsUsed()
 	if !donegate.ShouldEnforce(prompt, toolsUsed) {
-		return agentGateSkipped
+		return agentGateSkipped, nil
 	}
 
 	profile := donegate.DetectProfileWithTouchedPaths(a.workDir, touched)
-	checks := donegate.BuildChecks(a.registry, a.workDir, prompt, toolsUsed, profile, *policy)
+	reg := donegate.WithToolInvoker(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
+		return a.executeNestedToolResultSafely(ctx, &genai.FunctionCall{ID: "done-gate-" + generateAgentID(), Name: name, Args: args}), nil
+	})
+	checks := donegate.BuildChecks(reg, a.workDir, prompt, toolsUsed, profile, *policy)
 	if len(checks) == 0 {
-		return agentGateSkipped
+		return agentGateSkipped, nil
 	}
 
 	logging.Info("sub-agent done-gate: running checks",
 		"agent_id", a.ID, "type", a.Type, "checks", len(checks), "touched", len(touched))
 	results := donegate.RunChecks(ctx, checks, policy.CheckTimeout, nil, nil)
+	if ctx.Err() != nil {
+		return agentGateSkipped, nil
+	}
+	if err := donegate.StoppedError(results); err != nil {
+		return agentGateSkipped, err
+	}
+	if err := tools.PermissionStopError(ctx); err != nil {
+		return agentGateSkipped, err
+	}
+	if donegate.AllFailuresDenied(results) {
+		return agentGateSkipped, nil
+	}
 	if donegate.Passed(results) {
 		*checkedAtGen = gen
 		logging.Info("sub-agent done-gate passed",
 			"agent_id", a.ID, "checks", len(results), "fix_turns", *fixes)
-		return agentGatePassed
+		return agentGatePassed, nil
 	}
 
 	var failed []donegate.Result
@@ -196,7 +211,7 @@ func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *s
 		a.safeOnText(marker)
 		logging.Warn("sub-agent done-gate: fix budget exhausted, finishing with failure marker",
 			"agent_id", a.ID, "failed_checks", len(failed), "fix_turns", *fixes)
-		return agentGateExhausted
+		return agentGateExhausted, nil
 	}
 
 	*fixes++
@@ -206,7 +221,7 @@ func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *s
 	a.stateMu.Unlock()
 	logging.Info("sub-agent done-gate: checks failed, fix turn injected",
 		"agent_id", a.ID, "failed_checks", len(failed), "attempt", *fixes, "max", maxFixes)
-	return agentGateFixInjected
+	return agentGateFixInjected, nil
 }
 
 // injectClaimCorrectionIfNeeded verifies the agent's final summary against

@@ -48,10 +48,11 @@ var planModeReadOnlyTools = map[string]bool{
 	"lsp":              true,
 
 	// User interaction / todos (surface, don't mutate disk)
-	"ask_user":        true,
-	"todo":            true,
-	"task_output":     true,
-	"get_plan_status": true,
+	"ask_user":          true,
+	"todo":              true,
+	"update_scratchpad": true,
+	"task_output":       true,
+	"get_plan_status":   true,
 
 	// Dedicated read-only memory/history surface. Mixed-action tools such as
 	// memory and pin_context are excluded because their write actions cannot be

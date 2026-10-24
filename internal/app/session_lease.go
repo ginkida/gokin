@@ -270,6 +270,7 @@ func (a *App) switchSession(ctx context.Context, selected *chat.SessionState, fo
 	tools.ResetSkillPermissionGrants(a.registry)
 	targetLeaseOwned = false
 	switchPublished = true
+	a.resetConversationCache()
 	a.invalidateSessionStartLocked()
 	a.stopGoalTimer()
 	a.runSessionEndLocked(ending)

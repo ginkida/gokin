@@ -100,8 +100,10 @@ type StdioTransport struct {
 	encoder *json.Encoder
 	scanner *bufio.Scanner
 
-	mu     sync.Mutex
-	closed bool
+	mu       sync.Mutex
+	closed   bool
+	sendOnce sync.Once
+	sendGate chan struct{}
 
 	// For stderr logging
 	stderrDone chan struct{}
@@ -264,18 +266,56 @@ func (t *StdioTransport) logStderr() {
 
 // Send sends a JSON-RPC message to the server.
 func (t *StdioTransport) Send(msg *JSONRPCMessage) error {
+	return t.SendContext(context.Background(), msg)
+}
+
+// SendContext bounds pipe writes as well as response waits. A server that
+// stops reading stdin must not hold startup past its handshake deadline.
+func (t *StdioTransport) SendContext(parent context.Context, msg *JSONRPCMessage) error {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t.sendOnce.Do(func() { t.sendGate = make(chan struct{}, 1) })
+	select {
+	case t.sendGate <- struct{}{}:
+		defer func() { <-t.sendGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if t.closed {
 		return fmt.Errorf("transport is closed")
 	}
+	// Only the active writer may tear down its pipe. Join a running callback
+	// before releasing ownership so it cannot close a subsequent send's pipe.
+	cancelled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(cancelled)
+		if t.stdin != nil {
+			_ = t.stdin.Close()
+		}
+	})
+	defer func() {
+		if !stop() {
+			<-cancelled
+		}
+	}()
 
 	// Ensure JSONRPC version is set
 	msg.JSONRPC = "2.0"
 
 	// Encode as JSON followed by newline (JSON-RPC over stdio convention)
 	if err := t.encoder.Encode(msg); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("failed to encode message: %w", err)
 	}
 
@@ -336,6 +376,12 @@ func (t *StdioTransport) Close() error {
 	if t.stdin != nil {
 		_ = t.stdin.Close()
 	}
+	if t.stdout != nil {
+		_ = t.stdout.Close()
+	}
+	if t.stderr != nil {
+		_ = t.stderr.Close()
+	}
 
 	// Wait for stderr logging to complete
 	stderrTimer := time.NewTimer(time.Second)
@@ -362,7 +408,11 @@ func (t *StdioTransport) Close() error {
 		// Kill if it doesn't exit in time
 		logging.Warn("MCP server not responding, killing process")
 		killServerProcessTree(t.cmd)
-		<-done
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			return fmt.Errorf("MCP process did not exit after forced termination")
+		}
 	}
 
 	return nil

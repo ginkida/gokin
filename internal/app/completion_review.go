@@ -68,10 +68,20 @@ func (a *App) runCompletionReviewIfNeeded(
 	response *string,
 	usage *turnUsageAccumulator,
 ) bool {
-	if tools.SelfReviewDisabled(ctx) {
+	if a == nil || a.executor == nil || a.session == nil || response == nil {
 		return true
 	}
-	if a == nil || a.executor == nil || a.session == nil || response == nil {
+	a.runSystemPromptMu.RLock()
+	schemaOutput := a.runStructuredOutputPrompt != ""
+	a.runSystemPromptMu.RUnlock()
+	// Schema output gets its advisory correction after validation, so the
+	// heuristic cannot replace a valid answer with a format failure.
+	if !schemaOutput {
+		if handled, ok := a.correctAbsentMutationClaim(ctx, userMessage, response, usage); handled {
+			return ok
+		}
+	}
+	if tools.SelfReviewDisabled(ctx) || tools.HeadlessPermissionDenied(ctx) {
 		return true
 	}
 

@@ -72,9 +72,10 @@ type AnthropicClient struct {
 	rateLimiter       RateLimiter
 	statusCallback    StatusCallback
 	systemInstruction string
-	// turnContext is the per-turn ephemeral context (working memory) delivered
-	// OUTSIDE the cached prefix — see SetTurnContext. Guarded by mu.
-	turnContext string
+	// Turn snapshots remain runtime-only; implicit caching providers replay
+	// each snapshot at its original message position. Guarded by mu.
+	turnContext           string
+	turnContextPlacements []turnContextPlacement
 	// directHealthTracking is disabled when this client is owned by a
 	// FallbackClient, which scores each candidate centrally.
 	directHealthTracking bool
@@ -187,9 +188,14 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 		messages = c.convertHistoryToMessages(history, message)
 	} else {
 		// Legacy fallback: extract system prompt from first user message
-		messages, systemPrompt = c.convertHistoryToMessagesWithSystem(history, message)
+		messages, systemPrompt = c.convertHistoryToMessagesWithSystem(history, message, true)
 	}
-	messages = appendTurnContextBlock(messages, turnContext)
+	if len(history) == 0 {
+		// A fresh invocation (including /clear with an identical prompt) must
+		// not inherit private snapshots from the preceding conversation.
+		c.ResetConversationCache()
+	}
+	messages = c.appendStableTurnContext(messages, turnContext, true)
 
 	// Build request
 	requestBody := map[string]any{
@@ -258,7 +264,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 	} else {
 		messages, systemPrompt = c.convertHistoryWithResultsAndSystem(history, results)
 	}
-	messages = appendTurnContextBlock(messages, turnContext)
+	messages = c.appendStableTurnContext(messages, turnContext, true)
 
 	requestBody := map[string]any{
 		"model":      model,
@@ -290,11 +296,10 @@ func (c *AnthropicClient) SetSystemInstruction(instruction string) {
 }
 
 // SetTurnContext sets the per-turn ephemeral context (working memory). It is
-// delivered OUTSIDE the cached prefix: appended at request-build time as a
-// text block on the LAST user-role message — which is never covered by a
-// cache_control marker — and never persisted into history, so every cached
-// message position only ever sees its turn-context-free bytes. Keeping this
-// in the system block instead re-billed the whole system+tools prefix on
+// first delivered on the latest user message, never persisted into history.
+// Implicit caching providers retain its original wire position as history
+// grows, so later requests do not remove bytes from their cached prefix.
+// Keeping this in the system block instead re-billed the whole system+tools prefix on
 // every working-memory change (roadmap #7). Mutable post-construction like
 // EnableThinking — guarded by c.mu, snapshot before use in send paths.
 func (c *AnthropicClient) SetTurnContext(turnContext string) {
@@ -414,7 +419,9 @@ func (c *AnthropicClient) applyCacheControl(requestBody map[string]any) {
 	// Messages: cache_control on the second-to-last user turn for conversation prefix caching.
 	// This allows the API to cache all messages up to the penultimate user turn,
 	// so only the latest exchange (user message + model response) is uncached.
-	if msgsRaw, ok := requestBody["messages"]; ok {
+	// DeepSeek caches implicitly. Moving an explicit message boundary rewrites
+	// the old prefix; its system/tool markers above remain stable.
+	if msgsRaw, ok := requestBody["messages"]; ok && !c.isProvider("deepseek") {
 		// Handle both []map[string]any (pre-marshal) and []any (post-unmarshal)
 		var msgs []map[string]any
 		switch typed := msgsRaw.(type) {
@@ -519,9 +526,7 @@ func (c *AnthropicClient) CountTokensWithAccuracy(ctx context.Context, contents 
 
 // countTokensNative uses Anthropic's /v1/messages/count_tokens endpoint.
 func (c *AnthropicClient) countTokensNative(ctx context.Context, contents []*genai.Content, model, apiKey, sysInstruction, turnContext string, tools []*genai.Tool) (*genai.CountTokensResponse, error) {
-	messages := c.convertHistoryToMessages(contents, "")
-	messages = appendTurnContextBlock(messages, turnContext)
-	messages = stripEmptyTrailingMessage(messages)
+	messages := c.projectHistoryForCount(contents, turnContext)
 
 	// Need at least one message for the API
 	if len(messages) == 0 {
@@ -603,7 +608,7 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model, sysIn
 	}
 
 	// Estimate over the ACTUAL serialized request — the same
-	// convertHistoryToMessages + appendTurnContextBlock pipeline a real send
+	// convertHistoryToMessages + appendStableTurnContext pipeline a real send
 	// uses — instead of a parallel hand-rolled walk of the raw parts. The old
 	// walk counted every part.Text including UNSIGNED thinking blocks, which
 	// buildAssistantMessage DROPS from every outgoing request: a
@@ -613,15 +618,13 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model, sysIn
 	// any future transform for free — the estimate can't drift from the wire
 	// shape again. Only VALUE strings are counted (not JSON keys/escapes), so
 	// the established chars-per-token calibration is preserved; turnContext
-	// travels inside the serialized messages (appendTurnContextBlock) and is
+	// travels inside the serialized messages (appendStableTurnContext) and is
 	// deliberately NOT counted separately.
 	// Empty history estimates to zero — convertHistoryToMessages would insert
 	// its synthetic "Continue." placeholder, which is request plumbing, not
 	// context the user accumulated (pinned by TestAnthropicEstimateTokensEmpty).
 	if len(contents) > 0 || strings.TrimSpace(turnContext) != "" {
-		messages := c.convertHistoryToMessages(contents, "")
-		messages = appendTurnContextBlock(messages, turnContext)
-		messages = stripEmptyTrailingMessage(messages)
+		messages := c.projectHistoryForCount(contents, turnContext)
 		for _, message := range messages {
 			totalChars += charCountOfJSONValues(message["content"])
 		}
@@ -638,18 +641,32 @@ func (c *AnthropicClient) estimateTokens(contents []*genai.Content, model, sysIn
 	}, nil
 }
 
-// stripEmptyTrailingMessage removes the empty trailing user message
-// convertHistoryToMessages appends when called with newMessage == "". Shared
-// by the native count_tokens path and the local estimator so both count the
-// same effective payload.
+// projectHistoryForCount uses the send serializer without inventing another
+// user input. A synthetic Continue would otherwise look like a real new turn
+// and add a snapshot that the supplied history never requested.
+func (c *AnthropicClient) projectHistoryForCount(contents []*genai.Content, snapshot string) []map[string]any {
+	messages, _ := c.convertHistoryToMessagesWithSystem(contents, "", false)
+	if len(messages) == 0 || messages[len(messages)-1]["role"] != "user" {
+		messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{}})
+	}
+	return stripEmptyTrailingMessage(c.appendStableTurnContext(messages, snapshot, false))
+}
+
+// stripEmptyTrailingMessage drops count-only scaffolding if no context block
+// was needed. Both native counting and estimation use the same projection.
 func stripEmptyTrailingMessage(messages []map[string]any) []map[string]any {
 	if len(messages) == 0 {
 		return messages
 	}
 	last := messages[len(messages)-1]
-	if content, ok := last["content"].([]map[string]any); ok && len(content) == 1 {
-		if text, ok := content[0]["text"].(string); ok && text == "" {
+	if content, ok := last["content"].([]map[string]any); ok {
+		if len(content) == 0 {
 			return messages[:len(messages)-1]
+		}
+		if len(content) == 1 {
+			if text, ok := content[0]["text"].(string); ok && text == "" {
+				return messages[:len(messages)-1]
+			}
 		}
 	}
 	if content, ok := last["content"].(string); ok && content == "" {
@@ -706,8 +723,9 @@ func (c *AnthropicClient) TokenCountCacheKey() string {
 	defer c.mu.RUnlock()
 
 	toolsJSON, _ := json.Marshal(c.convertToolsToAnthropicFrom(c.tools))
+	placementsJSON, _ := json.Marshal(c.turnContextPlacements)
 	return c.config.BaseURL + "\x00" + c.config.Model + "\x00" +
-		c.systemInstruction + "\x00" + c.turnContext + "\x00" + string(toolsJSON)
+		c.systemInstruction + "\x00" + c.turnContext + "\x00" + string(toolsJSON) + "\x00" + string(placementsJSON)
 }
 
 // GetModel returns the model name.
@@ -747,7 +765,9 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 	newClient, err := NewAnthropicClient(newConfig)
 	if err != nil {
 		logging.Error("failed to create client with new model", "model", modelName, "error", err)
-		return c // Return original client on error
+		// Keep the original model fallback without sharing conversation state
+		// with a delegated/auxiliary caller when the requested model is invalid.
+		return c.cloneForSession()
 	}
 	newClient.SetTools(tools)
 	if rl != nil {
@@ -2158,7 +2178,7 @@ func applyAnthropicUsage(chunk *ResponseChunk, usage map[string]any) {
 // convertHistoryToMessagesWithSystem converts Gemini history to Anthropic messages format,
 // extracting the system prompt from the first user message if it looks like a system prompt.
 // Returns (messages, systemPrompt).
-func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Content, newMessage string) ([]map[string]any, string) {
+func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Content, newMessage string, appendInput bool) ([]map[string]any, string) {
 	messages := make([]map[string]any, 0)
 	var systemPrompt string
 	skipFirst := 0
@@ -2244,15 +2264,17 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 
 	// Add new user message (ensure non-empty content)
 	// Use array format for consistency with buildUserMessage
-	if newMessage == "" {
-		newMessage = "Continue."
+	if appendInput {
+		if newMessage == "" {
+			newMessage = "Continue."
+		}
+		messages = append(messages, map[string]any{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "text", "text": newMessage},
+			},
+		})
 	}
-	messages = append(messages, map[string]any{
-		"role": "user",
-		"content": []map[string]any{
-			{"type": "text", "text": newMessage},
-		},
-	})
 
 	// Ensure strict role alternation (merge consecutive same-role messages)
 	messages = mergeConsecutiveMessages(messages)
@@ -2270,7 +2292,7 @@ func (c *AnthropicClient) convertHistoryToMessagesWithSystem(history []*genai.Co
 
 // convertHistoryToMessages converts Gemini history to Anthropic messages format.
 func (c *AnthropicClient) convertHistoryToMessages(history []*genai.Content, newMessage string) []map[string]any {
-	messages, _ := c.convertHistoryToMessagesWithSystem(history, newMessage)
+	messages, _ := c.convertHistoryToMessagesWithSystem(history, newMessage, true)
 	return messages
 }
 

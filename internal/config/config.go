@@ -764,6 +764,7 @@ func DefaultConfig() *Config {
 				"env":                  "allow",
 				"list_dir":             "allow",
 				"todo":                 "allow",
+				"update_scratchpad":    "allow",
 				"git_status":           "allow",
 				"git_log":              "allow",
 				"git_diff":             "allow",
