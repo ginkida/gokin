@@ -17,11 +17,10 @@ func TestSessionMemoryClearSerializesWithInFlightDiskWrite(t *testing.T) {
 	writerPaused := make(chan struct{})
 	releaseWriter := make(chan struct{})
 	var once sync.Once
-	sessionMemoryBeforeDiskWriteForTest = func() {
+	sm.beforeDiskWriteForTest = func() {
 		once.Do(func() { close(writerPaused) })
 		<-releaseWriter
 	}
-	defer func() { sessionMemoryBeforeDiskWriteForTest = nil }()
 
 	writerDone := make(chan struct{})
 	go func() {
@@ -61,5 +60,19 @@ func TestSessionMemoryClearSerializesWithInFlightDiskWrite(t *testing.T) {
 	}
 	if got := sm.GetContent(); got != "" {
 		t.Fatalf("session content survived Clear: %q", got)
+	}
+}
+
+func TestSessionMemoryDiskWriteHookIsManagerScoped(t *testing.T) {
+	first := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
+	second := NewSessionMemoryManager(t.TempDir(), DefaultSessionMemoryConfig())
+	first.content = "first manager"
+	second.content = "second manager"
+	calls := 0
+	first.beforeDiskWriteForTest = func() { calls++ }
+	first.writeToDisk()
+	second.writeToDisk()
+	if calls != 1 {
+		t.Fatalf("another manager invoked the disk-write seam: calls=%d", calls)
 	}
 }

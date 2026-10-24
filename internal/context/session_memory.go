@@ -100,9 +100,9 @@ type SessionMemoryManager struct {
 	// holding mu.
 	writeMu sync.Mutex
 	mu      sync.RWMutex
+	// Test seam, set before starting any writers on this manager.
+	beforeDiskWriteForTest func()
 }
-
-var sessionMemoryBeforeDiskWriteForTest func()
 
 const sessionMemoryFilename = ".session-memory.md"
 
@@ -630,8 +630,8 @@ func (s *SessionMemoryManager) writeToDisk() {
 	s.mu.RLock()
 	content := boundContextMemoryContent(s.content, maxSessionMemoryFileBytes)
 	s.mu.RUnlock()
-	if sessionMemoryBeforeDiskWriteForTest != nil {
-		sessionMemoryBeforeDiskWriteForTest()
+	if s.beforeDiskWriteForTest != nil {
+		s.beforeDiskWriteForTest()
 	}
 	// A delayed writer may acquire writeMu only after Clear has already reset
 	// the in-memory snapshot and removed the file. Treat empty content as the

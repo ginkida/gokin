@@ -13,11 +13,10 @@ func TestWorkingMemoryClearSerializesWithInFlightDiskWrite(t *testing.T) {
 	writerPaused := make(chan struct{})
 	releaseWriter := make(chan struct{})
 	var once sync.Once
-	workingMemoryBeforeDiskWriteForTest = func() {
+	manager.beforeDiskWriteForTest = func() {
 		once.Do(func() { close(writerPaused) })
 		<-releaseWriter
 	}
-	defer func() { workingMemoryBeforeDiskWriteForTest = nil }()
 
 	writerDone := make(chan struct{})
 	go func() {
@@ -55,13 +54,12 @@ func TestWorkingMemoryConcurrentUpdatesPersistInSerializedOrder(t *testing.T) {
 	firstPaused := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var once sync.Once
-	workingMemoryBeforeDiskWriteForTest = func() {
+	manager.beforeDiskWriteForTest = func() {
 		once.Do(func() {
 			close(firstPaused)
 			<-releaseFirst
 		})
 	}
-	defer func() { workingMemoryBeforeDiskWriteForTest = nil }()
 
 	firstDone := make(chan struct{})
 	go func() {
@@ -84,5 +82,17 @@ func TestWorkingMemoryConcurrentUpdatesPersistInSerializedOrder(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "second durable result") {
 		t.Fatalf("latest update was not persisted: %s", data)
+	}
+}
+
+func TestWorkingMemoryDiskWriteHookIsManagerScoped(t *testing.T) {
+	first := NewWorkingMemoryManager(t.TempDir())
+	second := NewWorkingMemoryManager(t.TempDir())
+	calls := 0
+	first.beforeDiskWriteForTest = func() { calls++ }
+	first.UpdateFromTurn(WorkingMemoryTurn{Response: "first result"})
+	second.UpdateFromTurn(WorkingMemoryTurn{Response: "second result"})
+	if calls != 1 {
+		t.Fatalf("another manager invoked the disk-write seam: calls=%d", calls)
 	}
 }

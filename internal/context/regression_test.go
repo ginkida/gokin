@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/genai"
 )
@@ -96,6 +95,7 @@ func TestRegression_ExtractAsync_CopyProtection(t *testing.T) {
 		Enabled:         true,
 		MinTokensToInit: 0, // always extract
 	})
+	t.Cleanup(sm.Wait)
 
 	history := []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: "fix the bug in auth.go"}}},
@@ -111,15 +111,7 @@ func TestRegression_ExtractAsync_CopyProtection(t *testing.T) {
 	history[0] = nil
 	history[1] = nil
 
-	// Wait briefly for the goroutine to complete, then verify it didn't panic.
+	// Join the complete extraction, including its disk write and callbacks.
 	// The race detector will catch unsynchronized access if copy was missing.
-	for i := 0; i < 50; i++ {
-		sm.mu.RLock()
-		done := sm.initialized
-		sm.mu.RUnlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	sm.Wait()
 }

@@ -21,8 +21,6 @@ const (
 
 var workingMemoryMarkdownLinkPattern = regexp.MustCompile(`\[(.*?)\]\([^)]+\)`)
 
-var workingMemoryBeforeDiskWriteForTest func()
-
 // WorkingMemoryTurn is the compact turn-level evidence used to refresh the
 // persistent working memory snapshot between requests.
 type WorkingMemoryTurn struct {
@@ -46,6 +44,8 @@ type WorkingMemoryManager struct {
 	content string
 	writeMu sync.Mutex
 	mu      sync.RWMutex
+	// Test seam, set before starting any writers on this manager.
+	beforeDiskWriteForTest func()
 }
 
 const workingMemoryFilename = ".working-memory.md"
@@ -139,8 +139,8 @@ func (w *WorkingMemoryManager) writeToDiskLocked() {
 	w.mu.RLock()
 	content := boundContextMemoryContent(w.content, maxWorkingMemoryFileBytes)
 	w.mu.RUnlock()
-	if workingMemoryBeforeDiskWriteForTest != nil {
-		workingMemoryBeforeDiskWriteForTest()
+	if w.beforeDiskWriteForTest != nil {
+		w.beforeDiskWriteForTest()
 	}
 
 	if strings.TrimSpace(content) == "" {

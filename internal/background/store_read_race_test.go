@@ -299,3 +299,70 @@ func TestStoreReadersDuringAtomicReplacement(t *testing.T) {
 		t.Fatalf("terminal state lost: %+v err=%v", job, err)
 	}
 }
+
+func TestStoreResolveRetriesMissingDirectoryEntry(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := NewJobID()
+	if err := store.Create(Job{ID: id, State: StateStarting, WorkDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	job, err := store.resolveWithReadDir(id[:8], func(path string) ([]os.DirEntry, error) {
+		reads++
+		if reads == 1 {
+			return nil, nil // An enumeration during replacement missed the entry.
+		}
+		return os.ReadDir(path)
+	})
+	if err != nil || job.ID != id || reads != 2 {
+		t.Fatalf("transient prefix miss escaped: job=%+v scans=%d err=%v", job, reads, err)
+	}
+}
+
+func TestStoreResolveMissingPrefixBoundsRetries(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	_, err = store.resolveWithReadDir("abcdef12", func(string) ([]os.DirEntry, error) {
+		reads++
+		return nil, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "was not found") || reads != stateReadAttempts {
+		t.Fatalf("missing job did not stay bounded: scans=%d err=%v", reads, err)
+	}
+	reads = 0
+	_, err = store.resolveWithReadDir("abcdef12", func(string) ([]os.DirEntry, error) {
+		reads++
+		return nil, os.ErrPermission
+	})
+	if !errors.Is(err, os.ErrPermission) || reads != 1 {
+		t.Fatalf("real enumeration error was retried: scans=%d err=%v", reads, err)
+	}
+}
+
+func TestStoreListRetriesMissingDirectoryEntry(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := NewJobID()
+	if err := store.Create(Job{ID: id, State: StateStarting, WorkDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	jobs, err := store.listWithReadDir("", false, func(path string) ([]os.DirEntry, error) {
+		reads++
+		if reads == 1 {
+			return nil, nil
+		}
+		return os.ReadDir(path)
+	})
+	if err != nil || len(jobs) != 1 || jobs[0].ID != id || reads != 2 {
+		t.Fatalf("transient listing miss escaped: jobs=%+v scans=%d err=%v", jobs, reads, err)
+	}
+}

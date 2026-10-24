@@ -603,6 +603,10 @@ func (s *Store) load(id string, read func(string, int64) ([]byte, error)) (Job, 
 // Resolve accepts a full UUID or an unambiguous UUID prefix. Short IDs keep
 // management commands ergonomic without weakening file-path validation.
 func (s *Store) Resolve(query string) (Job, error) {
+	return s.resolveWithReadDir(query, os.ReadDir)
+}
+
+func (s *Store) resolveWithReadDir(query string, readDir func(string) ([]os.DirEntry, error)) (Job, error) {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if parsed, err := uuid.Parse(query); err == nil && parsed.String() == query {
 		return s.Load(query)
@@ -612,7 +616,7 @@ func (s *Store) Resolve(query string) (Job, error) {
 	}) >= 0 {
 		return Job{}, fmt.Errorf("invalid background job ID or prefix %q", query)
 	}
-	entries, err := os.ReadDir(s.jobsDir())
+	entries, err := s.readJobEntries(query, readDir)
 	if err != nil {
 		return Job{}, err
 	}
@@ -634,6 +638,27 @@ func (s *Store) Resolve(query string) (Job, error) {
 		return Job{}, fmt.Errorf("background job %q was not found", query)
 	}
 	return s.Load(matched)
+}
+
+// Directory enumeration can miss a name during atomic replacement on Linux,
+// even while opening that name succeeds. Retry discovery independently of the
+// private-file loader; a genuinely missing job still returns after a few scans.
+func (s *Store) readJobEntries(prefix string, readDir func(string) ([]os.DirEntry, error)) ([]os.DirEntry, error) {
+	for attempt := 0; ; attempt++ {
+		entries, err := readDir(s.jobsDir())
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" && strings.HasPrefix(entry.Name(), prefix) {
+				return entries, nil
+			}
+		}
+		if attempt == stateReadAttempts-1 {
+			return entries, nil
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (s *Store) write(job Job) error {
@@ -733,7 +758,11 @@ func (s *Store) MarkStopping(id string) (Job, error) {
 }
 
 func (s *Store) List(workDir string, includeCompleted bool) ([]Job, error) {
-	entries, err := os.ReadDir(s.jobsDir())
+	return s.listWithReadDir(workDir, includeCompleted, os.ReadDir)
+}
+
+func (s *Store) listWithReadDir(workDir string, includeCompleted bool, readDir func(string) ([]os.DirEntry, error)) ([]Job, error) {
+	entries, err := s.readJobEntries("", readDir)
 	if err != nil {
 		return nil, err
 	}
