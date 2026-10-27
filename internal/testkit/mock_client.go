@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gokin/internal/client"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -22,6 +23,7 @@ import (
 // Scripts are consumed FIFO. If all scripts are exhausted, Send* returns
 // ErrNoScript — tests should enqueue enough to cover every expected call.
 type MockClient struct {
+	toolschema.Publisher
 	mu sync.Mutex
 
 	model       string
@@ -252,7 +254,7 @@ func runScript(ctx context.Context, script ResponseScript) *client.StreamingResp
 func (m *MockClient) SetTools(tools []*genai.Tool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.tools = tools
+	m.tools = m.PublishTools(tools)
 }
 
 // GetTools returns the tools currently set on the mock (test introspection).

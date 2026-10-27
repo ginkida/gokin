@@ -14,6 +14,7 @@ import (
 	appconfig "gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/security"
+	"gokin/internal/toolschema"
 
 	"github.com/ollama/ollama/api"
 	"google.golang.org/genai"
@@ -35,6 +36,7 @@ type OllamaConfig struct {
 
 // OllamaClient implements Client interface for Ollama API.
 type OllamaClient struct {
+	toolschema.Publisher
 	client            *api.Client
 	config            OllamaConfig
 	tools             []*genai.Tool
@@ -557,7 +559,7 @@ func (c *OllamaClient) SetThinkingBudget(budget int32) {}
 func (c *OllamaClient) SetTools(tools []*genai.Tool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.tools = tools
+	c.tools = c.PublishTools(tools)
 }
 
 // SetRateLimiter sets the rate limiter for API calls.
@@ -657,6 +659,7 @@ func (c *OllamaClient) WithModel(modelName string) Client {
 		logging.Error("failed to create Ollama client with new model", "model", modelName, "error", err)
 		return c
 	}
+	toolschema.Install(newClient, c.ToolSchemaProfile().Clone())
 	newClient.SetTools(tools)
 	if rl != nil {
 		newClient.SetRateLimiter(rl)
@@ -689,6 +692,7 @@ func (c *OllamaClient) cloneForSession() Client {
 		directHealthTracking: c.directHealthTracking,
 	}
 	c.mu.RUnlock()
+	toolschema.Install(clone, c.ToolSchemaProfile().Clone())
 	return clone
 }
 

@@ -134,6 +134,8 @@ func evalRunSpecHash(manifest *Manifest, scenarios []Scenario, matrix []matrixEn
 		FaultProfile string `json:"fault_profile,omitempty"`
 	}
 	type runSpec struct {
+		DeferredSchemas bool `json:"deferred_schemas,omitempty"`
+
 		Version       int          `json:"version"`
 		ManifestName  string       `json:"manifest_name"`
 		Scenarios     []Scenario   `json:"scenarios"`
@@ -160,6 +162,8 @@ func evalRunSpecHash(manifest *Manifest, scenarios []Scenario, matrix []matrixEn
 		})
 	}
 	payload := runSpec{
+		DeferredSchemas: opts.DeferredSchemas,
+
 		Version:       manifest.Version,
 		ManifestName:  manifest.Name,
 		Scenarios:     scenarios,

@@ -12,12 +12,15 @@ import (
 
 	"gokin/internal/goals"
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
 
 // SessionState represents the serializable state of a session.
 type SessionState struct {
+	ToolSchemas *toolschema.Snapshot `json:"tool_schemas,omitempty"`
+
 	ID         string    `json:"id"`
 	Title      string    `json:"title,omitempty"`
 	StartTime  time.Time `json:"start_time"`

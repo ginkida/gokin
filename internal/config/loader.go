@@ -453,6 +453,9 @@ func loadFromEnv(cfg *Config) {
 	if backend := os.Getenv("GOKIN_BACKEND"); backend != "" {
 		cfg.API.Backend = backend
 	}
+	if value, present := os.LookupEnv("GOKIN_DEFERRED_SCHEMAS"); present {
+		cfg.Tools.DeferredSchemas = value == "1" || strings.EqualFold(value, "true")
+	}
 	if mode := strings.TrimSpace(os.Getenv("GOKIN_ENGINE_MODE")); mode != "" {
 		cfg.Engine.Mode = mode
 	}

@@ -6,12 +6,14 @@ import (
 
 	"gokin/internal/donegate"
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 	"gokin/internal/ui"
 
 	"google.golang.org/genai"
 )
 
 func sessionConversation(history []*genai.Content) ui.SessionConversationMsg {
+	history = toolschema.EffectiveHistory(history)
 	var result ui.SessionConversationMsg
 	calls := make(map[string]*genai.FunctionCall)
 	review := false

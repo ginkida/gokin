@@ -9,6 +9,7 @@ import (
 
 	"gokin/internal/client"
 	"gokin/internal/config"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -321,6 +322,7 @@ func (s *Summarizer) clientSnapshot() client.Client {
 // splitOnBoundaries splits messages into chunks at semantic boundaries
 // (low-priority messages like confirmations, repeated reads, verbose logs).
 func (s *Summarizer) splitOnBoundaries(messages []*genai.Content) [][]*genai.Content {
+	messages = toolschema.EffectiveHistory(messages)
 	const maxChunkSize = 60
 	const minChunkSize = 15
 
@@ -386,6 +388,7 @@ func (s *Summarizer) isLowPriorityMessage(msg *genai.Content) bool {
 
 // formatMessages formats messages for summarization prompt.
 func (s *Summarizer) formatMessages(messages []*genai.Content) string {
+	messages = toolschema.EffectiveHistory(messages)
 	var builder strings.Builder
 
 	for _, msg := range messages {

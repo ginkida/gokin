@@ -157,7 +157,7 @@ func GetToolRiskLevel(toolName string) RiskLevel {
 	}
 	riskOverridesMu.RUnlock()
 	switch toolName {
-	case "read", "glob", "grep", "tree", "diff", "env", "list_dir",
+	case "read", "glob", "grep", "tree", "diff", "env", "list_dir", "tool_search",
 		"git_status", "git_log", "git_diff", "git_blame",
 		"review_changes", "go_to_definition", "find_references", "lsp",
 		"history_search", "skill",

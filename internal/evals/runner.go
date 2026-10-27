@@ -31,6 +31,8 @@ const maxResultLineBytes = 16 << 20
 
 // RunOptions configures a coding eval run.
 type RunOptions struct {
+	DeferredSchemas bool
+
 	ManifestPath   string
 	FixturesRoot   string
 	WorkRoot       string
@@ -397,7 +399,8 @@ func runScenario(ctx context.Context, manifest *Manifest, scenario Scenario, opt
 	}
 
 	agentCommand := expandCommandTemplate(opts.AgentCommand, manifest, scenario, workspace, variant)
-	agentEnv := append(evalEnv(manifest, scenario, workspace, variant), "GOKIN_EVAL_RUNTIME_DIR="+runtimeDir)
+	agentEnv := append(evalEnv(manifest, scenario, workspace, variant), "GOKIN_EVAL_RUNTIME_DIR="+runtimeDir, "GOKIN_DEFERRED_SCHEMAS="+strconv.FormatBool(opts.DeferredSchemas))
+	result.Metadata["deferred_schemas"] = strconv.FormatBool(opts.DeferredSchemas)
 	result.Agent = runShellCommand(ctx, workspace, agentCommand, opts.Timeout, agentEnv, true)
 
 	afterAgent, _ := snapshotFiles(workspace)

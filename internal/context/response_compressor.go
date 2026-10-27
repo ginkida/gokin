@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -39,11 +40,14 @@ func (rc *ResponseCompressor) CompressFunctionResponse(part *genai.FunctionRespo
 	// follow. Preserve that one field while still compressing sibling data maps;
 	// a custom/embedded tool named "skill" must not turn this into an unbounded
 	// structured-response bypass.
-	preserveSkillContent := false
+	preserveContent := false
 	if part.Name == "skill" {
 		success, _ := part.Response["success"].(bool)
 		content, hasContent := part.Response["content"].(string)
-		preserveSkillContent = success && hasContent && len(content) <= skills.MaxRenderedSkillBytes
+		preserveContent = success && hasContent && len(content) <= skills.MaxRenderedSkillBytes
+	}
+	if part.Name == "tool_search" {
+		preserveContent = toolschema.IsCompleteDiscovery(part.Response)
 	}
 
 	compressed := &genai.FunctionResponse{
@@ -54,7 +58,7 @@ func (rc *ResponseCompressor) CompressFunctionResponse(part *genai.FunctionRespo
 
 	// Process each field in the response
 	for key, value := range part.Response {
-		if preserveSkillContent && key == "content" {
+		if preserveContent && key == "content" {
 			compressed.Response[key] = value
 			continue
 		}
@@ -188,6 +192,7 @@ func (rc *ResponseCompressor) CompressContents(contents []*genai.Content) []*gen
 	}
 
 	compressed := make([]*genai.Content, len(contents))
+	calls := toolschema.IndexResponseCalls(contents)
 
 	for i, content := range contents {
 		if content == nil {
@@ -200,7 +205,16 @@ func (rc *ResponseCompressor) CompressContents(contents []*genai.Content) []*gen
 		}
 
 		for j, part := range content.Parts {
-			newContent.Parts[j] = rc.CompressContent(part)
+			if part != nil && part.FunctionResponse != nil && calls.Name(part.FunctionResponse) != part.FunctionResponse.Name {
+				view := *part
+				response := *part.FunctionResponse
+				response.Name = calls.Name(part.FunctionResponse)
+				view.FunctionResponse = &response
+				newContent.Parts[j] = rc.CompressContent(&view)
+				newContent.Parts[j].FunctionResponse.Name = part.FunctionResponse.Name
+			} else {
+				newContent.Parts[j] = rc.CompressContent(part)
+			}
 		}
 
 		compressed[i] = newContent

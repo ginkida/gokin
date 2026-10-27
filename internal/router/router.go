@@ -536,6 +536,8 @@ func (r *Router) ExecuteWithPolicyDecisions(
 			if !policyDecision.Enabled {
 				schema = tools.FilterGeminiToolsExcluding(schema, "repl_exec", "harness")
 			}
+		case tools.DeferredSchemasEnabled(ctx):
+			schema = r.registry.GeminiTools()
 		default:
 			// RouteWithContext classifies the executable retry message for
 			// handler selection, while hybrid exposure stays anchored to the

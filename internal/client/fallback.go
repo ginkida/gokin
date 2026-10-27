@@ -10,6 +10,7 @@ import (
 
 	"gokin/internal/config"
 	"gokin/internal/logging"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -671,5 +672,13 @@ func (fc *FallbackClient) SetStatusCallback(cb StatusCallback) {
 		if setter, ok := c.(interface{ SetStatusCallback(StatusCallback) }); ok {
 			setter.SetStatusCallback(cb)
 		}
+	}
+}
+
+func (fc *FallbackClient) SetToolSchemaProfile(profile *toolschema.Profile) {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	for _, c := range fc.clients {
+		toolschema.Install(c, profile)
 	}
 }

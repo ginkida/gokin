@@ -5,6 +5,7 @@ import (
 
 	"gokin/internal/goals"
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 )
 
 // Validate every persisted hook reference before any owner is replaced.
@@ -12,6 +13,9 @@ import (
 func validateSessionHookGraph(state *SessionState, depth int, visiting map[*SessionState]bool) error {
 	if state == nil || depth > maxJSONDepth || visiting[state] {
 		return fmt.Errorf("invalid session hook state graph")
+	}
+	if _, err := toolschema.Restore(state.ToolSchemas); err != nil {
+		return err
 	}
 	visiting[state] = true
 	defer delete(visiting, state)

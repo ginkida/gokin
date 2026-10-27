@@ -38,6 +38,7 @@ import (
 	"gokin/internal/security"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 	"gokin/internal/toolusage"
 	"gokin/internal/ui"
 	"gokin/internal/undo"
@@ -822,6 +823,7 @@ func (b *Builder) isInGitRepo() bool {
 // initSession creates the chat session and context management.
 func (b *Builder) initSession() error {
 	b.session = chat.NewSession()
+	b.session.SetToolSchemaProfile(toolschema.New(b.cfg.Tools.DeferredSchemas))
 	b.session.SetWorkDir(b.workDir)
 	// The foreground SkillTool and persisted Session must share one stable
 	// invocation ledger. initTools runs before initSession, so bind it here and
@@ -1002,6 +1004,7 @@ func (b *Builder) initBareManagers() error {
 	b.agentRunner.SetHooks(b.hooksManager)
 	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode)
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
+	b.agentRunner.SetDeferredSchemas(b.cfg.Tools.DeferredSchemas)
 	b.agentRunner.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.agentRunner.SetWorkspaceIsolationEnabled(false)
 	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)
@@ -1253,6 +1256,7 @@ func (b *Builder) initManagers() error {
 	b.agentRunner.SetHooks(b.hooksManager)
 	b.agentRunner.SetThinkingMode(b.cfg.Model.ThinkingMode) // adaptive thinking for sub-agents
 	b.agentRunner.SetContextConfig(&b.cfg.Context)
+	b.agentRunner.SetDeferredSchemas(b.cfg.Tools.DeferredSchemas)
 	b.agentRunner.SetModelRoundTimeout(b.cfg.Tools.ModelRoundTimeout)
 	b.agentRunner.SetWorkspaceIsolationEnabled(b.cfg.Plan.WorkspaceIsolation)
 	b.agentRunner.SetDoneGateConfig(b.cfg.DoneGate)

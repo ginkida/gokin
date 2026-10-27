@@ -4,8 +4,10 @@ import (
 	"sort"
 	"testing"
 
+	"gokin/internal/config"
 	"gokin/internal/permission"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 )
 
 // The permission table is the safety layer, so a name in it that matches no
@@ -26,15 +28,44 @@ func TestDefaultRulesNameOnlyRegisteredTools(t *testing.T) {
 	if len(known) == 0 {
 		t.Fatal("registry produced no tool names")
 	}
-
-	var phantom []string
-	for name := range permission.DefaultRules().ToolPolicies {
-		if !known[name] {
-			phantom = append(phantom, name)
+	// Deferred publication adds virtual control tools without putting them in
+	// execution registries. Verify their actual owner-bound lookup rather than
+	// exempting arbitrary names from the drift check.
+	registry := tools.DefaultRegistry(t.TempDir())
+	ctx := tools.ContextWithDeferredCatalog(t.Context(), registry, registry.GeminiTools())
+	for _, envelope := range toolschema.New(true).Publish(registry.GeminiTools()) {
+		for _, declaration := range envelope.FunctionDeclarations {
+			if known[declaration.Name] {
+				continue
+			}
+			virtual, ok := tools.DeferredMetaTool(ctx, registry, declaration.Name)
+			if !ok || virtual.Declaration().Name != declaration.Name {
+				t.Fatalf("unimplemented virtual tool %q", declaration.Name)
+			}
+			known[declaration.Name] = true
 		}
 	}
-	sort.Strings(phantom)
-	if len(phantom) > 0 {
-		t.Fatalf("DefaultRules names tools that are not registered: %v", phantom)
+
+	cfg := config.DefaultConfig().Permission
+	for source, rules := range map[string]*permission.Rules{
+		"DefaultRules":  permission.DefaultRules(),
+		"DefaultConfig": permission.NewRulesFromConfig(cfg.DefaultPolicy, cfg.Rules),
+	} {
+		var phantom []string
+		for name := range rules.ToolPolicies {
+			if !known[name] {
+				phantom = append(phantom, name)
+			}
+		}
+		sort.Strings(phantom)
+		if len(phantom) > 0 {
+			t.Errorf("%s names unregistered tools: %v", source, phantom)
+		}
+		if policy, present := rules.ToolPolicies["tool_search"]; !present || policy != permission.LevelAllow {
+			t.Errorf("%s must allow discovery explicitly", source)
+		}
+		if policy, present := rules.ToolPolicies["use_tool"]; !present || policy != permission.LevelAsk {
+			t.Errorf("%s must give use_tool a neutral ask policy; only its resolved target grants authority", source)
+		}
 	}
 }

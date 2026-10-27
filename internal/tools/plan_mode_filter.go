@@ -74,6 +74,9 @@ var planModeReadOnlyTools = map[string]bool{
 // The name is lowercased before lookup so case differences between registry
 // and caller (e.g., "Read" vs "read") don't accidentally block a safe tool.
 func IsReadOnlyForPlanMode(name string) bool {
+	if name == "tool_search" {
+		return true
+	}
 	return planModeReadOnlyTools[strings.ToLower(strings.TrimSpace(name))]
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gokin/internal/logging"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -35,6 +36,7 @@ func (a *App) applyToolOutputHygiene() {
 	}
 
 	history, version := a.session.GetHistoryWithVersion()
+	calls := toolschema.IndexResponseCalls(history)
 	if len(history) <= toolOutputHygieneKeepRecent {
 		return
 	}
@@ -57,7 +59,7 @@ func (a *App) applyToolOutputHygiene() {
 			if part == nil || part.FunctionResponse == nil || part.FunctionResponse.Response == nil {
 				continue
 			}
-			toolName := part.FunctionResponse.Name
+			toolName := calls.Name(part.FunctionResponse)
 			if !noisyToolOutputs[toolName] {
 				continue
 			}

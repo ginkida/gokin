@@ -238,6 +238,27 @@ func TestReattachInvocationsRawSuccessfulSkillResponseSuppressesCarry(t *testing
 	}
 }
 
+func TestReattachInvocationsDispatchedSkillRequiresMatchingCall(t *testing.T) {
+	invocation := carryTestInvocation("check", "retained full workflow", 1)
+	for _, target := range []string{"skill", "read"} {
+		history := []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call", Name: "use_tool", Args: map[string]any{"name": target, "arguments": map[string]any{"name": "check"}}}}}},
+			{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call", Name: "use_tool", Response: map[string]any{"success": true, "content": invocation.Rendered}}}}},
+		}
+		got := ReattachInvocations(history, []Invocation{invocation}, 0)
+		want := 2
+		if target != "skill" {
+			want++
+		}
+		if len(got) != want {
+			t.Fatalf("target=%s messages=%d want=%d", target, len(got), want)
+		}
+		if target == "skill" && (got[0] != history[0] || got[1] != history[1]) {
+			t.Fatal("retained prefix changed")
+		}
+	}
+}
+
 func TestReattachInvocationsExactUserSkillPromptSuppressesCarry(t *testing.T) {
 	invocation := carryTestInvocation("explicit", "Loaded explicit /skill workflow in full", 1)
 	rawPrompt := genai.NewContentFromText(invocation.Rendered, genai.RoleUser)

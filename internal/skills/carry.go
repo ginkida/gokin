@@ -7,6 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"gokin/internal/toolschema"
+
 	"google.golang.org/genai"
 )
 
@@ -341,6 +343,7 @@ func isPlainTextPart(part *genai.Part) bool {
 
 func scanRetainedSkillSnapshots(history []*genai.Content) map[string]bool {
 	hashes := make(map[string]bool)
+	calls := toolschema.IndexResponseCalls(history)
 	for _, content := range history {
 		if content == nil {
 			continue
@@ -356,7 +359,7 @@ func scanRetainedSkillSnapshots(history []*genai.Content) map[string]bool {
 			if part.Text != "" && len(part.Text) <= MaxRenderedSkillBytes && utf8.ValidString(part.Text) {
 				hashes[renderHash(part.Text)] = true
 			}
-			if response := part.FunctionResponse; response != nil && response.Name == "skill" && response.Response != nil {
+			if response := part.FunctionResponse; response != nil && calls.Name(response) == "skill" && response.Response != nil {
 				success, successOK := response.Response["success"].(bool)
 				rendered, contentOK := response.Response["content"].(string)
 				if successOK && success {

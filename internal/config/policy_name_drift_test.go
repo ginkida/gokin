@@ -6,6 +6,7 @@ import (
 
 	"gokin/internal/config"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 )
 
 // The shipped default policy map is what a fresh install actually enforces, so
@@ -22,6 +23,18 @@ func TestDefaultConfigPolicyNamesOnlyRegisteredTools(t *testing.T) {
 	}
 	if len(known) == 0 {
 		t.Fatal("registry produced no tool names")
+	}
+	registry := tools.NewRegistry()
+	registry.MustRegister(tools.NewEnvTool())
+	ctx := tools.ContextWithDeferredCatalog(t.Context(), registry, registry.GeminiTools())
+	for _, envelope := range toolschema.New(true).Publish(registry.GeminiTools()) {
+		for _, declaration := range envelope.FunctionDeclarations {
+			virtual, ok := tools.DeferredMetaTool(ctx, registry, declaration.Name)
+			if !ok || virtual.Declaration().Name != declaration.Name {
+				t.Fatalf("unimplemented virtual tool %q", declaration.Name)
+			}
+			known[declaration.Name] = true
+		}
 	}
 
 	var phantom []string

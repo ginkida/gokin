@@ -21,6 +21,7 @@ import (
 	"gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/security"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -67,6 +68,7 @@ type AnthropicConfig struct {
 
 // AnthropicClient implements Client for Anthropic-compatible providers.
 type AnthropicClient struct {
+	toolschema.Publisher
 	config            AnthropicConfig
 	httpClient        *http.Client
 	tools             []*genai.Tool
@@ -472,7 +474,7 @@ func (c *AnthropicClient) SetThinkingBudget(budget int32) {
 func (c *AnthropicClient) SetTools(tools []*genai.Tool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.tools = tools
+	c.tools = c.PublishTools(tools)
 }
 
 // SetRateLimiter sets the rate limiter for API calls.
@@ -773,6 +775,7 @@ func (c *AnthropicClient) WithModel(modelName string) Client {
 		// with a delegated/auxiliary caller when the requested model is invalid.
 		return c.cloneForSession()
 	}
+	toolschema.Install(newClient, c.ToolSchemaProfile().Clone())
 	newClient.SetTools(tools)
 	if rl != nil {
 		newClient.SetRateLimiter(rl)
@@ -805,6 +808,7 @@ func (c *AnthropicClient) cloneForSession() Client {
 		directHealthTracking: c.directHealthTracking,
 	}
 	c.mu.RUnlock()
+	toolschema.Install(clone, c.ToolSchemaProfile().Clone())
 	return clone
 }
 

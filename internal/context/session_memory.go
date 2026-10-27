@@ -15,6 +15,7 @@ import (
 	appconfig "gokin/internal/config"
 	"gokin/internal/logging"
 	"gokin/internal/memory"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -687,7 +688,7 @@ func extractFileActivity(history []*genai.Content) []fileActivity {
 	for _, msg := range history {
 		for _, part := range msg.Parts {
 			if part.FunctionCall != nil {
-				fc := part.FunctionCall
+				fc := toolschema.EffectiveCall(part.FunctionCall)
 				path, _ := fc.Args["file_path"].(string)
 				if path == "" {
 					path, _ = fc.Args["path"].(string)
@@ -731,7 +732,7 @@ func extractToolUsage(history []*genai.Content) map[string]int {
 	for _, msg := range history {
 		for _, part := range msg.Parts {
 			if part.FunctionCall != nil {
-				counts[part.FunctionCall.Name]++
+				counts[toolschema.EffectiveCall(part.FunctionCall).Name]++
 			}
 		}
 	}
@@ -793,6 +794,7 @@ type sessionFunctionCall struct {
 }
 
 func extractDurableSessionLearnings(history []*genai.Content) []sessionDurableLearning {
+	history = toolschema.EffectiveHistory(history)
 	pending := make(map[string][]sessionFunctionCall)
 	latest := make(map[string]sessionDurableLearning)
 

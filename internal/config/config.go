@@ -343,6 +343,9 @@ type ModelConfig struct {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
+	// DeferredSchemas publishes a fixed small tool set with discovery/dispatch.
+	// Opt-in until GLM and DeepSeek live coding acceptance passes.
+	DeferredSchemas bool `yaml:"deferred_schemas,omitempty"`
 	// DisableSkillShellExecution renders a policy marker in place of dynamic
 	// SKILL.md shell context. Applied at startup and inherited by sub-agents.
 	DisableSkillShellExecution bool                   `yaml:"disable_skill_shell_execution,omitempty"`
@@ -777,6 +780,8 @@ func DefaultConfig() *Config {
 				"repl_exec":            "allow",
 				"harness":              "ask",
 				"tools_list":           "allow",
+				"tool_search":          "allow",
+				"use_tool":             "ask", // Authorization belongs to the resolved target.
 				"skill":                "allow",
 				"task_output":          "allow",
 				"task_stop":            "allow",

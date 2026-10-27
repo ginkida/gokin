@@ -10,6 +10,7 @@ import (
 	"gokin/internal/client"
 	appcontext "gokin/internal/context"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -523,4 +524,8 @@ func budgetSkippedToolCallResult(call *genai.FunctionCall, cause error) toolCall
 			Response: tools.NewErrorResult(reason).ToMap(),
 		},
 	}
+}
+
+func (c *invocationBudgetClient) SetToolSchemaProfile(profile *toolschema.Profile) {
+	toolschema.Install(c.base, profile)
 }

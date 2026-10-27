@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	"gokin/internal/toolschema"
+
 	"google.golang.org/genai"
 )
 
@@ -78,7 +80,7 @@ func (t *HistorySearchTool) Execute(ctx context.Context, args map[string]any) (T
 		return NewErrorResult("history search not supported by this agent"), nil
 	}
 
-	history := t.historyGetter()
+	history := toolschema.EffectiveHistory(t.historyGetter())
 	var results []string
 
 	for i, content := range history {

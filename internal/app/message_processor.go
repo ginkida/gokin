@@ -22,6 +22,7 @@ import (
 	"gokin/internal/plan"
 	"gokin/internal/router"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 	"gokin/internal/ui"
 
 	"google.golang.org/genai"
@@ -600,7 +601,13 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	}
 	ctx = tools.ContextWithToolSchemaCeiling(ctx, a.executor, turnToolNames)
 	turnTools = tools.FilterHeadlessTools(ctx, turnTools)
+	profile := a.session.ToolSchemaProfile()
+	profile.Configure(turnTools)
+	if profile.Deferred() {
+		ctx = tools.ContextWithDeferredCatalog(ctx, a.registry, turnTools)
+	}
 	if a.client != nil {
+		toolschema.Install(a.client, profile)
 		a.client.SetTools(turnTools)
 	}
 	hybridPolicy := hybridPolicySnapshotForDecision(mode, policyDecision, turnTools)
@@ -618,7 +625,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 	// turn late and could never diagnose MCP/tool-schema cache breaks.
 	if a.executor != nil {
 		if ct := a.executor.GetCacheTracker(); ct != nil {
-			toolsJSON, err := json.Marshal(turnTools)
+			toolsJSON, err := json.Marshal(profile.Publish(turnTools))
 			if err != nil {
 				logging.Debug("failed to serialize tools for prompt-cache tracking", "error", err)
 			}
@@ -5049,7 +5056,7 @@ func buildStepPrompt(ctx *StepPromptContext) string {
 // This preserves key decisions and findings from the planning conversation.
 // It also creates a structured ContextSnapshot and saves it to SharedMemory.
 func (a *App) extractContextSnapshot() string {
-	history := a.session.GetHistory()
+	history := toolschema.EffectiveHistory(a.session.GetHistory())
 	if len(history) < 4 {
 		return "" // Not enough context to summarize
 	}

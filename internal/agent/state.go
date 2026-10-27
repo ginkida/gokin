@@ -7,12 +7,15 @@ import (
 
 	"gokin/internal/logging"
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
 
 // AgentState represents the serializable state of an agent.
 type AgentState struct {
+	ToolSchemas *toolschema.Snapshot `json:"tool_schemas,omitempty"`
+
 	ID            string              `json:"id"`
 	Type          AgentType           `json:"type"`
 	Model         string              `json:"model,omitempty"`
@@ -64,6 +67,7 @@ func (a *Agent) GetState() *AgentState {
 	}
 
 	return &AgentState{
+		ToolSchemas:   a.schemaProfile.Snapshot(),
 		ID:            a.ID,
 		Type:          a.Type,
 		Model:         a.Model,
@@ -82,6 +86,11 @@ func (a *Agent) GetState() *AgentState {
 func (a *Agent) RestoreHistory(state *AgentState) error {
 	if state == nil {
 		return fmt.Errorf("cannot restore nil agent state")
+	}
+
+	profile, err := toolschema.Restore(state.ToolSchemas)
+	if err != nil {
+		return err
 	}
 
 	// Validate untrusted persisted skill snapshots in a temporary ledger. The
@@ -128,6 +137,7 @@ func (a *Agent) RestoreHistory(state *AgentState) error {
 	// the validated subset (empty for a fail-closed payload), so stale skills
 	// from a prior run can never bleed into the restored agent.
 	skillReplaceErr := a.invokedSkills.Restore(invokedSkills)
+	a.schemaProfile = profile
 	a.history = history
 	a.status = state.Status
 	a.startTime = state.StartTime

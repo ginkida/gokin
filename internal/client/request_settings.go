@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 
+	"gokin/internal/toolschema"
+
 	"google.golang.org/genai"
 )
 
@@ -283,4 +285,8 @@ func (c *requestSettingsClient) Close() error {
 		}
 	}
 	return err
+}
+
+func (c *requestSettingsClient) SetToolSchemaProfile(profile *toolschema.Profile) {
+	c.update(func(cl Client) { toolschema.Install(cl, profile) })
 }

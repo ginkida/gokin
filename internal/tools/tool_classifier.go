@@ -119,6 +119,9 @@ var sequentialReadOnlyTools = map[string]bool{
 // IsParallelSafeTool reports whether concurrent execution and abandonment are
 // safe for a built-in tool. Unknown third-party tools fail closed to false.
 func IsParallelSafeTool(name string) bool {
+	if name == "tool_search" {
+		return true
+	}
 	return parallelSafeTools[strings.ToLower(strings.TrimSpace(name))]
 }
 

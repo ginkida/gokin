@@ -27,6 +27,7 @@ import (
 	"gokin/internal/robustness"
 	"gokin/internal/security"
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -1863,6 +1864,10 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 		// Handle chained function calls in an inner loop
 		for len(resp.FunctionCalls) > 0 {
+			wireCalls := resp.FunctionCalls
+			ownedResponse := *resp
+			resp = &ownedResponse
+			resp.FunctionCalls = ResolveDeferredCalls(ctx, e.registry, wireCalls)
 			// Check context cancellation between chained tool calls (Esc pressed)
 			select {
 			case <-ctx.Done():
@@ -2165,6 +2170,11 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 						compressed.FunctionResponse.Name = result.Name
 						part = compressed
 					}
+				}
+				// Compress using the effective target's policy (notably skill
+				// instruction preservation), then restore the provider envelope.
+				if j < len(wireCalls) && wireCalls[j] != nil {
+					part.FunctionResponse.Name = wireCalls[j].Name
 				}
 				funcResultParts[j] = part
 				// Initial delivery must equal the response retained for replay.
@@ -2750,6 +2760,7 @@ func (e *Executor) MaxInputTokens() int {
 // an orphaned tool_use). Protects the first 3 messages (system/greeting/task)
 // and the last `protect` messages (recent working set). Returns chars freed.
 func pruneOldToolOutputs(history []*genai.Content, protect, minOutputSize int) int {
+	calls := toolschema.IndexResponseCalls(history)
 	start := 3
 	end := len(history) - protect
 	if end <= start {
@@ -2773,7 +2784,10 @@ func pruneOldToolOutputs(history []*genai.Content, protect, minOutputSize int) i
 			// payload, not reconstructible command output. Without consumption state,
 			// globally preserving this bounded payload is the safe P0 behavior; full
 			// post-compaction carry-forward remains separate work.
-			if part.FunctionResponse.Name == "skill" && len(content) <= skills.MaxRenderedSkillBytes {
+			if toolschema.IsCompleteDiscovery(part.FunctionResponse.Response) {
+				continue
+			}
+			if calls.Name(part.FunctionResponse) == "skill" && len(content) <= skills.MaxRenderedSkillBytes {
 				if success, _ := part.FunctionResponse.Response["success"].(bool); success {
 					continue
 				}
@@ -2787,7 +2801,10 @@ func pruneOldToolOutputs(history []*genai.Content, protect, minOutputSize int) i
 }
 
 // executeTools executes a list of function calls with enhanced safety checks.
-func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall) ([]*genai.FunctionResponse, error) {
+func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall) (responses []*genai.FunctionResponse, executionErr error) {
+	wireCalls := calls
+	calls = ResolveDeferredCalls(ctx, e.registry, calls)
+	defer func() { RestoreWireResponseNames(responses, wireCalls) }()
 	// Cap how many calls we EXECUTE per turn (resource bound), but never drop a
 	// call silently: the assistant history turn already records every emitted
 	// tool_use, so a dropped call leaves an unpaired tool_use block that the
@@ -3042,8 +3059,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// delegated-agent inheritance). This is a runtime gate in addition to
 	// schema filtering: a hallucinated/pretrained tool call must not recover
 	// authority merely because it was omitted from the advertised schema.
+	_, deferredMeta := DeferredMetaTool(ctx, e.registry, call.Name)
 	if ceiling, restricted := ToolCapabilityCeilingFromContext(ctx); restricted &&
-		!toolCapabilityAllows(ceiling, call.Name) {
+		!toolCapabilityAllows(ceiling, call.Name) && !deferredMeta {
 		return newTerminalPermissionResult(fmt.Sprintf("tool %q is outside this invocation's capability ceiling", call.Name))
 	}
 
@@ -3053,7 +3071,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// internal InvokeTool calls bypass only this model-schema boundary and still
 	// pass capability, plan, validation, permission, hook, and audit gates.
 	if ceiling, restricted := ToolSchemaCeilingFromContext(ctx, e); restricted &&
-		!toolCapabilityAllows(ceiling, call.Name) && !isInternalToolInvocation(ctx, e) {
+		!toolCapabilityAllows(ceiling, call.Name) && !isInternalToolInvocation(ctx, e) && !deferredMeta {
 		if e.planModeCheck != nil && e.planModeCheck() && !IsReadOnlyForPlanMode(call.Name) {
 			return NewPolicyBlockedResult(PolicyBlockPlan, "tool denied by plan mode")
 		}
@@ -3061,7 +3079,10 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 1: Basic tool lookup and validation
-	tool, ok := e.registry.Get(call.Name)
+	tool, ok := DeferredMetaTool(ctx, e.registry, call.Name)
+	if !ok {
+		tool, ok = e.registry.Get(call.Name)
+	}
 	if !ok {
 		return NewErrorResult(formatUnknownToolError(call.Name, e.registry.Names()))
 	}

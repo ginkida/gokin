@@ -26,6 +26,7 @@ import (
 	"gokin/internal/pinned"
 	"gokin/internal/skills"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -45,6 +46,9 @@ const (
 
 // Agent represents an isolated executor for subtasks.
 type Agent struct {
+	schemaProfile          *toolschema.Profile
+	defaultDeferredSchemas bool
+
 	ID           string
 	Type         AgentType
 	Model        string
@@ -1619,6 +1623,22 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		return &AgentResult{AgentID: a.ID, Status: AgentStatusFailed, Error: seedErr.Error(), Completed: true}, seedErr
 	}
 	ctx = tools.ContextWithHeadlessToolPolicy(ctx, a.registry, a.permissions, a.hooks)
+	a.stateMu.Lock()
+	if a.schemaProfile == nil {
+		deferred, present := tools.DeferredSchemaModeFromContext(ctx)
+		if !present {
+			deferred = a.defaultDeferredSchemas
+		}
+		a.schemaProfile = toolschema.New(deferred)
+	}
+	profile := a.schemaProfile
+	a.stateMu.Unlock()
+	toolschema.Install(a.client, profile)
+	if profile.Deferred() {
+		ctx = tools.ContextWithDeferredCatalog(ctx, a.registry, tools.FilterHeadlessTools(ctx, a.registry.GeminiTools()))
+	} else {
+		ctx = tools.ContextWithoutDeferredCatalog(ctx)
+	}
 	// Include auxiliary requests (reflection/compaction/planning), while
 	// explicitly masking inherited request settings in a different child's run.
 	effort := tools.ForkedSkillEffort(ctx, a.registry)
@@ -3390,6 +3410,10 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			}
 		}
 
+		if tools.DeferredSchemasEnabled(ctx) {
+			ctx = tools.ContextWithDeferredCatalog(ctx, a.registry, tools.FilterHeadlessTools(ctx, a.registry.GeminiTools()))
+		}
+
 		// === Reactive mode: Get response from model with retry ===
 		a.onThinkingMu.Lock()
 		a.Thought = "" // New turn, reset thought
@@ -3562,6 +3586,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		a.recordResponseUsageLocked(resp)
 		a.stateMu.Unlock()
 		client.ObserveConversationMessage(ctx, modelContent, a.client.GetModel(), resp)
+
+		wireCalls := resp.FunctionCalls
+		ownedResponse := *resp
+		resp = &ownedResponse
+		resp.FunctionCalls = tools.ResolveDeferredCalls(ctx, a.registry, wireCalls)
 
 		turnMadeProgress := false
 
@@ -3820,7 +3849,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 				// Synthesize dummy function responses so the API protocol
 				// (function calls must be followed by function responses) is satisfied.
 				var dummyParts []*genai.Part
-				for _, fc := range resp.FunctionCalls {
+				for _, fc := range wireCalls {
 					part := genai.NewPartFromFunctionResponse(fc.Name, map[string]any{
 						"error": loopSkipReason,
 					})
@@ -3848,7 +3877,17 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			a.SetProgress(i+1, a.maxTurns, fmt.Sprintf("Executing tools: %v", toolsList))
 
 			if budgetErr := invocationBudgetTerminalError(ctx); budgetErr != nil {
-				return a.finishInvocationBudgetFailure(resp, output, budgetErr)
+				// This model response is already retained. Pair its original
+				// wire calls without appending a second assistant envelope.
+				parts := make([]*genai.Part, 0, len(wireCalls))
+				for _, call := range wireCalls {
+					skipped := budgetSkippedToolCallResult(call, budgetErr)
+					parts = append(parts, &genai.Part{FunctionResponse: skipped.Response})
+				}
+				a.stateMu.Lock()
+				a.history = append(a.history, &genai.Content{Role: genai.RoleUser, Parts: parts})
+				a.stateMu.Unlock()
+				return a.finishInvocationBudgetFailure(nil, output, budgetErr)
 			}
 			results := a.executeTools(ctx, resp.FunctionCalls)
 
@@ -3886,6 +3925,11 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			// Cancelled/abandoned reads already carry explicit placeholder
 			// responses, while stateful tools are joined before executeTools
 			// returns, so committing this complete response turn is safe.
+			var wireResults []*genai.FunctionResponse
+			for _, result := range results {
+				wireResults = append(wireResults, result.Response)
+			}
+			tools.RestoreWireResponseNames(wireResults, wireCalls)
 			var funcParts []*genai.Part
 			for _, result := range results {
 				// Defense-in-depth: executeToolsParallel pre-populates every
@@ -4888,6 +4932,7 @@ func ensureToolPairConsistency(history []*genai.Content) []*genai.Content {
 func (a *Agent) pruneToolOutputs(protectChars int) int {
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
+	calls := toolschema.IndexResponseCalls(a.history)
 
 	minMsgs := max(a.summarizeMinMsgs, 4)
 	if len(a.history) <= minMsgs {
@@ -4932,7 +4977,10 @@ func (a *Agent) pruneToolOutputs(protectChars int) int {
 			}
 			// Preserve only successful, bounded rendered workflows. Oversized custom
 			// tools named "skill" remain normal prune candidates.
-			if part.FunctionResponse.Name == "skill" && len(contentStr) <= skills.MaxRenderedSkillBytes {
+			if toolschema.IsCompleteDiscovery(part.FunctionResponse.Response) {
+				continue
+			}
+			if calls.Name(part.FunctionResponse) == "skill" && len(contentStr) <= skills.MaxRenderedSkillBytes {
 				if success, _ := part.FunctionResponse.Response["success"].(bool); success {
 					continue
 				}
@@ -5276,7 +5324,16 @@ func (a *Agent) getModelResponse(ctx context.Context) (response *client.Response
 }
 
 // executeTools executes the function calls with parallel execution for read-only tools.
-func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) []toolCallResult {
+func (a *Agent) executeTools(ctx context.Context, calls []*genai.FunctionCall) (out []toolCallResult) {
+	wireCalls := calls
+	calls = tools.ResolveDeferredCalls(ctx, a.registry, calls)
+	defer func() {
+		var responses []*genai.FunctionResponse
+		for _, result := range out {
+			responses = append(responses, result.Response)
+		}
+		tools.RestoreWireResponseNames(responses, wireCalls)
+	}()
 	results := make([]toolCallResult, len(calls))
 
 	// Build index for result placement
@@ -5831,7 +5888,8 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 		return tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, err.Error())
 	}
 
-	if ceiling, restricted := tools.AgentToolCapabilityCeilingFromContext(ctx); restricted {
+	_, deferredMeta := tools.DeferredMetaTool(ctx, a.registry, call.Name)
+	if ceiling, restricted := tools.AgentToolCapabilityCeilingFromContext(ctx); restricted && !deferredMeta {
 		allowed := false
 		for _, name := range ceiling {
 			if name == call.Name {
@@ -5849,7 +5907,10 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 	if err := checkPluginAgentExecution(ctx); err != nil {
 		return tools.NewHookStoppedResult(err.Error())
 	}
-	tool, ok := a.registry.Get(call.Name)
+	tool, ok := tools.DeferredMetaTool(ctx, a.registry, call.Name)
+	if !ok {
+		tool, ok = a.registry.Get(call.Name)
+	}
 	if !ok {
 		return tools.NewErrorResult(fmt.Sprintf("tool not available for this agent: %s", call.Name))
 	}

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/toolschema"
+
 	"google.golang.org/genai"
 )
 
@@ -138,6 +140,7 @@ var baseToolScores = map[string]float64{
 // Use indexOffset when scoring a sub-slice of history so that EditProximityBonus
 // can compare against FileActivityTracker indices correctly.
 func (s *RelevanceScorer) ScoreMessages(history []*genai.Content, tracker *FileActivityTracker, indexOffset ...int) []float64 {
+	history = toolschema.EffectiveHistory(history)
 	n := len(history)
 	scores := make([]float64, n)
 	if n == 0 {

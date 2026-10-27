@@ -107,6 +107,10 @@ func (j *CheckpointJournal) AcknowledgeResults(history []*genai.Content) int {
 				continue
 			}
 			delete(paired, response.ID)
+			// Retained history keeps the provider's dispatcher envelope, while
+			// the journal records the actual side effect and its argument signature.
+			// This is reconciliation only; it never authorizes or executes a call.
+			call = resolveDeferredCall(call)
 			signature := checkpointSignature(call.Name, call.Args)
 			encoded, err := json.Marshal(response.Response)
 			if err != nil || signature == "" {

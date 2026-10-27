@@ -8,6 +8,7 @@ func TestDefaultPermissionRulesAllowReadOnlyAgentInfrastructure(t *testing.T) {
 		"read", "glob", "grep", "git_status", "git_log", "git_diff",
 		"git_blame", "review_changes", "history_search", "tools_list", "skill",
 		"task_output", "task_stop",
+		"tool_search",
 	} {
 		if got := rules[tool]; got != "allow" {
 			t.Errorf("default permission for %s = %q, want allow", tool, got)
@@ -18,5 +19,8 @@ func TestDefaultPermissionRulesAllowReadOnlyAgentInfrastructure(t *testing.T) {
 	}
 	if got := rules["harness"]; got != "ask" {
 		t.Errorf("default permission for harness = %q, want ask", got)
+	}
+	if got := rules["use_tool"]; got != "ask" {
+		t.Errorf("default permission for use_tool = %q, want neutral ask", got)
 	}
 }

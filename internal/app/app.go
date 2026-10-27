@@ -46,6 +46,7 @@ import (
 	"gokin/internal/security"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 	"gokin/internal/toolusage"
 	"gokin/internal/ui"
 	"gokin/internal/undo"
@@ -2187,6 +2188,9 @@ func (a *App) clientSnapshot() client.Client {
 // value. Order a.mu -> clientMu is preserved.
 func (a *App) setClientLocked(c client.Client) {
 	client.ResetConversationCache(c)
+	if a.session != nil {
+		toolschema.Install(c, a.session.ToolSchemaProfile())
+	}
 	a.clientMu.Lock()
 	a.client = c
 	a.clientMu.Unlock()
@@ -2386,9 +2390,9 @@ func (a *App) toolsForMessageDecision(message string, policyDecision hybrid.Deci
 	base = a.filterHybridToolsDecision(base, mode, message, policyDecision)
 	ceiling, restricted := a.toolCapabilitySnapshot()
 	if !restricted {
-		return base
+		return a.configureToolSchemaPublication(base)
 	}
-	return filterToolSchemaByCeiling(base, ceiling)
+	return a.configureToolSchemaPublication(filterToolSchemaByCeiling(base, ceiling))
 }
 
 // planModeToolsLocked is the lock-free variant of toolsForCurrentMode — it
@@ -2407,9 +2411,9 @@ func (a *App) planModeToolsLocked(planModeEnabled bool) []*genai.Tool {
 	base := a.baseToolsForPlanMode(planModeEnabled, planEnabled, memoryEnabled)
 	base = a.filterHybridTools(base, mode, "")
 	if !a.toolCapabilityRestricted {
-		return base
+		return a.configureToolSchemaPublication(base)
 	}
-	return filterToolSchemaByCeiling(base, a.toolCapabilityCeiling)
+	return a.configureToolSchemaPublication(filterToolSchemaByCeiling(base, a.toolCapabilityCeiling))
 }
 
 func (a *App) filterHybridTools(base []*genai.Tool, mode, message string) []*genai.Tool {
@@ -5037,6 +5041,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.agentRunner.SetClient(newClient)
 		a.agentRunner.SetPlanningModeEnabled(requestedPlanMode)
 		a.agentRunner.SetContextConfig(&a.config.Context)
+		a.agentRunner.SetDeferredSchemas(a.config.Tools.DeferredSchemas)
 		a.agentRunner.SetModelRoundTimeout(a.config.Tools.ModelRoundTimeout)
 		planningTimeout := a.config.Plan.PlanningTimeout
 		if planningTimeout <= 0 {

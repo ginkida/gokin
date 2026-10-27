@@ -7,11 +7,15 @@ import (
 	"gokin/internal/client"
 	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
+	"gokin/internal/toolschema"
 )
 
 func (a *App) resetConversationCache() {
 	if a != nil {
 		client.ResetConversationCache(a.clientSnapshot())
+		if a.session != nil {
+			toolschema.Install(a.clientSnapshot(), a.session.ToolSchemaProfile())
+		}
 		a.restoreConversationMemory()
 	}
 }

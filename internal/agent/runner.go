@@ -51,7 +51,8 @@ type Runner struct {
 	// Inter-agent communication
 	messengerFactory func(agentID string) *AgentMessenger
 
-	ctxCfg *config.ContextConfig
+	ctxCfg          *config.ContextConfig
+	deferredSchemas bool // Default for workers without an owning conversation context; guarded by mu.
 	// modelRoundTimeout is copied into every spawned agent and propagated to
 	// existing agents when runtime configuration changes. Guarded by r.mu.
 	modelRoundTimeout time.Duration
@@ -215,6 +216,7 @@ func (r *Runner) GetThought(id string) string {
 }
 
 type runnerAgentDeps struct {
+	deferredSchemas     bool
 	ctxCfg              *config.ContextConfig
 	modelRoundTimeout   time.Duration
 	errorStore          *memory.ErrorStore
@@ -284,6 +286,14 @@ func (r *Runner) SetActivityReporter(reporter ActivityReporter) {
 func (r *Runner) SetContextConfig(cfg *config.ContextConfig) {
 	r.mu.Lock()
 	r.ctxCfg = cfg
+	r.mu.Unlock()
+}
+
+// SetDeferredSchemas supplies the mode for workers with no conversation owner.
+// Active and restored agents keep their pinned publication profile.
+func (r *Runner) SetDeferredSchemas(enabled bool) {
+	r.mu.Lock()
+	r.deferredSchemas = enabled
 	r.mu.Unlock()
 }
 
@@ -816,6 +826,7 @@ func (r *Runner) snapshotAgentDeps() runnerAgentDeps {
 	defer r.mu.RUnlock()
 
 	return runnerAgentDeps{
+		deferredSchemas:     r.deferredSchemas,
 		ctxCfg:              r.ctxCfg,
 		modelRoundTimeout:   r.modelRoundTimeout,
 		errorStore:          r.errorStore,
@@ -959,6 +970,7 @@ func (r *Runner) newConfiguredAgent(
 		agent.definitionError = isolationErr
 	}
 	agent.SetModelRoundTimeout(deps.modelRoundTimeout)
+	agent.defaultDeferredSchemas = deps.deferredSchemas
 
 	agent.ApplyThoroughness(tools.ThoroughnessFromContext(ctx), maxTurns)
 	agent.SetHooks(deps.hooks)

@@ -31,6 +31,8 @@ func DefaultRules() *Rules {
 			"find_references":      LevelAllow,
 			"lsp":                  LevelAllow,
 			"history_search":       LevelAllow,
+			"tool_search":          LevelAllow,
+			"use_tool":             LevelAsk, // Only the resolved target can grant authority.
 			"tools_list":           LevelAllow,
 			"skill":                LevelAllow,
 			"web_search":           LevelAllow,

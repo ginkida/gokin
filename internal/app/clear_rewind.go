@@ -9,6 +9,7 @@ import (
 	"gokin/internal/goals"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
+	"gokin/internal/toolschema"
 	"gokin/internal/ui"
 )
 
@@ -36,7 +37,9 @@ func (a *App) rotateClearedConversation(ctx context.Context) (int, error) {
 	previous := a.session.GetState()
 	ending := a.captureSessionEndLocked(previous, "clear")
 	sourceID := previous.ID
-	fresh := chat.NewSession().GetState()
+	freshSession := chat.NewSession()
+	freshSession.SetToolSchemaProfile(toolschema.New(a.session.ToolSchemaProfile().Deferred()))
+	fresh := freshSession.GetState()
 	fresh.WorkDir, fresh.Provider = previous.WorkDir, previous.Provider
 	fresh.Version = previous.Version + 1
 	persistent := a.sessionManager.PersistenceEnabled()

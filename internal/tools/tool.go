@@ -8,6 +8,7 @@ import (
 	"google.golang.org/genai"
 
 	"gokin/internal/config"
+	"gokin/internal/toolschema"
 )
 
 // Tool defines the interface for all tools.
@@ -77,6 +78,9 @@ type ToolResult struct {
 	// mutation is runtime provenance captured before result redaction and
 	// compaction. It is immutable and never exposed by ToMap or JSON encoding.
 	mutation *goMutationSnapshot
+	// completeToolSchema is set only after discovery bounds complete schemas.
+	// Hook context and notifications may subsequently enlarge the delivery.
+	completeToolSchema bool
 
 	// Content is the main result content (usually text).
 	Content string
@@ -119,6 +123,8 @@ func NewSuccessResult(content string) ToolResult {
 		Success: true,
 	}
 }
+
+func (r ToolResult) HasCompleteToolSchema() bool { return r.completeToolSchema && r.Success }
 
 // NewSuccessResultWithData creates a successful tool result with additional data.
 func NewSuccessResultWithData(content string, data any) ToolResult {
@@ -164,14 +170,20 @@ func NewErrorResultWithContext(errMsg string, fileContext string) ToolResult {
 }
 
 // ToMap converts the result to a map for Gemini function response.
-// Content is truncated to DefaultToolResultMaxChars to prevent API payload overflow.
+// Ordinary content is capped at DefaultToolResultMaxChars. Bounded discovery
+// remains complete after hook/notification enrichment.
 func (r ToolResult) ToMap() map[string]any {
 	result := make(map[string]any)
 
 	if r.Success {
 		result["success"] = true
 		if r.Content != "" {
-			result["content"] = truncateToolResultContent(r.Content, "(grep with pattern, head/tail)")
+			if r.HasCompleteToolSchema() {
+				result["content"] = r.Content
+				result[toolschema.CompleteDiscoveryKey] = true
+			} else {
+				result["content"] = truncateToolResultContent(r.Content, "(grep with pattern, head/tail)")
+			}
 		}
 		if r.Data != nil {
 			result["data"] = r.Data

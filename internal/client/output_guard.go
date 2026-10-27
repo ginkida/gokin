@@ -160,7 +160,7 @@ func (g *outputGuard) check(model, tool, delta string, limit int) error {
 
 func repetitionWindow(tool string) int {
 	switch tool {
-	case "write", "edit", "batch", "diff", "harness":
+	case "write", "edit", "batch", "diff", "harness", "use_tool":
 		// These tools accept file contents (including nested replacements and
 		// staged harness source). Larger fixtures need more evidence of a loop.
 		return 128 << 10
@@ -173,6 +173,15 @@ func repetitionWindow(tool string) int {
 // otherwise periodic suffix. Inspect string values too, before publishing a
 // tool call. This also covers clients whose SDK delivers parsed arguments.
 func checkToolArgumentRepetition(model, tool string, value any) error {
+	if tool == "use_tool" {
+		if envelope, ok := value.(map[string]any); ok {
+			if name, ok := envelope["name"].(string); ok && name != "use_tool" && name != "tool_search" {
+				if arguments, ok := envelope["arguments"].(map[string]any); ok {
+					return checkToolArgumentRepetition(model, name, arguments)
+				}
+			}
+		}
+	}
 	switch value := value.(type) {
 	case string:
 		if len(value) >= repetitionWindow(tool) {

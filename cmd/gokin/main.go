@@ -51,6 +51,7 @@ var (
 	backgroundMode       bool
 	noSessionPersistence bool
 	headless             bool
+	deferredSchemas      bool
 	printMode            bool
 	prompt               string
 	outputFormat         string
@@ -136,6 +137,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().BoolVar(&backgroundMode, "background", false, "start as a detached session and return immediately")
 	rootCmd.PersistentFlags().BoolVar(&backgroundMode, "bg", false, "start as a detached session and return immediately")
 	rootCmd.PersistentFlags().BoolVar(&noSessionPersistence, "no-session-persistence", false, "do not save or auto-load session state for this process")
+	rootCmd.PersistentFlags().BoolVar(&deferredSchemas, "deferred-schemas", false, "publish compact tool schemas with tool_search/use_tool (experimental)")
 	rootCmd.PersistentFlags().BoolVar(&headless, "headless", false, "run one prompt without the interactive TUI")
 	rootCmd.PersistentFlags().BoolVarP(&printMode, "print", "p", false, "run one prompt and exit (alias for --headless)")
 	rootCmd.PersistentFlags().StringVar(&prompt, "prompt", "", "prompt to run initially (headless also accepts redirected stdin)")
@@ -499,6 +501,10 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		} else {
 			return err
 		}
+	}
+
+	if cmd.Flags().Changed("deferred-schemas") {
+		cfg.Tools.DeferredSchemas = deferredSchemas
 	}
 
 	// Get working directory

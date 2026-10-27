@@ -14,6 +14,7 @@ import (
 	"gokin/internal/logging"
 	"gokin/internal/security"
 	"gokin/internal/skills"
+	"gokin/internal/toolschema"
 
 	"google.golang.org/genai"
 )
@@ -35,6 +36,8 @@ type ChangeHandler func(ChangeEvent)
 
 // Session represents a chat session.
 type Session struct {
+	toolSchemaProfile *toolschema.Profile
+
 	ID        string
 	StartTime time.Time
 	WorkDir   string
@@ -308,6 +311,7 @@ func (s *Session) Clear() {
 	s.mu.Lock()
 
 	oldCount := len(s.History)
+	s.toolSchemaProfile = toolschema.New(s.toolSchemaProfile.Deferred())
 	s.History = make([]*genai.Content, 0)
 	s.tokenCounts = make([]int, 0)
 	s.totalTokens = 0
@@ -743,6 +747,7 @@ func (s *Session) GetState() *SessionState {
 	}
 
 	state := &SessionState{
+		ToolSchemas:       s.toolSchemaProfile.Snapshot(),
 		ID:                s.ID,
 		Title:             s.title,
 		StartTime:         s.StartTime,
@@ -823,6 +828,10 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	if err := validateSessionHookGraph(state, 0, make(map[*SessionState]bool)); err != nil {
 		return err
 	}
+	profile, err := toolschema.Restore(state.ToolSchemas)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -838,6 +847,7 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	// Fix legacy sessions that have empty tool call IDs
 	fixEmptyToolIDs(history)
 
+	s.toolSchemaProfile = profile
 	s.ID = state.ID
 	s.StartTime = state.StartTime
 	s.WorkDir = state.WorkDir
@@ -1137,6 +1147,7 @@ func (s *Session) Fork(name string) *Session {
 		checkpointRawIndices:    make(map[string]bool, len(s.checkpointRawIndices)),
 		Checkpoints:             make(map[string]int, len(s.Checkpoints)),
 	}
+	branch.toolSchemaProfile, _ = toolschema.Restore(s.toolSchemaProfile.Snapshot())
 	if s.invocationLedger != nil {
 		invocations, activations := s.invocationLedger.SnapshotWithHooks()
 		_ = branch.invocationLedger.Restore(invocations)
@@ -1635,4 +1646,16 @@ func redactSliceValues(s []any) {
 			redactSliceValues(val)
 		}
 	}
+}
+
+func (s *Session) ToolSchemaProfile() *toolschema.Profile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.toolSchemaProfile
+}
+
+func (s *Session) SetToolSchemaProfile(profile *toolschema.Profile) {
+	s.mu.Lock()
+	s.toolSchemaProfile = profile
+	s.mu.Unlock()
 }

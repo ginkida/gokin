@@ -260,6 +260,10 @@ func (c *ResultCompactor) smartTruncateContent(content string) string {
 
 // CompactForType compacts content based on the tool type.
 func (c *ResultCompactor) CompactForType(toolName string, result tools.ToolResult) tools.ToolResult {
+	// Discovery already bounds whole schemas. Cutting one makes it unusable.
+	if toolName == "tool_search" && result.HasCompleteToolSchema() {
+		return result
+	}
 	// A loaded skill is executable guidance, not disposable tool output. The
 	// SkillTool already bounds rendered SKILL.md content at its catalog boundary;
 	// generic head/tail compaction here can silently remove workflow steps before
