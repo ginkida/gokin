@@ -131,6 +131,7 @@ func (m *Manager) StartSandboxedInDir(ctx context.Context, dir, command string, 
 	id := fmt.Sprintf("task_%d_%d_%d", time.Now().UnixNano(), os.Getpid(), m.counter)
 
 	task := NewTask(id, command, m.taskDirLocked(dir))
+	task.writeCompletion, _ = ctx.Value(writeCompletionKey{}).(WriteCompletion)
 	task.sandboxPolicy = policy.Snapshot()
 	task.sandboxScope = scope
 	task.environment = append([]string(nil), env...)

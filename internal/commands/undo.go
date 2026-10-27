@@ -23,7 +23,8 @@ func (c *UndoCommand) Usage() string {
 	return `/undo           - Undo last file change
 /undo all       - Undo every change the last request made, atomically
 /undo N         - Undo last N changes (max 20)
-/undo list      - Show recent undoable changes`
+/undo list      - Show recent undoable changes
+Changes made by bash, tests and build commands are not undoable with /undo.`
 }
 func (c *UndoCommand) GetMetadata() CommandMetadata {
 	return CommandMetadata{

@@ -48,6 +48,7 @@ const (
 type Agent struct {
 	schemaProfile          *toolschema.Profile
 	defaultDeferredSchemas bool
+	workspaceWrites        tools.WorkspaceWriteTracker
 
 	ID           string
 	Type         AgentType
@@ -278,6 +279,7 @@ type Agent struct {
 	touchedPaths   []string
 	mutatedPaths   []string
 	filesChanged   []string
+	partialWrites  bool
 	// mutationGen counts every successful mutation (incl. re-edits of an
 	// already-touched file), so the gate re-checks after a re-edit that the
 	// touched-path SET alone would miss. Guarded by toolsMu.
@@ -1570,9 +1572,14 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 // Run executes the agent with the given prompt and returns the result.
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	ctx = client.NewOutputRecoveryBudget(ctx)
+	ctx, finishWriteObservation := context.WithCancel(ctx)
+	defer finishWriteObservation()
+	ctx = tools.ContextWithWorkspaceWriteLifetime(ctx)
+	a.workspaceWrites.Reset()
 	a.toolsMu.Lock()
 	a.mutatedPaths = nil
 	a.filesChanged = nil
+	a.partialWrites = false
 	a.toolsMu.Unlock()
 	if a.definitionError != nil {
 		return &AgentResult{AgentID: a.ID, Type: a.Type, Status: AgentStatusFailed, Error: a.definitionError.Error(), Completed: true}, a.definitionError
@@ -1786,8 +1793,15 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 		a.stateMu.Unlock()
 		result.MutatingToolCalls = a.MutatingToolCount()
 		result.StatefulToolAttempts = a.StatefulToolAttemptCount()
+		partialWrites := a.workspaceWrites.Partial()
 		result.TouchedPaths = a.GetMutatedPaths()
 		result.FilesChanged = a.GetFilesChanged()
+		if partialWrites {
+			if result.Metadata == nil {
+				result.Metadata = make(map[string]any)
+			}
+			result.Metadata["files_changed_partial"] = true
+		}
 
 		// Clear callHistory to prevent memory leak
 		a.clearCallHistory()
@@ -1819,8 +1833,15 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	a.stateMu.Unlock()
 	result.MutatingToolCalls = a.MutatingToolCount()
 	result.StatefulToolAttempts = a.StatefulToolAttemptCount()
+	partialWrites := a.workspaceWrites.Partial()
 	result.TouchedPaths = a.GetMutatedPaths()
 	result.FilesChanged = a.GetFilesChanged()
+	if partialWrites {
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]any)
+		}
+		result.Metadata["files_changed_partial"] = true
+	}
 
 	// Clear callHistory to prevent memory leak on long-running sessions
 	a.clearCallHistory()
@@ -6084,7 +6105,14 @@ func (a *Agent) executeTool(ctx context.Context, call *genai.FunctionCall) (out 
 		return tools.NewHookStoppedResult(err.Error())
 	}
 	ctx = tools.ContextWithLSPReadPolicy(ctx, a.permissions, a.registry, workDir)
-	result, err := tools.ExecuteWithPermissionScope(ctx, tool, call.Args, authorizedPermissionArgs)
+	result, err := a.workspaceWrites.ObserveTool(ctx, workDir, tool, call.Args, func(observedCtx context.Context) (tools.ToolResult, error) {
+		return tools.ExecuteWithPermissionScope(observedCtx, tool, call.Args, authorizedPermissionArgs)
+	}, func(result tools.ToolResult, current bool) {
+		if current && agentToolExecutionActive(ctx) && tools.WorkspaceWriteLifetimeActive(ctx) {
+			a.recordToolExecution(call.Name, call.Args, result)
+			tools.ObserveHeadlessToolResult(ctx, call, result)
+		}
+	})
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "Permission scope changed before execution:") {
 			out = tools.NewPolicyBlockedResult(tools.PolicyBlockPermission, err.Error())

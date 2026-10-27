@@ -38,11 +38,22 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 	}
 
 	toolsUsed := a.snapshotResponseToolsUsed()
-	if !donegate.ShouldEnforce(userMessage, toolsUsed) {
+	a.mu.Lock()
+	partial := a.responseEvidence.PartialWrites
+	a.mu.Unlock()
+	if a.executor != nil {
+		partial = partial || a.executor.WorkspaceWritesPartial()
+	}
+	if !partial && !donegate.ShouldEnforce(userMessage, toolsUsed) && len(a.snapshotResponseTouchedPaths()) == 0 {
 		return true
 	}
 
-	profile := donegate.DetectProfileWithTouchedPaths(a.workDir, a.snapshotResponseTouchedPaths())
+	var profile donegate.Profile
+	if partial {
+		profile = donegate.DetectFullProfile(a.workDir)
+	} else {
+		profile = donegate.DetectProfileWithTouchedPaths(a.workDir, a.snapshotResponseTouchedPaths())
+	}
 	checks := donegate.BuildChecks(donegate.WithToolInvoker(ctx, a.registry, a.executor.InvokeTool, a.executor.PreflightToolPermission), a.workDir, userMessage, toolsUsed, profile, policy)
 	if len(checks) == 0 {
 		if policy.FailClosed {
@@ -144,11 +155,18 @@ func (a *App) snapshotResponseTouchedPaths() []string {
 	return snapshot
 }
 
+func (a *App) snapshotResponseMutatedPaths() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.responseEvidence.MutatedPaths...)
+}
+
 func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, result tools.ToolResult) {
-	if !result.Success {
+	observed := tools.HasWorkspaceWriteObservation(result)
+	if !result.Success && !observed {
 		return
 	}
-	if preview, _ := args["dry_run"].(bool); preview {
+	if preview, _ := args["dry_run"].(bool); preview && !observed {
 		return
 	}
 	isMutation := donegate.IsMutationTool(toolName)
@@ -158,6 +176,10 @@ func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, r
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.responseEvidence.PartialWrites = a.responseEvidence.PartialWrites || tools.FilesChangedPartial(result)
+	if a.headlessRunActive && tools.FilesChangedPartial(result) {
+		a.headlessFilesChangedPartial = true
+	}
 	if len(mutated) > 0 {
 		if a.headlessRunActive {
 			a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, mutated...))
@@ -168,12 +190,16 @@ func (a *App) recordResponseTouchedPaths(toolName string, args map[string]any, r
 	// Confirmed writes in granted external directories are mutation evidence,
 	// even though workspace-relative completion checks cannot target them.
 	mutated = donegate.NormalizeTouchedPaths(a.workDir, mutated)
-	// Declared writes count as evidence in either mode, without broadening
-	// the gate's supported-tool boundary. Multi-file previews have no targets.
-	if !isMutation || (toolName == "batch" || toolName == "refactor") && len(mutated) == 0 {
+	a.responseEvidence.MutatedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseEvidence.MutatedPaths, mutated...))
+	// Observed process writes also arm the gate. Multi-file previews have no
+	// targets, and other declared writes retain their existing tool boundary.
+	if !isMutation && !observed || (observed || toolName == "batch" || toolName == "refactor") && len(mutated) == 0 {
 		return
 	}
 	raw := append(donegate.ExtractTouchedPaths(args), tools.WrittenPathsFromResult(result)...)
+	if observed {
+		raw = mutated
+	}
 	a.responseTouchedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseTouchedPaths, raw...))
 }
 

@@ -116,18 +116,16 @@ func BuildCompletionReviewPrompt(userMessage, response string, touchedPaths, com
 		sb.WriteString(strings.Join(touchedPaths, "\n- "))
 		sb.WriteString("\n\n")
 	}
-	// Ground truth from git. Distinct from touchedPaths: tools track
-	// what the executor attempted, git tracks what actually landed on
-	// disk after all edits settled. When these lists disagree, the
-	// model is the one that's confused — surface both so it can see
-	// the discrepancy rather than doubling down on its own narrative.
+	// Callers combine current Git changes with confirmed writes from this
+	// turn, including shell restorations that leave a path clean in Git.
+	// Conservative tool targets remain separate from this evidence list.
 	if len(gitChangedPaths) > 0 {
-		sb.WriteString("Files actually modified on disk (git diff --name-only + staged + untracked):\n- ")
+		sb.WriteString("Files actually modified on disk (Git status or confirmed writes this turn):\n- ")
 		sb.WriteString(strings.Join(gitChangedPaths, "\n- "))
 		sb.WriteString("\n\n")
 	}
 	if len(falselyClaimedPaths) > 0 {
-		sb.WriteString("[VERIFICATION FAILED] The draft response below references these files, but they are NOT in the git working tree — either you didn't change them, the edit silently failed, or you hallucinated the path:\n- ")
+		sb.WriteString("[VERIFICATION FAILED] The draft response below references files with no current Git change or confirmed write this turn — either the edit silently failed or the path is wrong:\n- ")
 		sb.WriteString(strings.Join(falselyClaimedPaths, "\n- "))
 		sb.WriteString("\nRemove these claims from the final answer OR run the edit again if it was supposed to apply.\n\n")
 	}

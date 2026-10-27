@@ -179,6 +179,8 @@ type HeadlessResult struct {
 	Incomplete    bool                      `json:"incomplete"`
 	ClaimMismatch bool                      `json:"claim_mismatch,omitempty"`
 	Timing        lifecycle.Timing          `json:"timing"`
+
+	FilesChangedPartial bool `json:"files_changed_partial,omitempty"`
 }
 
 // RunHeadless executes one user prompt through the normal request pipeline
@@ -761,8 +763,14 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 	a.mu.Lock()
 	result.FilesChanged = append([]string{}, a.headlessFilesChanged...)
+	result.FilesChangedPartial = a.headlessFilesChangedPartial || a.executor.WorkspaceWritesPartial()
 	a.mu.Unlock()
 	sort.Strings(result.FilesChanged)
+	if format == HeadlessOutputText && result.FilesChangedPartial {
+		if _, err := fmt.Fprintln(opts.Stderr, "Warning: files_changed is partial; workspace write observation exceeded its limits or was unavailable."); err != nil {
+			return result, errors.Join(runErr, err)
+		}
+	}
 	if format == HeadlessOutputText && len(result.FilesChanged) > 0 && result.Verification.Status != "passed" {
 		if _, err := fmt.Fprintf(opts.Stderr, "Not verified: %s (see JSON verification checks for details).\n", result.Verification.Status); err != nil {
 			return result, errors.Join(runErr, err)
@@ -945,6 +953,7 @@ func (a *App) beginHeadlessPolicyTrackingLocked() {
 	a.headlessTerminal = &headlessTerminalOutcome{}
 	a.headlessFinalResult = ""
 	a.headlessFilesChanged = nil
+	a.headlessFilesChangedPartial = false
 	a.headlessInvocationUsage = HeadlessUsage{}
 	a.headlessInvocationCost = HeadlessCost{}
 	a.headlessCostIncomplete = false
@@ -964,6 +973,7 @@ func (a *App) endHeadlessPolicyTrackingLocked() {
 	a.headlessTerminal = nil
 	a.headlessFinalResult = ""
 	a.headlessFilesChanged = nil
+	a.headlessFilesChangedPartial = false
 	a.headlessInvocationUsage = HeadlessUsage{}
 	a.headlessInvocationCost = HeadlessCost{}
 	a.headlessCostIncomplete = false

@@ -213,6 +213,8 @@ type ToolRegistry interface {
 
 // Executor handles the function calling loop with enhanced safety and user awareness.
 type Executor struct {
+	workspaceWrites WorkspaceWriteTracker
+
 	registry  ToolRegistry
 	client    client.Client
 	workDir   string
@@ -1054,6 +1056,7 @@ func (e *Executor) AcknowledgeToolResults(history []*genai.Content) {
 
 // ResetSideEffectLedger clears deduplication ledger for a new top-level request.
 func (e *Executor) ResetSideEffectLedger() {
+	e.workspaceWrites.Reset()
 	e.sideEffectLedgerMu.Lock()
 	e.sideEffectsByCallID = make(map[string]ToolResult)
 	e.sideEffectsBySignature = make(map[string]ToolResult)
@@ -3592,13 +3595,14 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		if err := SkillHooksError(execCtx); err != nil {
 			return toolOutcome{result: NewHookStoppedResult(err.Error())}
 		}
-		if _, scoped := tool.(permissionScopedExecutor); scoped && authorizedPermissionArgs != nil {
-			outcome.result, outcome.err = ExecuteWithPermissionScope(execCtx, tool, call.Args, authorizedPermissionArgs)
-		} else if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
-			outcome.result, outcome.err = e.executeStreamingTool(execCtx, streamingTool, call.Args)
-		} else {
-			outcome.result, outcome.err = tool.Execute(execCtx, call.Args)
-		}
+		outcome.result, outcome.err = e.observeWorkspaceExecution(execCtx, ctx, tool, call.Args, func(observedCtx context.Context) (ToolResult, error) {
+			if _, scoped := tool.(permissionScopedExecutor); scoped && authorizedPermissionArgs != nil {
+				return ExecuteWithPermissionScope(observedCtx, tool, call.Args, authorizedPermissionArgs)
+			} else if streamingTool, ok := tool.(StreamingTool); ok && streamingTool.SupportsStreaming() {
+				return e.executeStreamingTool(observedCtx, streamingTool, call.Args)
+			}
+			return tool.Execute(observedCtx, call.Args)
+		})
 		return outcome
 	}
 
@@ -3718,10 +3722,6 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	// arbitrary Data strings; post-mutation bookkeeping must use the exact paths
 	// returned by the tool itself.
 	mutation := snapshotGoMutation(result)
-	declaredWrittenPaths := mutation.Paths
-	if result.Success {
-		declaredWrittenPaths = append([]string(nil), declaredWrittenPaths...)
-	}
 
 	// Step 11: apply redaction
 	if e.redactor != nil {
@@ -3829,35 +3829,8 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	}
 
-	// Tool-declared writes: a tool that mutates a file OUTSIDE the normal
-	// write-tool dispatch (e.g. `memorize` writing .gokin/project-memory.md via
-	// ProjectLearning, bypassing the executor's arg-based path extraction above)
-	// can declare the files it wrote in result.Data["written_paths"]. Invalidate
-	// the read-dedup for each (so the agent can re-read to VERIFY its own write —
-	// the "cannot re-read, returns [Unchanged]" bug) and record them for
-	// post-compaction hints. Generic + drift-proof (no per-tool name list) and
-	// defensive (a malformed Data value is a silent no-op, never a panic).
-	if result.Success {
-		for _, p := range declaredWrittenPaths {
-			if e.readTracker != nil {
-				e.readTracker.InvalidateFile(p)
-				e.readTracker.InvalidateFile(e.readTrackerPath(p))
-			}
-			if e.writeTracker != nil {
-				e.writeTracker.Record(p)
-			}
-			// Also drop the RESULT caches for the path — otherwise a verify-read
-			// of an out-of-band write hits the TTL-only toolCache and serves
-			// PRE-WRITE content (the read-dedup invalidation above only frees the
-			// dedup stub, not the cached result). Mirrors Step 12.5.
-			if e.toolCache != nil {
-				e.toolCache.InvalidateByFile(p)
-			}
-			if e.searchCache != nil {
-				e.searchCache.InvalidateByPath(p)
-			}
-		}
-	}
+	// Includes observed shell writes before a nonzero exit and partial scans.
+	e.invalidateWorkspaceWrites(result)
 
 	// Step 12.8: Fast, workspace-aware Go diagnostics. This runs before the
 	// broader delta-check so cached gopls type information can give the model a
@@ -5440,7 +5413,7 @@ func toolExecutionTimeout(base, p95 time.Duration, haveStats bool, toolName stri
 // inputs, explicit no-ops, and batch/refactor previews. Legacy scalar tools
 // without provenance still report their successful mutation target.
 func MutationPathsFromResult(name string, args map[string]any, result ToolResult) []string {
-	if !result.Success {
+	if !result.Success && !HasWorkspaceWriteObservation(result) {
 		return nil
 	}
 	mutation := result.mutation

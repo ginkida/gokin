@@ -14,6 +14,9 @@ const responseEvidenceMaxEntries = 12
 type responseEvidenceLedger struct {
 	ReadPaths []string
 	Searches  []string
+
+	MutatedPaths  []string
+	PartialWrites bool
 }
 
 type responseEvidenceSnapshot struct {

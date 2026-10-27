@@ -363,6 +363,8 @@ type App struct {
 	responseCommands      []string
 	responseEvidence      responseEvidenceLedger
 
+	headlessFilesChangedPartial bool
+
 	responseClaimMismatch            bool
 	responseClaimCorrectionAttempted bool
 	responsePermissionDenied         bool

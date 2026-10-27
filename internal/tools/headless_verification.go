@@ -137,8 +137,9 @@ func ObserveHeadlessToolResult(ctx context.Context, call *genai.FunctionCall, re
 	// a nonzero exit. Retain earlier proof only for recognized checks or reads.
 	trustedWrapper := runnerRecordsCheck && result.HookUpdatedInput == nil
 	possibleShellWrite := call.Name == "bash" && !trustedWrapper && !validationCommand && !permission.IsReadOnlyBashArgs(args)
-	if possibleShellWrite && result.PolicyBlock == nil || result.Success && (len(WrittenPathsFromResult(result)) > 0 ||
-		IsImplementationTool(call.Name) && len(MutationPathsFromResult(call.Name, args, result)) > 0) {
+	confirmedWrites := (result.Success || HasWorkspaceWriteObservation(result)) && len(WrittenPathsFromResult(result)) > 0
+	if possibleShellWrite && result.PolicyBlock == nil || confirmedWrites || result.Success &&
+		IsImplementationTool(call.Name) && len(MutationPathsFromResult(call.Name, args, result)) > 0 {
 		state.mu.Lock()
 		state.verification = nil
 		state.mu.Unlock()

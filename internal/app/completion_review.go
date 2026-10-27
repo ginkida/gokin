@@ -117,11 +117,10 @@ func (a *App) runCompletionReviewIfNeeded(
 		})
 	}
 
-	// Ground-truth git diff for claim verification. Best-effort: if
-	// discovery fails (not a git tree, git not installed, timeout) we
-	// fall through to the old behaviour of re-prompting without the
-	// reality check — no worse than before.
+	// A shell restoration can write a file back to HEAD, leaving it clean in
+	// Git. Keep confirmed turn writes alongside the current dirty-path list.
 	gitChangedPaths := donegate.DiscoverTouchedPaths(a.workDir)
+	gitChangedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(gitChangedPaths, a.snapshotResponseMutatedPaths()...))
 	falselyClaimed := donegate.DetectFalselyClaimedPaths(*response, gitChangedPaths)
 
 	ledgerSummary := a.snapshotResponseEvidence().FormatForCompletionReview()

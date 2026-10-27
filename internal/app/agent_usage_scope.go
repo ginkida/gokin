@@ -42,6 +42,12 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 	a.mu.Lock()
 	if !result.InvocationScope.IsZero() && (!a.headlessRunActive && result.InvocationScope == a.responseAgentScope ||
 		a.headlessRunActive && a.headlessAgentUsageScopeOwner == a.headlessTerminal && result.InvocationScope == a.headlessAgentUsageScope) {
+		if partial, _ := result.Metadata["files_changed_partial"].(bool); partial {
+			a.responseEvidence.PartialWrites = true
+			if a.headlessRunActive {
+				a.headlessFilesChangedPartial = true
+			}
+		}
 		gatePaths := result.TouchedPaths
 		paths := result.FilesChanged
 		if paths == nil {
@@ -62,6 +68,7 @@ func (a *App) accumulateScopedAgentResultUsage(result *agent.AgentResult) {
 			gatePaths = paths
 		}
 		paths = donegate.NormalizeTouchedPaths(a.workDir, paths)
+		a.responseEvidence.MutatedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.responseEvidence.MutatedPaths, paths...))
 		if a.headlessRunActive {
 			a.headlessFilesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.headlessFilesChanged, paths...))
 		}

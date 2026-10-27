@@ -19,6 +19,7 @@ import (
 	"gokin/internal/format"
 	"gokin/internal/logging"
 	"gokin/internal/security"
+	"gokin/internal/workspace"
 )
 
 // SafeEnvVars is the whitelist of environment variables passed to task commands.
@@ -379,6 +380,9 @@ func (b *safeBuffer) TotalBytes() int64 {
 
 // Task represents a background task.
 type Task struct {
+	writeCompletion WriteCompletion
+	writeDelta      *workspace.Delta
+
 	ID        string
 	Command   string
 	Status    Status
@@ -500,6 +504,12 @@ func (t *Task) run() {
 			t.sandboxCleanup()
 		}
 		t.Output.Close()
+		if t.writeCompletion != nil {
+			delta := completeWorkspaceWrites(t.writeCompletion, t.GetStatus() == StatusCompleted)
+			t.mu.Lock()
+			t.writeDelta = &delta
+			t.mu.Unlock()
+		}
 		t.doneOnce.Do(func() { close(t.done) })
 	}()
 
@@ -662,6 +672,8 @@ func (t *Task) Duration() time.Duration {
 
 // Info returns a summary of the task.
 type Info struct {
+	WriteDelta *workspace.Delta
+
 	ID         string
 	Command    string
 	Status     string
@@ -689,6 +701,14 @@ func (t *Task) GetInfo() Info {
 		Duration:   t.durationLocked(),
 		StartTime:  t.StartTime,
 		EndTime:    t.EndTime,
+	}
+	if t.writeCompletion != nil && t.writeDelta == nil {
+		info.Status = StatusRunning.String()
+	}
+	if t.writeDelta != nil {
+		delta := *t.writeDelta
+		delta.Paths = append([]string(nil), delta.Paths...)
+		info.WriteDelta = &delta
 	}
 	finished := false
 	select {

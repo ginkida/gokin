@@ -107,7 +107,28 @@ func (t *TaskOutputTool) Validate(args map[string]any) error {
 	return nil
 }
 
-func (t *TaskOutputTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
+func (t *TaskOutputTool) Execute(ctx context.Context, args map[string]any) (result ToolResult, err error) {
+	// Retain historical write evidence on every shell output path. Reading a
+	// task must not publish written_paths and invent a new workspace mutation.
+	defer func() {
+		id := GetStringDefault(args, "task_id", "")
+		if t.manager != nil && GetStringDefault(args, "action", "get") == "get" {
+			if info, ok := t.manager.GetInfo(id); ok && info.WriteDelta != nil {
+				data := make(map[string]any)
+				if original, ok := result.Data.(map[string]any); ok {
+					for key, value := range original {
+						data[key] = value
+					}
+				}
+				data["background_written_paths"] = append([]string(nil), info.WriteDelta.Paths...)
+				if info.WriteDelta.Partial {
+					data["background_files_changed_partial"] = true
+					result.Content += "\nWarning: background write accounting is partial: " + info.WriteDelta.Warning
+				}
+				result.Data = data
+			}
+		}
+	}()
 	action := GetStringDefault(args, "action", "get")
 	taskID, _ := GetString(args, "task_id")
 	block := GetBoolDefault(args, "block", false)

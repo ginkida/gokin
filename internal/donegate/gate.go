@@ -996,10 +996,20 @@ func DetectProfile(workDir string) Profile {
 	return DetectProfileWithTouchedPaths(workDir, nil)
 }
 
+// DetectFullProfile avoids Git's touched-path narrowing when observation is
+// partial. Unknown shell targets require the project's full verification set.
+func DetectFullProfile(workDir string) Profile {
+	return detectProfile(workDir, nil, false)
+}
+
 func DetectProfileWithTouchedPaths(workDir string, touchedOverride []string) Profile {
+	return detectProfile(workDir, touchedOverride, true)
+}
+
+func detectProfile(workDir string, touchedOverride []string, discoverTouched bool) Profile {
 	markers := discoverDoneGateMarkers(workDir)
 	touched := NormalizeTouchedPaths(workDir, touchedOverride)
-	if len(touched) == 0 {
+	if len(touched) == 0 && discoverTouched {
 		touched = DiscoverTouchedPaths(workDir)
 	}
 

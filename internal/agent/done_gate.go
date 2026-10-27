@@ -75,23 +75,32 @@ func agentDoneGateMaxFixes(p *donegate.Policy) int {
 // recordToolExecution feeds the per-run usage trackers from the tool
 // result-finalization boundary (including nested hook calls). toolsUsed records every
 // attempted call (a failed bash run still gave the model the chance to
-// verify); touchedPaths records only successful mutations — a failed edit
-// changed nothing, so it must not arm the gate.
+// verify); touchedPaths records confirmed mutations, including shell writes
+// observed before a command failed. Failed native edits do not arm the gate.
 func (a *Agent) recordToolExecution(toolName string, args map[string]any, result tools.ToolResult) {
 	if result.HookUpdatedInput != nil {
 		args = result.HookUpdatedInput
 	}
+	if !tools.HasWorkspaceWriteObservation(result) {
+		paths := tools.WrittenPathsFromResult(result)
+		if donegate.IsMutationTool(toolName) {
+			paths = tools.MutationPathsFromResult(toolName, args, result)
+		}
+		tools.RecordNativeWorkspaceWrites(a.workDir, paths)
+	}
 	a.toolsMu.Lock()
 	defer a.toolsMu.Unlock()
+	a.partialWrites = a.partialWrites || tools.FilesChangedPartial(result)
 	a.toolsUsed = append(a.toolsUsed, toolName)
-	if result.Success {
+	observed := tools.HasWorkspaceWriteObservation(result)
+	if result.Success || observed {
 		written := tools.WrittenPathsFromResult(result)
 		if donegate.IsMutationTool(toolName) {
 			written = tools.MutationPathsFromResult(toolName, args, result)
 		}
 		a.filesChanged = donegate.NormalizeTouchedPaths(a.workDir, append(a.filesChanged, written...))
 	}
-	if !result.Success || !donegate.IsMutationTool(toolName) {
+	if !observed && (!result.Success || !donegate.IsMutationTool(toolName)) || observed && len(tools.WrittenPathsFromResult(result)) == 0 && !tools.FilesChangedPartial(result) {
 		return
 	}
 	// Every successful mutation bumps the generation — including a re-edit of
@@ -101,6 +110,9 @@ func (a *Agent) recordToolExecution(toolName string, args map[string]any, result
 	a.mutationGen++
 	a.mutatedPaths = donegate.NormalizeTouchedPaths(a.workDir, append(a.mutatedPaths, tools.MutationPathsFromResult(toolName, args, result)...))
 	rawPaths := append(donegate.ExtractTouchedPaths(args), tools.WrittenPathsFromResult(result)...)
+	if observed {
+		rawPaths = tools.WrittenPathsFromResult(result)
+	}
 	paths := donegate.NormalizeTouchedPaths(a.workDir, rawPaths)
 	if len(paths) == 0 {
 		return
@@ -152,19 +164,24 @@ func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *s
 		return agentGateSkipped, nil
 	}
 	touched := a.GetTouchedPaths()
-	if len(touched) == 0 {
+	a.toolsMu.Lock()
+	partial := a.partialWrites
+	a.toolsMu.Unlock()
+	partial = partial || a.workspaceWrites.Partial()
+	if len(touched) == 0 && !partial {
 		return agentGateSkipped, nil
 	}
 	gen := a.mutationGeneration()
-	if *checkedAtGen == gen {
+	if *checkedAtGen == gen && !partial {
 		return agentGatePassed, nil
 	}
 	toolsUsed := a.GetToolsUsed()
-	if !donegate.ShouldEnforce(prompt, toolsUsed) {
-		return agentGateSkipped, nil
+	var profile donegate.Profile
+	if partial {
+		profile = donegate.DetectFullProfile(a.workDir)
+	} else {
+		profile = donegate.DetectProfileWithTouchedPaths(a.workDir, touched)
 	}
-
-	profile := donegate.DetectProfileWithTouchedPaths(a.workDir, touched)
 	reg := donegate.WithToolInvoker(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
 		return a.executeNestedToolResultSafely(ctx, &genai.FunctionCall{ID: "done-gate-" + generateAgentID(), Name: name, Args: args}), nil
 	}, func(ctx context.Context, name string, args map[string]any) bool {
@@ -243,6 +260,7 @@ func (a *Agent) injectClaimCorrectionIfNeeded(finalText string) bool {
 		return false
 	}
 	gitChanged := donegate.DiscoverTouchedPaths(a.workDir)
+	gitChanged = donegate.NormalizeTouchedPaths(a.workDir, append(gitChanged, a.GetMutatedPaths()...))
 	falselyClaimed := donegate.DetectFalselyClaimedPaths(finalText, gitChanged)
 	if len(falselyClaimed) == 0 {
 		return false
@@ -250,7 +268,7 @@ func (a *Agent) injectClaimCorrectionIfNeeded(finalText string) bool {
 	if len(falselyClaimed) > 5 {
 		falselyClaimed = falselyClaimed[:5]
 	}
-	correction := "[guidance] Claim verification against git: your latest summary references files that are NOT among the actual on-disk changes (git diff + staged + untracked): " +
+	correction := "[guidance] Claim verification against workspace evidence: your latest summary references files with no current Git change or confirmed write this turn: " +
 		strings.Join(falselyClaimed, ", ") +
 		". Either an edit silently failed or the path is wrong. Re-check (git_status / read), re-apply the change if it was supposed to land, and make the final summary cite only files that really changed."
 	a.stateMu.Lock()

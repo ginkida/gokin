@@ -39,6 +39,9 @@ type goDiagnosticsOutcome struct {
 }
 
 type goMutationSnapshot struct {
+	WorkspaceObserved bool
+	Partial           bool
+
 	Paths            []string
 	PathsDeclared    bool
 	WorkspaceChanged bool
@@ -52,6 +55,8 @@ func snapshotGoMutation(result ToolResult) goMutationSnapshot {
 	if !ok {
 		return snapshot
 	}
+	snapshot.WorkspaceObserved, _ = data["workspace_observed"].(bool)
+	snapshot.Partial, _ = data["files_changed_partial"].(bool)
 	if changed, ok := data["changed"].(bool); ok {
 		snapshot.Changed = changed
 		snapshot.ChangedKnown = true
