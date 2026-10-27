@@ -42,6 +42,9 @@ const (
 	MaxFunctionCallsPerResponse = 20
 	// MaxConcurrentToolExecutions limits parallel goroutines for tool execution.
 	MaxConcurrentToolExecutions = 5
+	// MaxConcurrentLocalReads is the cap for a parallel group made only of
+	// local read-only tools (see ParallelGroupConcurrency).
+	MaxConcurrentLocalReads = 10
 	// defaultModelRoundTimeout caps a single model round to prevent zombie requests.
 	// Keep this generous for reasoning-heavy models; SSE idle timeout still protects
 	// against truly stalled streams. Shared with the agent loop via the client
@@ -2818,7 +2821,7 @@ func (e *Executor) executeTools(ctx context.Context, calls []*genai.FunctionCall
 			// Execute read-only tools in parallel
 			var wg sync.WaitGroup
 			var mu sync.Mutex
-			semaphore := make(chan struct{}, MaxConcurrentToolExecutions)
+			semaphore := make(chan struct{}, ParallelGroupConcurrency(group.Calls))
 
 			for _, call := range group.Calls {
 				idx := callToIdx[call]

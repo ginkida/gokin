@@ -91,6 +91,23 @@ var parallelSafeTools = map[string]bool{
 	"history_search": true, "get_plan_status": true,
 }
 
+// networkParallelTools reach remote services, so a group containing one keeps
+// the conservative concurrency cap instead of the local-read one.
+var networkParallelTools = map[string]bool{"web_fetch": true, "web_search": true}
+
+// ParallelGroupConcurrency is the goroutine cap for one parallel-safe group.
+// Local reads are cheap filesystem/git work and run at
+// MaxConcurrentLocalReads; any network tool pins the whole group to
+// MaxConcurrentToolExecutions so a burst of fetches can't trip rate limits.
+func ParallelGroupConcurrency(calls []*genai.FunctionCall) int {
+	for _, call := range calls {
+		if call != nil && networkParallelTools[strings.ToLower(strings.TrimSpace(call.Name))] {
+			return MaxConcurrentToolExecutions
+		}
+	}
+	return MaxConcurrentLocalReads
+}
+
 // sequentialReadOnlyTools preserve local state between calls and therefore
 // must not be scheduled concurrently, but they still do not represent a user
 // or workspace mutation for checkpoint/done-gate accounting.

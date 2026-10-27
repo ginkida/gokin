@@ -5489,7 +5489,7 @@ func (a *Agent) executeToolsParallel(ctx context.Context, calls []*genai.Functio
 	}
 
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 5) // Max 5 concurrent executions
+	semaphore := make(chan struct{}, tools.ParallelGroupConcurrency(calls))
 	outcomes := make(chan indexedRawOutcome, len(calls))
 	spawned := 0
 
