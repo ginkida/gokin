@@ -303,9 +303,10 @@ type ModelConfig struct {
 	Provider string `yaml:"provider"` // Model provider: gemini, glm, auto (default: auto)
 
 	// Existing fields (manual configuration)
-	Name            string  `yaml:"name"`
-	Temperature     float32 `yaml:"temperature"`
-	MaxOutputTokens int32   `yaml:"max_output_tokens"`
+	Name                 string  `yaml:"name"`
+	Temperature          float32 `yaml:"temperature"`
+	MaxOutputTokens      int32   `yaml:"max_output_tokens"`
+	MaxToolArgumentBytes int     `yaml:"max_tool_argument_bytes,omitempty"` // 0 = 1 MiB per tool call; increase for large file writes
 	// Custom API endpoint override (optional)
 	// If set, overrides the default BaseURL for the model
 	CustomBaseURL string `yaml:"custom_base_url"`

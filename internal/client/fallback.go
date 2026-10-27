@@ -198,6 +198,11 @@ func (fc *FallbackClient) recordFailure(operation string, index int, err error) 
 // the payload being sent; silently resubmitting that payload to another backend
 // can hide an actionable bug or bypass a provider safety decision.
 func shouldFallbackToNextProvider(err error) bool {
+	// The owning agent/executor must append recovery guidance and enforce its
+	// turn-wide retry budget; transparent failover cannot do that.
+	if _, ok := OutputRecoveryError(err); ok {
+		return false
+	}
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}

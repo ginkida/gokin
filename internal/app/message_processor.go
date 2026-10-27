@@ -323,6 +323,7 @@ func (a *App) processMessageWithContext(ctx context.Context, message string) {
 // file to the payload; searching memory with that file would be both expensive
 // and semantically wrong, so the caller supplies the original user request.
 func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memoryQuery string) {
+	ctx = client.ContextWithOutputRecoveryBudget(ctx)
 	defer a.finishMessageProcessing()
 	// A FIFO handoff can be cancelled while its UI status send is waiting for
 	// the event loop. Keep the common finalizer, but do not enter the model
@@ -1044,6 +1045,9 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 
 		cancelled := errors.Is(err, context.Canceled)
 		ft := client.DetectFailureTelemetry(err)
+		if _, ok := client.OutputRecoveryError(err); ok {
+			a.recordHeadlessTerminalOutcome("degenerate_output", err.Error())
+		}
 		failureProvider := ft.Provider
 		if failureProvider == "" {
 			failureProvider = runtimeProvider

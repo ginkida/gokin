@@ -17,13 +17,14 @@ const MaxStrategyMetrics = 1000
 
 // StrategyMetrics tracks performance metrics for a strategy.
 type StrategyMetrics struct {
-	StrategyName string         `json:"strategy_name"`
-	SuccessCount int            `json:"success_count"`
-	FailureCount int            `json:"failure_count"`
-	TotalTime    time.Duration  `json:"total_time"`
-	AvgDuration  time.Duration  `json:"avg_duration"`
-	LastUsed     time.Time      `json:"last_used"`
-	TaskTypes    map[string]int `json:"task_types"` // TaskType -> count
+	AccountingVersion int            `json:"accounting_version,omitempty"`
+	StrategyName      string         `json:"strategy_name"`
+	SuccessCount      int            `json:"success_count"`
+	FailureCount      int            `json:"failure_count"`
+	TotalTime         time.Duration  `json:"total_time"`
+	AvgDuration       time.Duration  `json:"avg_duration"`
+	LastUsed          time.Time      `json:"last_used"`
+	TaskTypes         map[string]int `json:"task_types"` // TaskType -> count
 }
 
 // SuccessRate returns the success rate as a percentage.
@@ -92,6 +93,7 @@ func (so *StrategyOptimizer) load() error {
 	}
 
 	valid := make(map[string]*StrategyMetrics, len(metrics))
+	resetCount := 0
 	for name, metric := range metrics {
 		if name == "" || metric == nil {
 			continue
@@ -99,7 +101,19 @@ func (so *StrategyOptimizer) load() error {
 		if metric.TaskTypes == nil {
 			metric.TaskTypes = make(map[string]int)
 		}
+		if metric.AccountingVersion < 2 {
+			if metric.SuccessCount != 0 || metric.FailureCount != 0 {
+				resetCount++
+				metric.SuccessCount, metric.FailureCount = 0, 0
+				metric.TotalTime, metric.AvgDuration = 0, 0
+				metric.TaskTypes = make(map[string]int)
+			}
+			metric.AccountingVersion = 2
+		}
 		valid[name] = metric
+	}
+	if resetCount > 0 {
+		logging.Warn("reset legacy strategy metrics for terminal execution accounting", "strategies", resetCount)
 	}
 	so.metrics = valid
 	if len(so.metrics) > MaxStrategyMetrics {
@@ -118,7 +132,8 @@ func (so *StrategyOptimizer) save() ([]byte, error) {
 	return data, nil
 }
 
-// writeSnapshot writes pre-serialized data to disk without holding any locks.
+// writeSnapshot persists the serialized counts. Mutating callers hold so.mu
+// through the write so older snapshots cannot replace newer accounting.
 func (so *StrategyOptimizer) writeSnapshot(data []byte) error {
 	return writeOptimizerStore(so.storagePath(), data)
 }
@@ -131,8 +146,9 @@ func (so *StrategyOptimizer) RecordExecution(strategyName string, taskType strin
 	metrics, ok := so.metrics[strategyName]
 	if !ok {
 		metrics = &StrategyMetrics{
-			StrategyName: strategyName,
-			TaskTypes:    make(map[string]int),
+			StrategyName:      strategyName,
+			AccountingVersion: 2,
+			TaskTypes:         make(map[string]int),
 		}
 		so.metrics[strategyName] = metrics
 	}
@@ -152,22 +168,15 @@ func (so *StrategyOptimizer) RecordExecution(strategyName string, taskType strin
 		so.evictOldest(MaxStrategyMetrics)
 	}
 
-	// Snapshot data under lock, write to disk asynchronously
+	// Serialize the write with the counter update: out-of-order async
+	// snapshots could replace newer counts (or resurrect counts after Clear).
 	snapshot, err := so.save()
-	if err != nil {
-		logging.Debug("failed to serialize strategy metrics", "error", err)
-		return
+	if err == nil {
+		err = so.writeSnapshot(snapshot)
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logging.Warn("panic in strategy optimizer save goroutine", "panic", r)
-			}
-		}()
-		if err := so.writeSnapshot(snapshot); err != nil {
-			logging.Debug("failed to save strategy metrics", "error", err)
-		}
-	}()
+	if err != nil {
+		logging.Debug("failed to save strategy metrics", "error", err)
+	}
 }
 
 // evictOldest bounds durable strategy cardinality. Caller holds so.mu when

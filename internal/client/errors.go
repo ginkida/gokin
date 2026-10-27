@@ -45,6 +45,7 @@ type FailureReason string
 
 const (
 	FailureReasonOther             FailureReason = "other"
+	FailureReasonDegenerateOutput  FailureReason = "degenerate_output"
 	FailureReasonStreamIdleTimeout FailureReason = "stream_idle_timeout"
 	FailureReasonModelRoundTimeout FailureReason = "model_round_timeout"
 	FailureReasonContextCancel     FailureReason = "context_cancel"
@@ -205,6 +206,10 @@ func DetectFailureTelemetry(err error) FailureTelemetry {
 		return t
 	}
 
+	if _, ok := OutputRecoveryError(err); ok {
+		t.Reason = string(FailureReasonDegenerateOutput)
+		return t
+	}
 	var partial interface{ PartialFailure() bool }
 	if errors.As(err, &partial) {
 		t.Partial = partial.PartialFailure()
@@ -315,6 +320,9 @@ func IsRetryableAPIError(err error) bool {
 
 // IsRateLimitError returns true when the error indicates API rate limiting (429).
 func IsRateLimitError(err error) bool {
+	if _, ok := OutputRecoveryError(err); ok {
+		return false
+	}
 	if err == nil {
 		return false
 	}
@@ -343,6 +351,9 @@ func IsRetryableError(err error) bool {
 	// Typed checks first
 	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if failure, ok := OutputRecoveryError(err); ok {
+		return !failure.Exhausted
 	}
 	// A hard terminal provider failure (request/auth/account/plan/content) must never be
 	// retried — retrying can't fix it and only delays the actionable error.

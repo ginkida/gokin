@@ -3,6 +3,7 @@ package logging
 import (
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 
 	"gokin/internal/securefs"
@@ -19,13 +20,17 @@ var errLogFileUnavailable = errors.New("log file became unavailable during rotat
 // an unbounded file, and the documented 10 MiB cap was true only across
 // restarts.
 //
-// One backup is kept (`<path>.old`), matching what the open-time rotation did.
+// Keep ten recent segments plus a pinned first segment for this writer/session.
+// At the default size this retains at most 120 MiB (including the live file),
+// except for a single oversized record, which is kept intact.
 type rotatingFileWriter struct {
-	mu    sync.Mutex
-	file  *os.File
-	path  string
-	size  int64
-	limit int64
+	mu                    sync.Mutex
+	file                  *os.File
+	path                  string
+	size                  int64
+	limit                 int64
+	startPinned           bool
+	segmentHasSessionData bool // Do not pin preexisting bytes rotated before our first write.
 }
 
 func newRotatingFileWriter(file *os.File, path string, size, limit int64) *rotatingFileWriter {
@@ -51,6 +56,9 @@ func (w *rotatingFileWriter) Write(p []byte) (int, error) {
 	}
 	written, err := w.file.Write(p)
 	w.size += int64(written)
+	if written > 0 {
+		w.segmentHasSessionData = true
+	}
 	return written, err
 }
 
@@ -81,11 +89,28 @@ func (w *rotatingFileWriter) rotateLocked() {
 		current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
 		os.SameFile(expected, current)
 	if ours {
-		_ = os.Remove(backup)
+		// Rename links themselves, never follow an existing backup symlink.
+		_ = os.Remove(backup + "." + strconv.Itoa(maxLogBackups-1))
+		for i := maxLogBackups - 2; i >= 0; i-- {
+			source := backup
+			if i > 0 {
+				source += "." + strconv.Itoa(i)
+			}
+			_ = os.Rename(source, backup+"."+strconv.Itoa(i+1))
+		}
 		if err := os.Rename(w.path, backup); err == nil {
 			_ = securefs.SecurePrivateFile(backup)
+			if !w.startPinned && w.segmentHasSessionData {
+				_ = os.Remove(w.path + ".start")
+				// A hard link pins the immutable first segment without copying
+				// a potentially large diagnostic file or following a target.
+				if os.Link(backup, w.path+".start") == nil {
+					w.startPinned = true
+				}
+			}
 		}
 	}
+	w.segmentHasSessionData = false
 	file, err := securefs.OpenPrivateAppend(w.path)
 	if err != nil {
 		w.size = 0

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gokin/internal/agent"
+	"gokin/internal/chat"
+	"gokin/internal/client"
 	"gokin/internal/commands"
 	"gokin/internal/goals"
 	"gokin/internal/hooks"
@@ -300,16 +302,14 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	if a.executor == nil {
 		return emitEarlyFailure("app_init", fmt.Errorf("executor not initialized"))
 	}
-	pendingRecovery, err := a.pendingRecoveryForHeadlessPrompt(prompt)
-	if err != nil {
-		return emitEarlyFailure("recovery_pending", err)
-	}
+	var pendingRecovery *chat.SerializedPendingRecovery
 
 	// Claim the same foreground slot used by the interactive submit path before
 	// swapping presenters or execution policy. A busy App must remain entirely
 	// untouched: in particular, a headless caller must never replace another
 	// turn's cancellation owner and later clear its processing flag.
 	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = client.NewOutputRecoveryBudget(runCtx)
 	permissionMode := opts.PermissionMode
 	if permissionMode == "" {
 		a.mu.Lock()
@@ -362,7 +362,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	// was waiting to claim the slot; launching an unrelated prompt from the
 	// earlier snapshot would bypass that lineage.
 	var headlessLineage conversationLineage
-	pendingRecovery, headlessLineage, err = a.pendingRecoveryForHeadlessPromptAtLineage(prompt)
+	pendingRecovery, headlessLineage, err = a.prepareHeadlessRecovery(prompt)
 	if err != nil {
 		return emitEarlyFailure("recovery_pending", err)
 	}

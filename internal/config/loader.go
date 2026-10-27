@@ -460,6 +460,9 @@ func loadFromEnv(cfg *Config) {
 
 // Validate validates the configuration.
 func (c *Config) Validate() error {
+	if c.Model.MaxToolArgumentBytes < 0 {
+		return fmt.Errorf("model.max_tool_argument_bytes cannot be negative")
+	}
 	if err := ValidateKeybindings(c.UI.Keybindings); err != nil {
 		return err
 	}

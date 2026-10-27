@@ -54,6 +54,9 @@ func IsTerminalProviderError(err error) bool {
 // Keyword matching (rather than numeric-code matching) avoids false positives
 // from timing/token strings like "529ms" or "1305 tokens".
 func IsOverloadError(err error) bool {
+	if _, ok := OutputRecoveryError(err); ok {
+		return false
+	}
 	if err == nil {
 		return false
 	}

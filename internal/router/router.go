@@ -604,8 +604,9 @@ func (r *Router) ExecuteWithPolicyDecisions(
 		// than letting the caller replace it.
 		h, resp, err := r.executeViaSubAgent(ctx, message, decision.SubAgentType, decision.Background)
 		var sideEffectErr *AgentSideEffectError
-		if err != nil && len(h) > 0 && errors.As(err, &sideEffectErr) {
-			// A failed stateful run remains an error (outer retries must stop), but
+		_, degenerate := client.OutputRecoveryError(err)
+		if err != nil && len(h) > 0 && (errors.As(err, &sideEffectErr) || degenerate) {
+			// A terminal delegated failure remains an error (retries must stop), but
 			// its partial model output is still a valid conversation artifact. Extend
 			// it with the original user turn before returning; handing the App the
 			// raw minimal slice would persist a model-only history on an empty/new
@@ -783,6 +784,11 @@ func (r *Router) executeViaSubAgent(ctx context.Context, message string, agentTy
 			// the raw transient error invites the App's outer retry to duplicate work.
 			return partialHistory, partialResponse,
 				newAgentSideEffectError(agentID, failureCause, result, false)
+		}
+		// Exhausted output recovery is an explicit failed turn even when the
+		// read-only agent produced useful prose before its stream degenerated.
+		if _, degenerate := client.OutputRecoveryError(failureCause); degenerate {
+			return partialHistory, partialResponse, failureCause
 		}
 		// The sub-agent stopped before finishing — but it may have done real work
 		// first (the agent preserves it in result.Output). Surface that partial

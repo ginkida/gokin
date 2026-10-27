@@ -35,6 +35,7 @@ func init() {
 
 const (
 	maxLogFileSize = 10 * 1024 * 1024 // 10 MB
+	maxLogBackups  = 10
 )
 
 // EnableFileLogging enables logging to a file in the config directory.
@@ -78,23 +79,6 @@ func EnablePathLogging(path string, level Level, rawFilter string) error {
 		return fmt.Errorf("secure log file: %w", err)
 	}
 
-	// Rotate if the log file exceeds the size limit.
-	if info, err := os.Lstat(absolute); err == nil {
-		if info.Size() > maxLogFileSize {
-			// Keep one backup
-			backupPath := absolute + ".old"
-			_ = os.Remove(backupPath)
-			if os.Rename(absolute, backupPath) == nil {
-				moved, movedErr := os.Lstat(backupPath)
-				if movedErr == nil && moved.Mode().IsRegular() && os.SameFile(info, moved) {
-					_ = securefs.SecurePrivateFile(backupPath)
-				}
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect log file: %w", err)
-	}
-
 	f, err := securefs.OpenPrivateAppend(absolute)
 	if err != nil {
 		return err
@@ -109,6 +93,12 @@ func EnablePathLogging(path string, level Level, rawFilter string) error {
 		existing = info.Size()
 	}
 	logSink = newRotatingFileWriter(f, absolute, existing, maxLogFileSize)
+	if existing >= maxLogFileSize {
+		logSink.rotateLocked()
+		if logSink.file == nil {
+			return errLogFileUnavailable
+		}
+	}
 	logPath = absolute
 
 	var slogLevel slog.Level

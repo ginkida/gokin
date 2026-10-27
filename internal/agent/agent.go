@@ -1565,6 +1565,7 @@ func (a *Agent) ReceiveResponse(ctx context.Context, messageID string) (string, 
 
 // Run executes the agent with the given prompt and returns the result.
 func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
+	ctx = client.NewOutputRecoveryBudget(ctx)
 	a.toolsMu.Lock()
 	a.mutatedPaths = nil
 	a.filesChanged = nil
@@ -3422,6 +3423,21 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 			// Context cancelled (Esc pressed) — return immediately
 			if ctx.Err() != nil {
 				return a.history, output.String(), ctx.Err()
+			}
+
+			if _, degenerate := client.OutputRecoveryError(apiErr); degenerate {
+				retry, terminal := client.ClaimOutputRecovery(ctx, apiErr)
+				if retry {
+					a.stateMu.Lock()
+					a.history = client.AppendOutputRecoveryNote(a.history)
+					a.stateMu.Unlock()
+					a.safeOnText("\n[Output recovery: discarded incomplete response; retrying once with concise-output guidance.]\n")
+					continue
+				}
+				a.stateMu.Lock()
+				a.history = append(a.history, genai.NewContentFromText(terminal.Error(), genai.RoleModel))
+				a.stateMu.Unlock()
+				return a.history, output.String(), terminal
 			}
 
 			// Context too long — try compacting history before retry

@@ -279,7 +279,7 @@ func clientConfigFingerprint(cfg *config.Config, provider, modelID string) strin
 	}
 	override := cfg.API.Retry.Providers[provider]
 	identity := fmt.Sprintf(
-		"provider=%q\x00model=%q\x00custom_base=%q\x00ollama_base=%q\x00key=%q\x00temp=%g\x00max=%d\x00thinking=%t/%d\x00effort=%q\x00retry=%d/%d/%d\x00provider_retry=%d/%d",
+		"provider=%q\x00model=%q\x00custom_base=%q\x00ollama_base=%q\x00key=%q\x00temp=%g\x00max=%d/%d\x00thinking=%t/%d\x00effort=%q\x00retry=%d/%d/%d\x00provider_retry=%d/%d",
 		provider,
 		modelID,
 		cfg.Model.CustomBaseURL,
@@ -287,6 +287,7 @@ func clientConfigFingerprint(cfg *config.Config, provider, modelID string) strin
 		apiKey,
 		cfg.Model.Temperature,
 		cfg.Model.MaxOutputTokens,
+		cfg.Model.MaxToolArgumentBytes,
 		cfg.Model.EnableThinking,
 		cfg.Model.ThinkingBudget,
 		cfg.Model.ReasoningEffort,
@@ -446,16 +447,17 @@ func newGLMClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	anthropicConfig := AnthropicConfig{
-		APIKey:            loadedKey.Value,
-		BaseURL:           baseURL,
-		Model:             modelID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    enableThinking,
-		ThinkingBudget:    thinkingBudget,
-		ReasoningEffort:   cfg.Model.ReasoningEffort,
-		StreamIdleTimeout: timeouts.StreamIdleTimeout,
+		APIKey:               loadedKey.Value,
+		BaseURL:              baseURL,
+		Model:                modelID,
+		MaxTokens:            cfg.Model.MaxOutputTokens,
+		MaxToolArgumentBytes: cfg.Model.MaxToolArgumentBytes,
+		Temperature:          cfg.Model.Temperature,
+		StreamEnabled:        true,
+		EnableThinking:       enableThinking,
+		ThinkingBudget:       thinkingBudget,
+		ReasoningEffort:      cfg.Model.ReasoningEffort,
+		StreamIdleTimeout:    timeouts.StreamIdleTimeout,
 		// Request retries are orchestrated at App layer.
 		MaxRetries:  0,
 		RetryDelay:  cfg.API.Retry.RetryDelay,
@@ -528,20 +530,21 @@ func newDeepSeekClient(cfg *config.Config, modelID string) (Client, error) {
 	}
 
 	anthropicConfig := AnthropicConfig{
-		APIKey:            loadedKey.Value,
-		BaseURL:           baseURL,
-		Model:             modelID,
-		MaxTokens:         cfg.Model.MaxOutputTokens,
-		Temperature:       cfg.Model.Temperature,
-		StreamEnabled:     true,
-		EnableThinking:    enableThinking,
-		ThinkingBudget:    thinkingBudget,
-		ReasoningEffort:   cfg.Model.ReasoningEffort,
-		StreamIdleTimeout: timeouts.StreamIdleTimeout,
-		MaxRetries:        0, // Request retries are orchestrated at App layer.
-		RetryDelay:        cfg.API.Retry.RetryDelay,
-		HTTPTimeout:       timeouts.ResponseHeaderTimeout,
-		Provider:          "deepseek",
+		APIKey:               loadedKey.Value,
+		BaseURL:              baseURL,
+		Model:                modelID,
+		MaxTokens:            cfg.Model.MaxOutputTokens,
+		MaxToolArgumentBytes: cfg.Model.MaxToolArgumentBytes,
+		Temperature:          cfg.Model.Temperature,
+		StreamEnabled:        true,
+		EnableThinking:       enableThinking,
+		ThinkingBudget:       thinkingBudget,
+		ReasoningEffort:      cfg.Model.ReasoningEffort,
+		StreamIdleTimeout:    timeouts.StreamIdleTimeout,
+		MaxRetries:           0, // Request retries are orchestrated at App layer.
+		RetryDelay:           cfg.API.Retry.RetryDelay,
+		HTTPTimeout:          timeouts.ResponseHeaderTimeout,
+		Provider:             "deepseek",
 	}
 
 	return NewAnthropicClient(anthropicConfig)
@@ -589,14 +592,15 @@ func newOllamaClient(cfg *config.Config, modelID string) (Client, error) {
 	timeouts := EffectiveProviderTimeouts(cfg, "ollama")
 
 	ollamaConfig := OllamaConfig{
-		BaseURL:     baseURL,
-		APIKey:      loadedKey.Value, // Optional
-		Model:       modelID,
-		Temperature: cfg.Model.Temperature,
-		MaxTokens:   cfg.Model.MaxOutputTokens,
-		HTTPTimeout: timeouts.ResponseHeaderTimeout,
-		MaxRetries:  0, // Request retries are orchestrated at App layer.
-		RetryDelay:  cfg.API.Retry.RetryDelay,
+		BaseURL:              baseURL,
+		APIKey:               loadedKey.Value, // Optional
+		Model:                modelID,
+		Temperature:          cfg.Model.Temperature,
+		MaxTokens:            cfg.Model.MaxOutputTokens,
+		MaxToolArgumentBytes: cfg.Model.MaxToolArgumentBytes,
+		HTTPTimeout:          timeouts.ResponseHeaderTimeout,
+		MaxRetries:           0, // Request retries are orchestrated at App layer.
+		RetryDelay:           cfg.API.Retry.RetryDelay,
 	}
 
 	return NewOllamaClient(ollamaConfig)

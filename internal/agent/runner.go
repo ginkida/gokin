@@ -1080,7 +1080,8 @@ func (r *Runner) recordAgentExecutionLearning(
 	duration time.Duration,
 	strategyName string,
 ) {
-	if result == nil {
+	if result == nil || (result.Status != AgentStatusCompleted && result.Status != AgentStatusFailed) {
+		// Progress and operator cancellation are not execution outcomes.
 		return
 	}
 

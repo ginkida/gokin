@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 
+	"gokin/internal/client"
 	"gokin/internal/tools"
 	"gokin/internal/ui"
 )
 
 func terminalInternalExchangeError(err error) bool {
+	if failure, ok := client.OutputRecoveryError(err); ok && failure.Exhausted {
+		return true
+	}
 	return errors.Is(err, tools.ErrStrictPermissionDenied) || tools.IsHookStopError(err) || errors.Is(err, tools.ErrMaxTurnsExceeded) ||
 		errors.Is(err, tools.ErrBudgetExceeded) || errors.Is(err, tools.ErrCostUnavailable)
 }
@@ -22,7 +26,10 @@ func (a *App) reportHeadlessStopFailure(ctx context.Context, turn *headlessTermi
 		return // RunHeadless reports the owning cancellation/deadline.
 	}
 	kind := "execution"
+	_, degenerate := client.OutputRecoveryError(err)
 	switch {
+	case degenerate:
+		kind = "degenerate_output"
 	case errors.Is(err, tools.ErrMaxTurnsExceeded):
 		kind = "max_turns"
 	case errors.Is(err, tools.ErrBudgetExceeded):

@@ -21,12 +21,13 @@ import (
 
 // OllamaConfig holds configuration for Ollama API client.
 type OllamaConfig struct {
-	BaseURL     string        // Default: config.DefaultOllamaBaseURL
-	APIKey      string        // Optional, for remote Ollama servers with auth
-	Model       string        // e.g., "llama3.2", "qwen2.5-coder"
-	Temperature float32       // Temperature for generation
-	MaxTokens   int32         // Max output tokens
-	HTTPTimeout time.Duration // HTTP request timeout (default: 120s)
+	MaxToolArgumentBytes int           // 0 = DefaultMaxToolArgumentBytes
+	BaseURL              string        // Default: config.DefaultOllamaBaseURL
+	APIKey               string        // Optional, for remote Ollama servers with auth
+	Model                string        // e.g., "llama3.2", "qwen2.5-coder"
+	Temperature          float32       // Temperature for generation
+	MaxTokens            int32         // Max output tokens
+	HTTPTimeout          time.Duration // HTTP request timeout (default: 120s)
 	// Retry configuration
 	MaxRetries int           // Maximum retry attempts (default: 3)
 	RetryDelay time.Duration // Initial delay between retries (default: 1s)
@@ -62,6 +63,9 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // NewOllamaClient creates a new Ollama API client.
 func NewOllamaClient(config OllamaConfig) (*OllamaClient, error) {
+	if config.MaxToolArgumentBytes < 0 {
+		return nil, fmt.Errorf("MaxToolArgumentBytes cannot be negative")
+	}
 	// Validate model name
 	if config.Model == "" {
 		return nil, fmt.Errorf("model name is required")
@@ -173,6 +177,10 @@ func (c *OllamaClient) SendMessageWithHistory(ctx context.Context, history []*ge
 		req.Options["temperature"] = c.config.Temperature
 	}
 
+	if outputRecoveryActive(ctx) {
+		req.Options["temperature"] = recoveryTemperature(ctx, c.config.Temperature)
+	}
+
 	// Only include native tools for models that support them
 	if !c.NeedsToolCallFallback() && len(tools) > 0 {
 		req.Tools = c.convertToolsToOllamaFrom(tools)
@@ -210,6 +218,10 @@ func (c *OllamaClient) SendFunctionResponse(ctx context.Context, history []*gena
 
 	if c.config.Temperature > 0 {
 		req.Options["temperature"] = c.config.Temperature
+	}
+
+	if outputRecoveryActive(ctx) {
+		req.Options["temperature"] = recoveryTemperature(ctx, c.config.Temperature)
 	}
 
 	// Only include native tools for models that support them
@@ -353,7 +365,18 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 	// Capture status callback for goroutine
 	c.mu.RLock()
 	statusCb := c.statusCallback
+	argumentLimit := c.config.MaxToolArgumentBytes
 	c.mu.RUnlock()
+	if argumentLimit <= 0 {
+		argumentLimit = DefaultMaxToolArgumentBytes
+	}
+	textLimit := 0
+	if !GetModelProfile(req.Model).SupportsTools {
+		// An incomplete text-encoded call cannot be separated from prose yet.
+		// Bound the whole fallback response so an unclosed call cannot bypass
+		// the argument cap. Native models keep unrestricted plain text output.
+		textLimit = argumentLimit
+	}
 
 	go func() {
 		defer close(chunks)
@@ -369,9 +392,31 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 		defer close(done)
 
 		var inputTokens, outputTokens int
+		var textGuard outputGuard
+		var fallbackText strings.Builder // bounded by textLimit before each append
+		var fallbackTool string
 
 		err := c.client.Chat(ctx, req, func(resp api.ChatResponse) error {
 			chunk := ResponseChunk{}
+			if textLimit > 0 && fallbackTool == "" && fallbackText.Len() < 4096 {
+				// The fallback prompt puts the tool name before its arguments.
+				// Read only a bounded header, including across chunk boundaries.
+				prefix := fallbackText.String() + resp.Message.Content[:min(len(resp.Message.Content), 4096-fallbackText.Len())]
+				fallbackTool = fallbackToolHeader(prefix)
+			}
+			if err := textGuard.check(req.Model, fallbackTool, resp.Message.Content, textLimit); err != nil {
+				return err
+			}
+			if textLimit > 0 {
+				fallbackText.WriteString(resp.Message.Content)
+				if resp.Done {
+					for _, call := range ParseToolCallsFromText(fallbackText.String()) {
+						if err := checkToolArgumentRepetition(req.Model, call.Name, call.Args); err != nil {
+							return err
+						}
+					}
+				}
+			}
 
 			// Extract text content
 			if resp.Message.Content != "" {
@@ -380,6 +425,17 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 
 			// Convert tool calls
 			for i, tc := range resp.Message.ToolCalls {
+				data, err := json.Marshal(tc.Function.Arguments.ToMap())
+				if err != nil {
+					return err
+				}
+				var guard outputGuard
+				if err := guard.check(req.Model, tc.Function.Name, string(data), argumentLimit); err != nil {
+					return err
+				}
+				if err := checkToolArgumentRepetition(req.Model, tc.Function.Name, tc.Function.Arguments.ToMap()); err != nil {
+					return err
+				}
 				fc := c.convertOllamaToolCallToGenai(tc, i)
 				chunk.FunctionCalls = append(chunk.FunctionCalls, fc)
 			}
@@ -416,9 +472,13 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 			if statusCb != nil && c.isRetryableError(err) {
 				statusCb.OnError(err, true)
 			}
+			streamErr := err
+			if _, ok := OutputRecoveryError(err); !ok {
+				streamErr = c.wrapOllamaError(err)
+			}
 			// Send error through chunks channel - this is the standard pattern
 			select {
-			case chunks <- ResponseChunk{Error: c.wrapOllamaError(err), Done: true}:
+			case chunks <- ResponseChunk{Error: streamErr, Done: true}:
 			case <-ctx.Done():
 				// Context cancelled, just exit
 			}
@@ -429,6 +489,35 @@ func (c *OllamaClient) doStreamChat(ctx context.Context, req *api.ChatRequest) (
 		Chunks: chunks,
 		Done:   done,
 	}, nil
+}
+
+func fallbackToolHeader(text string) string {
+	start := strings.IndexByte(text, '{')
+	if start < 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(strings.NewReader(text[start:]))
+	if _, err := decoder.Token(); err != nil {
+		return ""
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		if key == "tool" || key == "name" {
+			var name string
+			if decoder.Decode(&name) == nil {
+				return name
+			}
+			return ""
+		}
+		var ignored json.RawMessage
+		if decoder.Decode(&ignored) != nil {
+			return ""
+		}
+	}
+	return ""
 }
 
 // SetSystemInstruction sets the system-level instruction for the model.

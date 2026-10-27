@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -197,7 +198,9 @@ func (sr *SmartRouter) Execute(ctx context.Context, history []*genai.Content, me
 	sr.mu.RUnlock()
 
 	// Record with strategy optimizer
-	if execOptimizer != nil {
+	// Runner owns delegated execution outcomes. Counting the router envelope
+	// again weights delegated work twice; operator cancellation is not failure.
+	if execOptimizer != nil && decision.Handler != HandlerSubAgent && decision.Handler != HandlerCoordinated && !errors.Is(err, context.Canceled) {
 		execOptimizer.RecordExecution(agentType, taskType, success, duration)
 	}
 

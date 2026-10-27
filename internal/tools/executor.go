@@ -1398,6 +1398,7 @@ func (e *Executor) ExecuteContinuation(ctx context.Context, history []*genai.Con
 
 // executeLoop runs the function calling loop until a final text response is received.
 func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([]*genai.Content, string, error) {
+	ctx = client.ContextWithOutputRecoveryBudget(ctx)
 	// Snapshot client once per executeLoop to avoid racing with SetClient.
 	baseClient := e.getClient()
 	cl := SkillScopedClient(client.WithRequestGuard(baseClient, hooks.AsyncRewakeRequestGuard), e.registry)
@@ -1744,6 +1745,18 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 			budgetLedger.EndRound()
 		}
 		if err != nil {
+			if _, degenerate := client.OutputRecoveryError(err); degenerate {
+				retry, terminal := client.ClaimOutputRecovery(ctx, err)
+				if retry {
+					history = client.AppendOutputRecoveryNote(history)
+					if e.handler != nil && e.handler.OnWarning != nil {
+						e.handler.OnWarning(client.DegenerateOutputRetryNote)
+					}
+					continue
+				}
+				history = append(history, genai.NewContentFromText(terminal.Error(), genai.RoleModel))
+				return history, carriedText, terminal
+			}
 			// ProcessStream returns the accumulated partial Response alongside an
 			// error. Usage metadata received before the failure is still billable.
 			ft := client.DetectFailureTelemetry(err)
@@ -2197,6 +2210,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				break
 			}
 
+			retryingDegenerate := false
 			// Send function responses back to model.
 			// Pass history without the just-appended tool results since
 			// all client implementations append results themselves.
@@ -2233,7 +2247,13 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				roundCtx, roundCancel := e.withModelRoundTimeout(ctx)
 				roundCtx = ContextWithClaimedModelTurn(roundCtx)
 				roundCtx, finishObservation := client.BeginObservedMessage(roundCtx, cl.GetModel())
-				stream, err := cl.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
+				var stream *client.StreamingResponse
+				var err error
+				if retryingDegenerate {
+					stream, err = cl.SendMessageWithHistory(roundCtx, history[:len(history)-1], client.DegenerateOutputRetryNote)
+				} else {
+					stream, err = cl.SendFunctionResponse(roundCtx, history[:historyBeforeResults], results)
+				}
 				if err != nil {
 					finishObservation(nil, err)
 					roundCancel()
@@ -2290,6 +2310,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 					streamRetries = 0
 					partialStreamRetries = 0
 					break
+				}
+				if _, degenerate := client.OutputRecoveryError(err); degenerate {
+					retry, terminal := client.ClaimOutputRecovery(ctx, err)
+					if retry {
+						history = client.AppendOutputRecoveryNote(history)
+						retryingDegenerate = true
+						if e.handler != nil && e.handler.OnWarning != nil {
+							e.handler.OnWarning(client.DegenerateOutputRetryNote)
+						}
+						continue
+					}
+					history = append(history, genai.NewContentFromText(terminal.Error(), genai.RoleModel))
+					return history, carriedText, terminal
 				}
 				// The failed stream may already have delivered cumulative usage.
 				// Account it once before deciding whether to retry this request.

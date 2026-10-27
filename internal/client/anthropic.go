@@ -46,13 +46,14 @@ func (e *HTTPError) Unwrap() error {
 
 // AnthropicConfig holds configuration for Anthropic-compatible APIs.
 type AnthropicConfig struct {
-	APIKey        string
-	BaseURL       string // Default: "https://api.anthropic.com"; providers set their compatible endpoint.
-	Provider      string // For telemetry/logging (glm, deepseek)
-	Model         string
-	MaxTokens     int32
-	Temperature   float32
-	StreamEnabled bool
+	APIKey               string
+	BaseURL              string // Default: "https://api.anthropic.com"; providers set their compatible endpoint.
+	Provider             string // For telemetry/logging (glm, deepseek)
+	Model                string
+	MaxTokens            int32
+	Temperature          float32
+	MaxToolArgumentBytes int // 0 = DefaultMaxToolArgumentBytes
+	StreamEnabled        bool
 	// Retry configuration
 	MaxRetries        int           // Maximum number of retry attempts
 	RetryDelay        time.Duration // Initial delay between retries
@@ -96,6 +97,9 @@ func NewAnthropicClient(config AnthropicConfig) (*AnthropicClient, error) {
 		}
 	}
 
+	if config.MaxToolArgumentBytes < 0 {
+		return nil, fmt.Errorf("MaxToolArgumentBytes cannot be negative")
+	}
 	// Validate model name
 	if config.Model == "" {
 		return nil, fmt.Errorf("model name is required")
@@ -171,7 +175,7 @@ func (c *AnthropicClient) SendMessageWithHistory(ctx context.Context, history []
 	reasoningEffort := c.config.ReasoningEffort
 	model := c.config.Model
 	maxTokens := c.config.MaxTokens
-	temperature := c.config.Temperature
+	temperature := recoveryTemperature(ctx, c.config.Temperature)
 	tools := c.tools
 	c.mu.RUnlock()
 	var effortErr error
@@ -247,7 +251,7 @@ func (c *AnthropicClient) SendFunctionResponse(ctx context.Context, history []*g
 	reasoningEffort := c.config.ReasoningEffort
 	model := c.config.Model
 	maxTokens := c.config.MaxTokens
-	temperature := c.config.Temperature
+	temperature := recoveryTemperature(ctx, c.config.Temperature)
 	tools := c.tools
 	c.mu.RUnlock()
 	var effortErr error
@@ -825,9 +829,12 @@ func (c *AnthropicClient) GetRawClient() any {
 
 // toolCallAccumulator tracks tool call and thinking state during streaming.
 type toolCallAccumulator struct {
+	model            string // immutable identity of the request being streamed
 	currentToolID    string
 	currentToolName  string
 	currentToolInput strings.Builder
+	toolGuard        outputGuard
+	textGuard        outputGuard
 	completedCalls   []*genai.FunctionCall
 	callsEmitted     bool // true once completedCalls have been sent in a chunk
 	// Thinking block tracking
@@ -1480,6 +1487,9 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 	enableThinkingSnap := c.config.EnableThinking
 	providerSnap := c.config.Provider
 	modelSnap := c.config.Model
+	if requested, ok := requestBody["model"].(string); ok && requested != "" {
+		modelSnap = requested
+	}
 	c.mu.RUnlock()
 	silentThinkingSnap := enableThinkingSnap ||
 		(c.isProvider("glm") && config.GLMAlwaysOnReasoning(modelSnap))
@@ -1504,6 +1514,7 @@ func (c *AnthropicClient) doStreamRequest(ctx context.Context, requestBody map[s
 		// Default scanner token limit (64K) is too small and causes token-too-long errors.
 		scanner.Buffer(make([]byte, 64*1024), 8*1024*1024) // 8MB max line
 		accumulator := &toolCallAccumulator{
+			model:          modelSnap,
 			completedCalls: make([]*genai.FunctionCall, 0),
 		}
 
@@ -1897,6 +1908,9 @@ func thinkingIdleExtension(ctx context.Context, fallback time.Duration) time.Dur
 
 // processStreamEvent converts an Anthropic stream event to a ResponseChunk.
 func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCallAccumulator) ResponseChunk {
+	if acc.model == "" {
+		acc.model = c.GetModel()
+	}
 	chunk := ResponseChunk{}
 
 	eventType, ok := event["type"].(string)
@@ -1939,8 +1953,15 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 					logging.Debug("generated tool_use ID (provider didn't return one)", "id", acc.currentToolID, "name", acc.currentToolName)
 				}
 				acc.currentToolInput.Reset()
+				acc.toolGuard = outputGuard{}
 				if input, ok := contentBlock["input"]; ok {
 					acc.appendToolInput(input)
+				}
+				if err := acc.toolGuard.check(acc.model, acc.currentToolName, acc.currentToolInput.String(), c.toolArgumentLimit()); err != nil {
+					return ResponseChunk{Error: err, Done: true}
+				}
+				if err := checkToolArgumentRepetition(acc.model, acc.currentToolName, contentBlock["input"]); err != nil {
+					return ResponseChunk{Error: err, Done: true}
 				}
 			} else if blockType == "thinking" {
 				acc.thinkingBuilder.Reset()
@@ -2006,6 +2027,9 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 				partialString, ok := partialJSON.(string)
 				if !exists || !ok {
 					return malformedToolStreamChunk(acc, "input_json_delta.partial_json must be a string")
+				}
+				if err := acc.toolGuard.check(acc.model, acc.currentToolName, partialString, c.toolArgumentLimit()); err != nil {
+					return ResponseChunk{Error: err, Done: true}
 				}
 				acc.currentToolInput.WriteString(partialString)
 			}
@@ -2080,6 +2104,9 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 				args = make(map[string]any)
 			}
 
+			if err := checkToolArgumentRepetition(acc.model, acc.currentToolName, args); err != nil {
+				return ResponseChunk{Error: err, Done: true}
+			}
 			functionCall := &genai.FunctionCall{
 				ID:   acc.currentToolID,
 				Name: acc.currentToolName,
@@ -2157,7 +2184,17 @@ func (c *AnthropicClient) processStreamEvent(event map[string]any, acc *toolCall
 		}
 	}
 
+	if err := acc.textGuard.check(acc.model, "", chunk.Text, 0); err != nil {
+		return ResponseChunk{Error: err, Done: true}
+	}
 	return chunk
+}
+
+func (c *AnthropicClient) toolArgumentLimit() int {
+	if c.config.MaxToolArgumentBytes > 0 {
+		return c.config.MaxToolArgumentBytes
+	}
+	return DefaultMaxToolArgumentBytes
 }
 
 func applyAnthropicUsage(chunk *ResponseChunk, usage map[string]any) {
