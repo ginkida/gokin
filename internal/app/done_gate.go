@@ -43,7 +43,7 @@ func (a *App) enforceDoneGate(ctx context.Context, userMessage string) bool {
 	}
 
 	profile := donegate.DetectProfileWithTouchedPaths(a.workDir, a.snapshotResponseTouchedPaths())
-	checks := donegate.BuildChecks(donegate.WithToolInvoker(ctx, a.registry, a.executor.InvokeTool), a.workDir, userMessage, toolsUsed, profile, policy)
+	checks := donegate.BuildChecks(donegate.WithToolInvoker(ctx, a.registry, a.executor.InvokeTool, a.executor.PreflightToolPermission), a.workDir, userMessage, toolsUsed, profile, policy)
 	if len(checks) == 0 {
 		if policy.FailClosed {
 			return a.blockDoneGate("done-gate blocked finalization: no verification checks are available for this project/stack")

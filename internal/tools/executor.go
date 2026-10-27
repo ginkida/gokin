@@ -1350,11 +1350,24 @@ func (e *Executor) GetCacheTracker() *client.CacheTracker {
 
 // Execute processes a user message through the function calling loop.
 func (e *Executor) Execute(ctx context.Context, history []*genai.Content, message string) ([]*genai.Content, string, error) {
+	if ctx.Value(executorPermissionTurnKey{}) != e {
+		ctx = e.PreparePermissionTurn(ctx)
+	}
+	return e.ExecuteContinuation(ctx, history, message)
+}
+
+type executorPermissionTurnKey struct{}
+
+// PreparePermissionTurn promotes a slash skill's pending grants before the
+// App sets the provider schema. Execute recognizes this context so the grants
+// are promoted exactly once; internal continuations retain the same snapshot.
+func (e *Executor) PreparePermissionTurn(ctx context.Context) context.Context {
 	// Skill tool rules are scoped to this user request. Durable instructions
 	// remain in the invocation ledger, but grants and denies must be
 	// re-established by an explicit/model skill load every turn.
 	BeginSkillPermissionTurn(e.registry)
-	return e.ExecuteContinuation(ctx, history, message)
+	ctx = e.ContextWithHeadlessToolPolicy(ctx)
+	return context.WithValue(ctx, executorPermissionTurnKey{}, e)
 }
 
 // ExecuteContinuation continues the current user request without resetting
@@ -2033,7 +2046,7 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 
 			// Self-review injection: if many files were mutated this turn,
 			// add a notification nudging the model to verify consistency.
-			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 && !SelfReviewDisabled(ctx) && !HeadlessPermissionDenied(ctx) {
+			if threshold := int(e.selfReviewThreshold.Load()); threshold > 0 && !SelfReviewDisabled(ctx) && !HeadlessPermissionDenied(ctx) && !HeadlessVerificationUnavailable(ctx) {
 				e.mutatedFilesMu.Lock()
 				count := len(e.mutatedFilesThisTurn)
 				var files []string
@@ -2425,8 +2438,8 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 		// and the nudge is suppressed (don't shove the model into implementation
 		// the discuss-gate is holding back). Nil gate (tests/headless/autonomous)
 		// -> always action.
-		actionMode := (e.discussGate == nil || !e.discussGate()) && !HeadlessPermissionDenied(ctx)
-		incDec := DecideIncompleteWorkContinuation(e.registry,
+		actionMode := e.discussGate == nil || !e.discussGate()
+		incDec := DecideIncompleteWorkContinuation(ctx, e.registry,
 			resp.FinishReason == genai.FinishReasonMaxTokens, len(toolsUsed),
 			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, actionMode)
 		incompleteWorkStuck = incDec.Stuck

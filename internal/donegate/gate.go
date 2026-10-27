@@ -688,8 +688,10 @@ func RunChecks(ctx context.Context, checks []Check, checkTimeout time.Duration, 
 		case err == nil && result.Success && !timedOut:
 			status = "passed"
 		}
-		if check.Name != "git_diff_check" && check.Name != "git_unmerged_paths" {
-			tools.RecordHeadlessVerification(ctx, check.Name, status)
+		if check.Name == "git_diff_check" || check.Name == "git_unmerged_paths" {
+			tools.RecordHeadlessInspectionCheck(ctx, check.Name, doneGateCheckDisplayName(check), status)
+		} else {
+			tools.RecordHeadlessVerificationCheck(ctx, check.Name, doneGateCheckDisplayName(check), status)
 		}
 		if result.HookStopReason != "" {
 			results = append(results, Result{Name: check.Name, DisplayName: doneGateCheckDisplayName(check),

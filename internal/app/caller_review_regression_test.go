@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -12,6 +13,44 @@ import (
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
+
+func TestHeadlessDoneGateRefreshesHookAddedDuringFinalResponse(t *testing.T) {
+	a, executor, mock, bash := callerReviewGateApp(t)
+	write := &appHeadlessScriptedTool{name: "write", results: []tools.ToolResult{tools.NewSuccessResult("edited")}}
+	verify := &appHeadlessScriptedTool{name: "verify_code", results: []tools.ToolResult{tools.NewSuccessResult("must not execute")}}
+	a.registry.MustRegister(write)
+	a.registry.MustRegister(verify)
+	rules := permission.DefaultRules()
+	rules.SetPolicy("write", permission.LevelAllow)
+	rules.SetPolicy("verify_code", permission.LevelDeny)
+	rules.SetPolicy("bash", permission.LevelDeny)
+	executor.SetPermissions(permission.NewManager(rules, true))
+	user := t.TempDir()
+	manager := hooks.NewManager(true, a.workDir)
+	manager.ConfigureClaudeSettings(a.workDir, user, false)
+	executor.SetHooks(manager)
+	settings, err := json.Marshal(map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{
+		"matcher": hooks.ClaudeToolName("verify_code"), "hooks": []any{map[string]any{"type": "command", "command": `printf '%s' '{"continue":false,"stopReason":"stop checks"}'`}},
+	}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.EnqueueToolCall("write", map[string]any{"file_path": "m.go", "content": "package main"}).EnqueueText("Done.")
+	mock.OnSend = func(context.Context) {
+		if len(mock.Calls()) == 2 {
+			if len(manager.CachedClaudeHooks(hooks.PreTool)) != 0 {
+				t.Error("hook definitions were not initially empty")
+			}
+			if err := os.WriteFile(filepath.Join(user, "settings.json"), settings, 0600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	result, err := a.RunHeadlessWithOptions(t.Context(), "Write m.go", HeadlessOptions{PermissionMode: "acceptEdits", NoSelfReview: true, OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard})
+	if err == nil || result.Error == nil || result.Error.Kind != "hook_stopped" || len(mock.Calls()) != 2 || verify.CallCount() != 0 || bash.CallCount() != 0 || len(result.PermissionDenials) != 0 {
+		t.Fatalf("new terminal hook was bypassed: result=%+v err=%v calls=%d verify=%d bash=%d", result, err, len(mock.Calls()), verify.CallCount(), bash.CallCount())
+	}
+}
 
 func callerReviewGateApp(t *testing.T) (*App, *tools.Executor, *testkit.MockClient, *appHeadlessScriptedTool) {
 	t.Helper()
@@ -52,9 +91,16 @@ func TestInteractiveDoneGatePermissionDenialDoesNotAutoFix(t *testing.T) {
 }
 
 func TestHeadlessDoneGateHookStopsAreTerminal(t *testing.T) {
-	for _, event := range []string{"PreToolUse", "PostToolUse"} {
+	for _, event := range []string{"PreToolUse", "PostToolUse", "PreToolUseHardDeny"} {
 		t.Run(event, func(t *testing.T) {
 			a, exec, mock, bash := callerReviewGateApp(t)
+			if event == "PreToolUseHardDeny" {
+				rules := permission.DefaultRules()
+				rules.SetPolicy("write", permission.LevelAllow)
+				rules.SetPolicy("verify_code", permission.LevelDeny)
+				exec.SetPermissions(permission.NewManager(rules, true))
+				event = "PreToolUse"
+			}
 			a.registry.MustRegister(&appHeadlessScriptedTool{name: "write", results: []tools.ToolResult{tools.NewSuccessResult("edited")}})
 			verify := &appHeadlessScriptedTool{name: "verify_code", results: []tools.ToolResult{tools.NewSuccessResult("checked")}}
 			a.registry.MustRegister(verify)
@@ -73,7 +119,7 @@ func TestHeadlessDoneGateHookStopsAreTerminal(t *testing.T) {
 			manager.ConfigureClaudeSettings(a.workDir, user, false)
 			exec.SetHooks(manager)
 			result, err := a.RunHeadlessWithOptions(t.Context(), "Write m.go", HeadlessOptions{NoSelfReview: true, OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard})
-			if err == nil || result.Error == nil || result.Error.Kind != "hook_stopped" || len(mock.Calls()) != 2 || bash.CallCount() != 0 {
+			if err == nil || result.Error == nil || result.Error.Kind != "hook_stopped" || len(mock.Calls()) != 2 || bash.CallCount() != 0 || len(result.PermissionDenials) != 0 {
 				t.Fatalf("gate swallowed hook stop: result=%+v err=%v model=%d bash=%d", result, err, len(mock.Calls()), bash.CallCount())
 			}
 		})

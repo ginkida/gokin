@@ -45,6 +45,19 @@ func TestIncompleteTodoSummary(t *testing.T) {
 	}
 }
 
+func TestVerificationTodoClassificationPreservesImplementation(t *testing.T) {
+	for _, content := range []string{"Run tests", "Run the tests", "Run go test ./...", "go vet ./...", "Verify code", "Verify build", "Run lint for changed files", "  RUN   tests  "} {
+		if !isVerificationTodo(content) {
+			t.Errorf("verification todo was not recognized: %q", content)
+		}
+	}
+	for _, content := range []string{"Update the second file", "Update tests", "Write regression tests", "Fix test failures", "Run tests and update the second file", "Run tests before updating the second file", "Run tests to fix failures", "Run tests (also update second.go)", "Run tests, update second.go", "Run tests; update second.go", "go test ./... also update second.go", "go test ./... (update second.go)", "Run tests\nUpdate second.txt", "Run go test ./... && edit second.txt", "Run migrations", "Inspect the implementation"} {
+		if isVerificationTodo(content) {
+			t.Errorf("implementation todo was suppressed: %q", content)
+		}
+	}
+}
+
 // TestDecideIncompleteWorkContinuation pins the shared decision core extracted
 // from both agentic loops (Tier-4): max_tokens-skip, unfinished-todo gate,
 // progress reset, budget check, counter math — pure, no side effects.
@@ -81,7 +94,7 @@ func TestDecideIncompleteWorkContinuation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := DecideIncompleteWorkContinuation(tc.reg, tc.isMaxTokens, tc.toolsRun, tc.lastNudge, tc.stuck, tc.actionMode)
+			d := DecideIncompleteWorkContinuation(t.Context(), tc.reg, tc.isMaxTokens, tc.toolsRun, tc.lastNudge, tc.stuck, tc.actionMode)
 			if d.Continue != tc.wantCont || d.Exhausted != tc.wantExh {
 				t.Fatalf("got {Continue:%v Exhausted:%v}, want {Continue:%v Exhausted:%v}", d.Continue, d.Exhausted, tc.wantCont, tc.wantExh)
 			}
@@ -96,7 +109,7 @@ func TestDecideIncompleteWorkContinuation(t *testing.T) {
 
 	// Purity: identical inputs → identical output, no registry mutation.
 	reg := withTodo()
-	if d1, d2 := DecideIncompleteWorkContinuation(reg, false, 5, 5, 0, true), DecideIncompleteWorkContinuation(reg, false, 5, 5, 0, true); d1 != d2 {
+	if d1, d2 := DecideIncompleteWorkContinuation(t.Context(), reg, false, 5, 5, 0, true), DecideIncompleteWorkContinuation(t.Context(), reg, false, 5, 5, 0, true); d1 != d2 {
 		t.Errorf("helper not pure: %+v != %+v", d1, d2)
 	}
 	if n, _ := IncompleteTodoSummary(reg); n != 1 {

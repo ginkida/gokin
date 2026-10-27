@@ -1617,6 +1617,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*AgentResult, error) {
 	if seedErr != nil {
 		return &AgentResult{AgentID: a.ID, Status: AgentStatusFailed, Error: seedErr.Error(), Completed: true}, seedErr
 	}
+	ctx = tools.ContextWithHeadlessToolPolicy(ctx, a.registry, a.permissions, a.hooks)
 	// Include auxiliary requests (reflection/compaction/planning), while
 	// explicitly masking inherited request settings in a different child's run.
 	effort := tools.ForkedSkillEffort(ctx, a.registry)
@@ -3965,9 +3966,9 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// actionMode=true: sub-agents are autonomous (the discuss-mode gate is a
 		// foreground-interactive feature only — no human in this loop to discuss
 		// with), so the incomplete-work nudge always applies here.
-		incDec := tools.DecideIncompleteWorkContinuation(a.registry,
+		incDec := tools.DecideIncompleteWorkContinuation(ctx, a.registry,
 			resp.FinishReason == genai.FinishReasonMaxTokens, a.ToolsUsedCount(),
-			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, !tools.HeadlessPermissionDenied(ctx))
+			toolsUsedAtLastIncompleteNudge, incompleteWorkStuck, true)
 		incompleteWorkStuck = incDec.Stuck
 		toolsUsedAtLastIncompleteNudge = incDec.LastNudge
 		if incDec.Continue {
@@ -3988,7 +3989,7 @@ func (a *Agent) executeLoop(ctx context.Context, prompt string, output *strings.
 		// if the agent changed code but never ran any verification command this
 		// run, nudge it once to build/test before finishing. Conservative — it
 		// won't nag an agent that ran any command, so false nudges are rare.
-		if !verifyNudged && !tools.SelfReviewDisabled(ctx) && !tools.HeadlessPermissionDenied(ctx) && a.needsVerificationNudge() {
+		if !verifyNudged && !tools.SelfReviewDisabled(ctx) && !tools.HeadlessPermissionDenied(ctx) && !tools.HeadlessVerificationUnavailable(ctx) && a.needsVerificationNudge() {
 			verifyNudged = true
 			a.appendVerificationNudge()
 			continue
@@ -5144,7 +5145,7 @@ func (a *Agent) getModelResponse(ctx context.Context) (response *client.Response
 	// agent's actual registry on every round, including request_tool additions
 	// and live task/skill catalogs, without changing the parent or siblings.
 	if a.registry != nil {
-		a.client.SetTools(a.registry.GeminiTools())
+		a.client.SetTools(tools.FilterHeadlessTools(ctx, a.registry.GeminiTools()))
 	}
 	// Refresh active skill carry-forward before an ordinary text round. Insert
 	// before the current user message so the user's instruction remains the

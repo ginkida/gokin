@@ -16,6 +16,51 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestHeadlessAgentUnavailableVerificationContinuesImplementationTodos(t *testing.T) {
+	testHeadlessAgentImplementationTodo(t, "Update the second file")
+}
+
+func TestHeadlessAgentMixedVerificationTodoContinuesImplementation(t *testing.T) {
+	testHeadlessAgentImplementationTodo(t, "Run tests (also update second.go)")
+}
+
+func testHeadlessAgentImplementationTodo(t *testing.T, pendingTodo string) {
+	t.Helper()
+	work := testkit.ResolvedTempDir(t)
+	registry := tools.NewRegistry()
+	registry.MustRegister(tools.NewWriteTool(work))
+	registry.MustRegister(tools.NewTodoTool())
+	registry.MustRegister(tools.NewBashTool(work))
+	todos := func(status string) map[string]any {
+		return map[string]any{"todos": []any{
+			map[string]any{"content": "Update the first file", "status": "completed", "activeForm": "Updating first"},
+			map[string]any{"content": pendingTodo, "status": status, "activeForm": "Updating second"},
+			map[string]any{"content": "Run tests", "status": "pending", "activeForm": "Running tests"},
+		}}
+	}
+	mock := testkit.NewMockClient().EnqueueToolCall("write", map[string]any{"file_path": filepath.Join(work, "first.go"), "content": "after"}).
+		EnqueueToolCall("todo", todos("pending")).EnqueueText("I will continue with the second file.").
+		EnqueueToolCall("write", map[string]any{"file_path": filepath.Join(work, "second.go"), "content": "after"}).
+		EnqueueToolCall("todo", todos("completed")).EnqueueText("Updated both files; verification is unavailable.")
+	rules := permission.DefaultRules()
+	rules.SetPolicy("write", permission.LevelAllow)
+	rules.SetPolicy("bash", permission.LevelDeny)
+	manager := permission.NewManager(rules, true)
+	a := NewAgent(AgentTypeGeneral, nil, registry, work, 10, "", manager, nil)
+	a.client = mock
+	executor := tools.NewExecutor(registry, nil, time.Second)
+	executor.SetPermissions(manager)
+	ctx, state := tools.ContextWithHeadlessPermissions(t.Context(), false, "acceptEdits")
+	ctx = tools.ContextWithoutSelfReview(executor.ContextWithHeadlessToolPolicy(ctx))
+	result, err := a.Run(ctx, "Update both files")
+	if err != nil || result.Status != AgentStatusCompleted || len(mock.Calls()) != 6 || len(a.GetMutatedPaths()) != 2 || len(state.Denials()) != 0 {
+		t.Fatalf("implementation was abandoned: result=%+v err=%v calls=%d paths=%v", result, err, len(mock.Calls()), a.GetMutatedPaths())
+	}
+	if data, err := os.ReadFile(filepath.Join(work, "second.go")); err != nil || string(data) != "after" {
+		t.Fatalf("second edit=%q err=%v", data, err)
+	}
+}
+
 func TestHeadlessNestedAgentDenialIsTracked(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		t.Run(map[bool]string{false: "continue", true: "strict"}[strict], func(t *testing.T) {

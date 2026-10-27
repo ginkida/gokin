@@ -579,6 +579,14 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		// that independently satisfy auto policy receive the REPL usage hint.
 		autoDecision = hybrid.Decide("auto", message)
 	}
+	a.mu.Lock()
+	headlessDirect := a.headlessDirect
+	a.mu.Unlock()
+	// Headless schemas need promoted grants. Interactive routing must still
+	// see the pending inline settings before selecting their owning executor.
+	if a.executor != nil && headlessDirect {
+		ctx = a.executor.PreparePermissionTurn(ctx)
+	}
 	turnTools := a.toolsForMessageDecision(message, policyDecision)
 	// The App has now applied feature, plan, invocation, and lazy-hybrid gates.
 	// Make that exact schema a request capability ceiling: Router retries may
@@ -590,6 +598,7 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		turnTools = tools.FilterGeminiToolsByCapability(turnTools, turnToolNames)
 	}
 	ctx = tools.ContextWithToolSchemaCeiling(ctx, a.executor, turnToolNames)
+	turnTools = tools.FilterHeadlessTools(ctx, turnTools)
 	if a.client != nil {
 		a.client.SetTools(turnTools)
 	}
@@ -705,9 +714,6 @@ func (a *App) processMessageWithMemoryQuery(ctx context.Context, message, memory
 		usageCommitted = true
 	}()
 
-	a.mu.Lock()
-	headlessDirect := a.headlessDirect
-	a.mu.Unlock()
 	if headlessDirect && goalTurn == nil {
 		a.applyHeadlessThinking(memoryQuery)
 	}

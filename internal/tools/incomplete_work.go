@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -26,6 +27,10 @@ const MaxIncompleteWorkContinuations = 3
 // item is completed — i.e. the model is genuinely finished and the loop should
 // end normally. Safe on a nil registry / missing tool (returns 0).
 func IncompleteTodoSummary(registry ToolRegistry) (int, string) {
+	return incompleteTodoSummary(registry, false)
+}
+
+func incompleteTodoSummary(registry ToolRegistry, skipVerification bool) (int, string) {
 	if registry == nil {
 		return 0, ""
 	}
@@ -42,7 +47,7 @@ func IncompleteTodoSummary(registry ToolRegistry) (int, string) {
 	count := 0
 	var lines []string
 	for _, it := range items {
-		if it.Status == "completed" {
+		if it.Status == "completed" || skipVerification && isVerificationTodo(it.Content) {
 			continue
 		}
 		count++
@@ -62,6 +67,28 @@ func IncompleteTodoSummary(registry ToolRegistry) (int, string) {
 		summary += fmt.Sprintf("\n  … and %d more", count-len(lines))
 	}
 	return count, summary
+}
+
+// Only clearly verification-only tasks may be omitted. Unknown or mixed tasks
+// still need continuation: permission limits on checks cannot abandon edits.
+func isVerificationTodo(content string) bool {
+	content = strings.ToLower(strings.Join(strings.Fields(content), " "))
+	switch content {
+	case "run tests", "run the tests", "run test suite", "run verification", "run checks",
+		"run lint", "run build", "verify code", "verify changes", "verify build", "validate changes",
+		"check formatting", "build project", "test changes", "lint code", "run lint for changed files":
+		return true
+	}
+	// Only complete known commands qualify. Arbitrary arguments or prose may
+	// contain implementation work, even after a recognizable command prefix.
+	switch strings.TrimPrefix(content, "run ") {
+	case "go test", "go test ./...", "go build", "go build ./...", "go vet", "go vet ./...",
+		"cargo test", "cargo build", "cargo check", "cargo clippy", "pytest",
+		"npm test", "npm run test", "npm run build", "npm run lint", "pnpm test", "yarn test", "bun test",
+		"make test", "make check", "make build", "make lint":
+		return true
+	}
+	return false
 }
 
 // IncompleteWorkDecision is the result of the shared todo-continuation gate
@@ -99,7 +126,9 @@ type IncompleteWorkDecision struct {
 //     implementing — so the nudge is SUPPRESSED (it would shove the model into
 //     the very implementation the discuss-mode gate is holding back). Autonomous
 //     paths (sub-agents, /loop) and the headless executor always pass true.
-func DecideIncompleteWorkContinuation(registry ToolRegistry, isMaxTokens bool, toolsRun, lastNudge, stuck int, actionMode bool) IncompleteWorkDecision {
+//   - ctx: when headless verification is refused or unavailable, omit only
+//     clearly verification-only todos. Implementation todos still continue.
+func DecideIncompleteWorkContinuation(ctx context.Context, registry ToolRegistry, isMaxTokens bool, toolsRun, lastNudge, stuck int, actionMode bool) IncompleteWorkDecision {
 	if isMaxTokens {
 		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
 	}
@@ -109,7 +138,7 @@ func DecideIncompleteWorkContinuation(registry ToolRegistry, isMaxTokens bool, t
 	if !actionMode {
 		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
 	}
-	n, summary := IncompleteTodoSummary(registry)
+	n, summary := incompleteTodoSummary(registry, HeadlessPermissionDenied(ctx) || HeadlessVerificationUnavailable(ctx))
 	if n == 0 {
 		return IncompleteWorkDecision{Stuck: stuck, LastNudge: lastNudge}
 	}

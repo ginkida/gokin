@@ -458,6 +458,9 @@ func (m *Manager) askUser(
 	workDir string,
 	revision uint64,
 ) (*Response, error) {
+	if canPrompt, preview := ctx.Value(permissionPreflightKey{}).(bool); preview {
+		return &Response{Allowed: canPrompt, Decision: DecisionPending, Reason: "Tool requires approval"}, nil
+	}
 	m.mu.RLock()
 	handler := m.promptHandler
 	m.mu.RUnlock()

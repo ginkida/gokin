@@ -29,6 +29,8 @@ type VerificationCheck struct {
 	ID     string `json:"id,omitempty"`
 	Name   string `json:"name"`
 	Status string `json:"status"`
+
+	inspection bool
 }
 
 type verificationCheckKey struct{}
@@ -55,6 +57,11 @@ func (s *HeadlessPermissions) Verification() VerificationSummary {
 	// A refused or failing required check cannot be hidden by a different pass.
 	priority := map[string]int{"not_run": 0, "passed": 1, "denied": 2, "failed": 3}
 	for _, check := range summary.Checks {
+		// Passing workspace inspections do not prove a build or test ran.
+		// Their failures and refusals still count as verification limitations.
+		if check.inspection && check.Status == "passed" {
+			continue
+		}
 		if priority[check.Status] > priority[summary.Status] {
 			summary.Status = check.Status
 		}
@@ -66,7 +73,25 @@ func RecordHeadlessVerification(ctx context.Context, name, status string) {
 	recordHeadlessVerification(ctx, name, name, status)
 }
 
+// RecordHeadlessVerificationCheck keeps project-derived paths and command
+// fragments out of public IDs while retaining a readable, redacted label.
+func RecordHeadlessVerificationCheck(ctx context.Context, id, label, status string) {
+	key := fmt.Sprintf("check:%x", sha256.Sum256([]byte(id)))
+	recordHeadlessVerification(ctx, key, verificationCommandLabel(label), status)
+}
+
+// RecordHeadlessInspectionCheck replaces earlier outcomes, including denials,
+// without treating a clean workspace inspection as build/test evidence.
+func RecordHeadlessInspectionCheck(ctx context.Context, id, label, status string) {
+	key := fmt.Sprintf("check:%x", sha256.Sum256([]byte(id)))
+	recordHeadlessCheck(ctx, VerificationCheck{ID: key, Name: verificationCommandLabel(label), Status: status, inspection: true})
+}
+
 func recordHeadlessVerification(ctx context.Context, id, name, status string) {
+	recordHeadlessCheck(ctx, VerificationCheck{ID: id, Name: name, Status: status})
+}
+
+func recordHeadlessCheck(ctx context.Context, check VerificationCheck) {
 	state, _ := ctx.Value(headlessPermissionsKey{}).(*HeadlessPermissions)
 	if state == nil {
 		return
@@ -76,7 +101,7 @@ func recordHeadlessVerification(ctx context.Context, id, name, status string) {
 	if state.verification == nil {
 		state.verification = make(map[string]VerificationCheck)
 	}
-	state.verification[id] = VerificationCheck{ID: id, Name: name, Status: status}
+	state.verification[check.ID] = check
 }
 
 // ObserveHeadlessToolResult is called at result finalization in both tool

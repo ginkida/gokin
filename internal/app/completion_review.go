@@ -81,7 +81,7 @@ func (a *App) runCompletionReviewIfNeeded(
 			return ok
 		}
 	}
-	if tools.SelfReviewDisabled(ctx) || tools.HeadlessPermissionDenied(ctx) {
+	if tools.SelfReviewDisabled(ctx) || tools.HeadlessPermissionDenied(ctx) || tools.HeadlessVerificationUnavailable(ctx) {
 		return true
 	}
 

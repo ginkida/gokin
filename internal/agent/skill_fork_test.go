@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,64 @@ import (
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
+
+func TestHeadlessForkedSkillFreezesChildToolsAfterGrants(t *testing.T) {
+	work := testkit.ResolvedTempDir(t)
+	root := filepath.Join(work, "skills")
+	path := filepath.Join(root, "check", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\ndescription: Check\ncontext: fork\nbackground: false\nallowed-tools: Bash\n---\nRun the check."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	skill := tools.NewSkillToolWithCatalogAndWorkDir(skills.NewCatalog([]skills.Root{{Path: root, Source: "claude-global"}}), work)
+	registry.MustRegister(skill)
+	registry.MustRegister(tools.NewBashTool(work))
+	task := tools.NewTaskTool()
+	registry.MustRegister(task)
+	mock := testkit.NewMockClient().EnqueueToolCall("bash", map[string]any{"command": "printf checked"}).EnqueueText("Checked.")
+	runner := NewRunner(t.Context(), &budgetRunnerClient{MockClient: mock}, registry, work)
+	task.SetRunner(budgetTaskRunnerAdapter{runner: runner})
+	rules := permission.DefaultRules()
+	rules.SetPolicy("task", permission.LevelAllow)
+	manager := permission.NewManager(rules, true)
+	runner.SetPermissions(manager)
+	executor := tools.NewExecutor(registry, nil, time.Second)
+	executor.SetPermissions(manager)
+	ctx, state := tools.ContextWithHeadlessPermissions(t.Context(), false, "acceptEdits")
+	ctx = tools.ContextWithoutSelfReview(executor.ContextWithHeadlessToolPolicy(ctx))
+	advertised := false
+	for _, declaration := range tools.FilterHeadlessTools(ctx, registry.GeminiTools()) {
+		for _, function := range declaration.FunctionDeclarations {
+			if function.Name == "bash" {
+				advertised = true
+			}
+		}
+	}
+	if !advertised || executor.PreflightToolPermission(ctx, "bash", map[string]any{"command": "printf checked"}) {
+		t.Fatal("potential child grants must preserve advertisement without authorizing the parent")
+	}
+	var schemas []string
+	mock.OnSend = func(context.Context) {
+		schema, err := json.Marshal(mock.GetTools())
+		if err != nil {
+			t.Error(err)
+		}
+		schemas = append(schemas, string(schema))
+		if !strings.Contains(string(schema), `"name":"bash"`) {
+			t.Error("child Bash grant was hidden by inherited parent omissions")
+		}
+	}
+	result, err := executor.InvokeTool(ctx, "skill", map[string]any{"name": "check"})
+	if err != nil || !result.Success || len(state.Denials()) != 0 || len(schemas) != 2 || !slices.Equal(schemas[:1], schemas[1:]) {
+		t.Fatalf("fork result=%+v err=%v denials=%v schemas=%v", result, err, state.Denials(), schemas)
+	}
+	if len(skill.ActivePermissionGrants()) != 0 {
+		t.Fatal("child grants leaked into the parent")
+	}
+}
 
 func TestForkedSkillRealRunnerIsolatesInstructionsAndAuthorizesOnlyChild(t *testing.T) {
 	workDir, err := filepath.EvalSymlinks(t.TempDir())

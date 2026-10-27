@@ -167,6 +167,9 @@ func (a *Agent) runDoneGateAtBreak(ctx context.Context, prompt string, output *s
 	profile := donegate.DetectProfileWithTouchedPaths(a.workDir, touched)
 	reg := donegate.WithToolInvoker(ctx, a.registry, func(ctx context.Context, name string, args map[string]any) (tools.ToolResult, error) {
 		return a.executeNestedToolResultSafely(ctx, &genai.FunctionCall{ID: "done-gate-" + generateAgentID(), Name: name, Args: args}), nil
+	}, func(ctx context.Context, name string, args map[string]any) bool {
+		tool, ok := a.registry.Get(name)
+		return ok && tools.PreflightToolPermission(ctx, a.permissions, a.registry, a.hooks, tool, args, a.workDir)
 	})
 	checks := donegate.BuildChecks(reg, a.workDir, prompt, toolsUsed, profile, *policy)
 	if len(checks) == 0 {

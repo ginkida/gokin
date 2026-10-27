@@ -30,7 +30,7 @@ func TestAgentDoneGateVerificationDenialSkipsAutoFix(t *testing.T) {
 	if outcome, err := a.runDoneGateAtBreak(ctx, "Update m.go", &output, &fixes, &generation); err != nil || outcome != agentGateSkipped || fixes != 0 {
 		t.Fatalf("denied verifier started auto-fix: outcome=%d fixes=%d output=%s", outcome, fixes, output.String())
 	}
-	if state.Verification().Status != "denied" || len(state.Denials()) == 0 {
+	if state.Verification().Status != "denied" || len(state.Denials()) != 0 {
 		t.Fatalf("missing receipt: %+v denials=%v", state.Verification(), state.Denials())
 	}
 }

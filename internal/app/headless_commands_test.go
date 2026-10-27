@@ -2,6 +2,8 @@ package app
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,10 +11,82 @@ import (
 	"testing"
 
 	"gokin/internal/commands"
+	"gokin/internal/permission"
 	"gokin/internal/skills"
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
+
+func TestHeadlessModelSkillGrantKeepsToolsVisibleAcrossRounds(t *testing.T) {
+	worker := testkit.NewMockClient().EnqueueToolCall("skill", map[string]any{"name": "check"}).
+		EnqueueToolCall("bash", map[string]any{"command": "printf checked"}).EnqueueText("Done.")
+	bash := &appHeadlessScriptedTool{name: "bash", results: []tools.ToolResult{tools.NewSuccessResult("checked")}}
+	a, executor := newHeadlessPolicyTestApp(t, worker, bash)
+	sdkTestFile(t, filepath.Join(a.workDir, "check", "SKILL.md"), "---\ndescription: Check\nallowed-tools: Bash\n---\nRun the check.")
+	skill := tools.NewSkillToolWithCatalogAndWorkDir(skills.NewCatalog([]skills.Root{{Path: a.workDir, Source: "claude-global"}}), a.workDir)
+	a.registry.MustRegister(skill)
+	executor.SetPermissions(permission.NewManager(permission.DefaultRules(), true))
+	var schemas []string
+	worker.OnSend = func(ctx context.Context) {
+		schema, err := json.Marshal(worker.GetTools())
+		if err != nil {
+			t.Error(err)
+		}
+		schemas = append(schemas, string(schema))
+		if !strings.Contains(string(schema), `"name":"bash"`) {
+			t.Error("potential trusted skill grant was omitted from the provider schema")
+		}
+		if allowed := executor.PreflightToolPermission(ctx, "bash", map[string]any{"command": "printf checked"}); allowed != (len(schemas) > 1) {
+			t.Errorf("advertisement changed actual authority: bash allowed=%v round=%d", allowed, len(schemas))
+		}
+	}
+	result, err := a.RunHeadlessWithOptions(t.Context(), "Load the check skill and follow its workflow", HeadlessOptions{PermissionMode: "acceptEdits", NoSelfReview: true, OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil || result.Status != "success" || len(result.PermissionDenials) != 0 || bash.CallCount() != 1 || len(schemas) != 3 {
+		t.Fatalf("skill run=%+v err=%v bash=%d schemas=%d", result, err, bash.CallCount(), len(schemas))
+	}
+	if schemas[0] != schemas[1] || schemas[0] != schemas[2] {
+		t.Fatal("model-invoked grants changed the tool schema between rounds")
+	}
+}
+
+func TestHeadlessSlashSkillGrantsBeforeFreezingTools(t *testing.T) {
+	worker := testkit.NewMockClient().EnqueueToolCall("bash", map[string]any{"command": "printf checked"}).EnqueueText("Done.")
+	bash := &appHeadlessScriptedTool{name: "bash", results: []tools.ToolResult{tools.NewSuccessResult("checked")}}
+	a, executor := newHeadlessPolicyTestApp(t, worker, bash)
+	sdkTestFile(t, filepath.Join(a.workDir, "check", "SKILL.md"), "---\ndescription: Check\nallowed-tools: Bash\n---\nRun the check.")
+	skill := tools.NewSkillToolWithCatalogAndWorkDir(skills.NewCatalog([]skills.Root{{Path: a.workDir, Source: "claude-global"}}), a.workDir)
+	a.registry.MustRegister(skill)
+	a.commandHandler = commands.NewHandler()
+	a.commandHandler.ConfigureSkillResolver(skill.HasUserSkill)
+	executor.SetPermissions(permission.NewManager(permission.DefaultRules(), true))
+	var schemas []string
+	worker.OnSend = func(context.Context) {
+		schema, err := json.Marshal(worker.GetTools())
+		if err != nil {
+			t.Fatal(err)
+		}
+		schemas = append(schemas, string(schema))
+		if !strings.Contains(schemas[len(schemas)-1], `"name":"bash"`) {
+			t.Error("schema omitted a potential trusted skill grant")
+		}
+	}
+	result, err := a.RunHeadlessWithOptions(t.Context(), "/skill check", HeadlessOptions{PermissionMode: "acceptEdits", NoSelfReview: true, OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil || result.Status != "success" || len(result.PermissionDenials) != 0 || bash.CallCount() != 1 || len(schemas) != 2 {
+		t.Fatalf("skill run=%+v err=%v checks=%d schemas=%d", result, err, bash.CallCount(), len(schemas))
+	}
+	if schemas[0] != schemas[1] {
+		t.Fatal("tool schema changed between provider rounds")
+	}
+	worker.EnqueueText("Next task finished.")
+	result, err = a.RunHeadlessWithOptions(t.Context(), "A separate task", HeadlessOptions{PermissionMode: "acceptEdits", NoSelfReview: true, OutputFormat: HeadlessOutputJSON, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil || result.Status != "success" || len(schemas) != 3 || len(skill.ActivePermissionGrants()) != 0 {
+		t.Fatalf("new run retained previous authority: result=%+v err=%v schemas=%d grants=%v", result, err, len(schemas), skill.ActivePermissionGrants())
+	}
+	ctx, _ := tools.ContextWithHeadlessPermissions(t.Context(), false, "acceptEdits")
+	if executor.PreflightToolPermission(ctx, "bash", map[string]any{"command": "printf checked"}) {
+		t.Fatal("visible tool retained the previous turn's permission grant")
+	}
+}
 
 func TestHeadlessExpandsLiveSkillAndRunsLocalClearWithoutModel(t *testing.T) {
 	worker := testkit.NewMockClient().EnqueueText("Done")
