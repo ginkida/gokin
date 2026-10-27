@@ -55,6 +55,9 @@ type Builder struct {
 	cancel  context.CancelFunc
 	options BuildOptions
 
+	// Git snapshots belong to this builder's startup batch, never the App.
+	gitProbes *git.StartupProbes
+
 	// Optional components (nil means not configured)
 	configDir        string
 	configDirErr     error
@@ -212,6 +215,7 @@ func NewBuilderWithOptions(cfg *config.Config, workDir string, options BuildOpti
 		ctx:         ctx,
 		cancel:      cancel,
 		options:     options,
+		gitProbes:   &git.StartupProbes{},
 		buildErrors: make([]error, 0),
 	}
 }
@@ -807,7 +811,7 @@ func toolSchemaDeclarationCount(schema []*genai.Tool) int {
 
 // isInGitRepo checks if the working directory is inside a git repository.
 func (b *Builder) isInGitRepo() bool {
-	return git.IsGitRepo(b.workDir)
+	return b.gitProbes.IsGitRepo(b.workDir)
 }
 
 // initSession creates the chat session and context management.
@@ -911,11 +915,11 @@ func (b *Builder) initSession() error {
 
 	// Detect git worktree for session isolation awareness
 	if !b.options.Bare {
-		if wt := git.DetectWorktree(b.workDir); wt != nil && !wt.IsMainWorktree {
+		if wt := b.gitProbes.DetectWorktree(b.workDir); wt != nil && !wt.IsMainWorktree {
 			logging.Info("running inside git worktree",
 				"branch", wt.Branch,
 				"head", wt.Head,
-				"main_root", git.GetMainWorktreeRoot(b.workDir))
+				"main_root", b.gitProbes.GetMainWorktreeRoot(b.workDir))
 		}
 	}
 
@@ -2341,7 +2345,7 @@ func (b *Builder) initUI() error {
 
 	// Set git branch for status bar display
 	if !b.options.Bare {
-		if branch := git.GetCurrentBranch(b.workDir); branch != "" {
+		if branch := b.gitProbes.GetCurrentBranch(b.workDir); branch != "" {
 			b.tuiModel.SetGitBranch(branch)
 		}
 	}

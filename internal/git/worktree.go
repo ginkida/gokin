@@ -18,15 +18,19 @@ type WorktreeInfo struct {
 // DetectWorktree checks if the given directory is inside a git worktree.
 // Returns the WorktreeInfo if inside a worktree, or nil if in the main repo or not a git repo.
 func DetectWorktree(workDir string) *WorktreeInfo {
+	return detectWorktree(workDir, startupGitOutput)
+}
+
+func detectWorktree(workDir string, output gitOutput) *WorktreeInfo {
 	// Check if this is a worktree by looking at .git file (worktrees have a .git FILE, not directory)
 	gitPath := filepath.Join(workDir, ".git")
 
 	// Get the real git common dir (shared between main repo and worktrees)
-	commonDir, err := startupGitOutput(workDir, "rev-parse", "--git-common-dir")
+	commonDir, err := output(workDir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return nil
 	}
-	gitDir, err := startupGitOutput(workDir, "rev-parse", "--git-dir")
+	gitDir, err := output(workDir, "rev-parse", "--git-dir")
 	if err != nil {
 		return nil
 	}
@@ -42,8 +46,8 @@ func DetectWorktree(workDir string) *WorktreeInfo {
 
 	_ = gitPath // unused but documents intent
 
-	branch := GetCurrentBranch(workDir)
-	head := getHead(workDir)
+	branch := getCurrentBranch(workDir, output)
+	head := getHeadWithOutput(workDir, output)
 
 	return &WorktreeInfo{
 		Path:           workDir,
@@ -111,7 +115,11 @@ func ListWorktrees(workDir string) []WorktreeInfo {
 // GetMainWorktreeRoot returns the root of the main repository (not the worktree).
 // Returns workDir if not in a worktree or if detection fails.
 func GetMainWorktreeRoot(workDir string) string {
-	out, err := startupGitOutput(workDir, "rev-parse", "--git-common-dir")
+	return getMainWorktreeRoot(workDir, startupGitOutput)
+}
+
+func getMainWorktreeRoot(workDir string, output gitOutput) string {
+	out, err := output(workDir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return workDir
 	}
@@ -132,7 +140,11 @@ func GetMainWorktreeRoot(workDir string) string {
 }
 
 func getHead(workDir string) string {
-	out, err := startupGitOutput(workDir, "rev-parse", "--short", "HEAD")
+	return getHeadWithOutput(workDir, startupGitOutput)
+}
+
+func getHeadWithOutput(workDir string, output gitOutput) string {
+	out, err := output(workDir, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return ""
 	}
