@@ -18,6 +18,7 @@ type slowTestTool struct {
 	name        string
 	finishAfter time.Duration
 	doneCh      chan struct{}
+	startedCh   chan struct{} // optional: closed when Execute begins
 }
 
 func (s *slowTestTool) Name() string        { return s.name }
@@ -27,6 +28,9 @@ func (s *slowTestTool) Declaration() *genai.FunctionDeclaration {
 }
 func (s *slowTestTool) Validate(args map[string]any) error { return nil }
 func (s *slowTestTool) Execute(ctx context.Context, args map[string]any) (tools.ToolResult, error) {
+	if s.startedCh != nil {
+		close(s.startedCh)
+	}
 	time.Sleep(s.finishAfter)
 	close(s.doneCh)
 	return tools.NewSuccessResult("slow tool finished"), nil
@@ -78,8 +82,8 @@ func TestExecuteToolsParallel_StragglerLeavesValidPlaceholder(t *testing.T) {
 	defer func() { parallelToolCleanupGrace = origGrace }()
 
 	reg := tools.NewRegistry()
-	slowDone := make(chan struct{})
-	if err := reg.Register(&slowTestTool{name: "slow_tool", finishAfter: 150 * time.Millisecond, doneCh: slowDone}); err != nil {
+	slowDone, slowStarted := make(chan struct{}), make(chan struct{})
+	if err := reg.Register(&slowTestTool{name: "slow_tool", finishAfter: 150 * time.Millisecond, doneCh: slowDone, startedCh: slowStarted}); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.Register(&fastTestTool{name: "fast_tool"}); err != nil {
@@ -97,11 +101,15 @@ func TestExecuteToolsParallel_StragglerLeavesValidPlaceholder(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Cancel shortly after the goroutines have started (letting the slow
-	// tool's Execute begin its ctx-ignoring sleep) so the cleanup grace
-	// (30ms) fires while it's still stuck — reproducing the straggler case.
+	// Cancel once the slow tool's Execute has begun its ctx-ignoring sleep, so
+	// the cleanup grace (30ms) fires while it's still stuck — reproducing the
+	// straggler case. A fixed sleep here raced the goroutine start under load:
+	// a cancel that landed first meant the tool never ran and <-slowDone hung.
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-slowStarted:
+		case <-time.After(10 * time.Second):
+		}
 		cancel()
 	}()
 
@@ -131,7 +139,11 @@ func TestExecuteToolsParallel_StragglerLeavesValidPlaceholder(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	<-slowDone // the straggler did eventually finish its (ignored) work
+	select { // the straggler did eventually finish its (ignored) work
+	case <-slowDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("slow tool never finished")
+	}
 
 	// Even after the straggler completed, its result must NOT have been
 	// written into `results` post-abandonment — the slot stays frozen at
