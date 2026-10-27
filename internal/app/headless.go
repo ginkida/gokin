@@ -18,6 +18,7 @@ import (
 	"gokin/internal/hooks"
 	"gokin/internal/lifecycle"
 	"gokin/internal/logging"
+	"gokin/internal/security"
 	"gokin/internal/tools"
 )
 
@@ -156,6 +157,7 @@ type HeadlessError struct {
 
 // HeadlessResult is the versioned, single-object automation envelope.
 type HeadlessResult struct {
+	Sandbox           security.SandboxStatus   `json:"sandbox"`
 	PermissionDenials []tools.PermissionDenial `json:"permission_denials"`
 	FilesChanged      []string                 `json:"files_changed"`
 	Goal              *goals.Goal              `json:"goal,omitempty"`
@@ -208,6 +210,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		}
 	}()
 	result := HeadlessResult{
+		Sandbox:           a.GetBashSandboxStatus(),
 		Verification:      tools.VerificationSummary{Status: "not_run"},
 		Incomplete:        true,
 		PermissionDenials: []tools.PermissionDenial{},
@@ -230,6 +233,9 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	if opts.Stderr == nil {
 		opts.Stderr = os.Stderr
 	}
+	if a != nil {
+		a.bashSandbox.Warn(ctx, opts.Stderr)
+	}
 	emitEarlyFailure := func(kind string, failure error) (HeadlessResult, error) {
 		result.Status = "error"
 		if errors.Is(failure, context.Canceled) {
@@ -251,6 +257,12 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		return result, failure
 	}
 
+	if a != nil && (a.bashSandbox.Required() || result.Sandbox.Network == "blocked") && result.Sandbox.Status != "enforced" {
+		if result.Sandbox.Network == "blocked" {
+			return emitEarlyFailure("sandbox", fmt.Errorf("unsafe bash sandbox policy: %s", result.Sandbox.Reason))
+		}
+		return emitEarlyFailure("sandbox", fmt.Errorf("required bash sandbox unavailable: %s", result.Sandbox.Reason))
+	}
 	if opts.MaxTurns < 0 {
 		return emitEarlyFailure("validation", fmt.Errorf("max turns must be zero or greater"))
 	}
@@ -701,6 +713,7 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 		result.Cost.Tracked = !errors.Is(runErr, tools.ErrCostUnavailable)
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
+	result.Sandbox = a.GetBashSandboxStatus()
 	trace.Phase("result_encoding")
 	result.Timing = trace.Snapshot()
 	result.SessionID = a.session.GetID()

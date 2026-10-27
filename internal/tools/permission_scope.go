@@ -198,6 +198,8 @@ func (t *BashTool) permissionScopeForSessionLocked(session bashSessionSnapshot) 
 		// the lease to a deterministic fingerprint instead of exposing values.
 		"env_fingerprint":              fingerprintEnvironment(session.env),
 		"sandbox_enabled":              t.sandboxEnabled,
+		"sandbox_policy":               t.sandboxPolicy.Identity(),
+		"sandbox_dirs":                 append([]string(nil), t.sandboxDirs...),
 		"unrestricted_mode":            t.unrestrictedMode,
 		"workspace_boundary_enabled":   t.workspaceBoundaryEnabled,
 		"workspace_root":               t.workspaceRoot,
@@ -236,12 +238,12 @@ func (t *BashTool) executeWithPermissionScope(ctx context.Context, args map[stri
 
 	t.policyMu.RLock()
 	session := t.executionSessionSnapshotLocked()
-	current := t.permissionScopeForSessionLocked(session)
+	view, revision := t.executionViewForSessionLocked(session)
+	current := view.permissionScopeForSessionLocked(session)
 	if !reflect.DeepEqual(current, expected) {
 		t.policyMu.RUnlock()
 		return NewErrorResult("Permission scope changed before execution: bash security mode, workspace, cwd, or environment no longer matches the approved invocation; retry under the current policy"), nil
 	}
-	view, revision := t.executionViewForSessionLocked(session)
 	t.policyMu.RUnlock()
 
 	result, err := view.executeLocked(ctx, args)
@@ -291,6 +293,8 @@ func (t *BashTool) executionViewForSessionLocked(session bashSessionSnapshot) (*
 		taskManager:               t.taskManager,
 		timeout:                   t.timeout,
 		sandboxEnabled:            t.sandboxEnabled,
+		sandboxPolicy:             t.sandboxPolicy.Snapshot(),
+		sandboxDirs:               append([]string(nil), t.sandboxDirs...),
 		unrestrictedMode:          t.unrestrictedMode,
 		workspaceRoot:             t.workspaceRoot,
 		workspaceBoundaryEnabled:  t.workspaceBoundaryEnabled,

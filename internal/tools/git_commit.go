@@ -6,17 +6,21 @@ import (
 	"strings"
 
 	"google.golang.org/genai"
+
+	"gokin/internal/gitexec"
 )
 
 // GitCommitTool creates git commits.
 type GitCommitTool struct {
 	workDir string
+	hooks   *gitexec.Hooks
 }
 
 // NewGitCommitTool creates a new GitCommitTool instance.
 func NewGitCommitTool(workDir string) *GitCommitTool {
 	return &GitCommitTool{
 		workDir: workDir,
+		hooks:   gitexec.CaptureHooks(workDir),
 	}
 }
 
@@ -104,7 +108,12 @@ func (t *GitCommitTool) Execute(ctx context.Context, args map[string]any) (ToolR
 
 	cmdArgs = append(cmdArgs, "-m", message)
 
-	cmd := newProcessGroupCommand(ctx, "git", cmdArgs...)
+	hookCtx, cleanup, err := t.hooks.Activate(ctx)
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("prepare trusted commit hooks: %v", err)), nil
+	}
+	defer cleanup()
+	cmd := newProcessGroupCommand(hookCtx, "git", cmdArgs...)
 	cmd.Dir = t.workDir
 
 	output, err := cmd.CombinedOutput()

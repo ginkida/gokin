@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"gokin/internal/gitexec"
 	"gokin/internal/permission"
 	"gokin/internal/tools"
 )
@@ -1347,6 +1348,9 @@ func runCommandWithTimeout(timeout time.Duration, name string, args ...string) (
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "git" {
+		cmd = gitexec.CommandContext(ctx, args...)
+	}
 	// Even local git probes can invoke helpers. Ensure a timeout cannot leave
 	// descendants holding locks or inherited pipes after the completion gate
 	// has already moved on.

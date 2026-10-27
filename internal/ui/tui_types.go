@@ -493,6 +493,7 @@ type SessionStartWaitMsg struct {
 
 // RuntimeStatusSnapshot is a compact runtime health snapshot for Status Bar 2.0.
 type RuntimeStatusSnapshot struct {
+	SandboxStatus      string
 	Mode               string
 	Provider           string
 	RequestBreaker     string

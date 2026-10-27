@@ -18,6 +18,7 @@ import (
 	"gokin/internal/fileutil"
 	"gokin/internal/format"
 	"gokin/internal/logging"
+	"gokin/internal/security"
 )
 
 // SafeEnvVars is the whitelist of environment variables passed to task commands.
@@ -43,6 +44,7 @@ var SafeEnvVars = []string{
 	"XDG_RUNTIME_DIR",
 	"GOPATH",
 	"GOROOT",
+	"GOTOOLCHAIN",
 	"GOPROXY",
 	"GOPRIVATE",
 	"GOFLAGS",
@@ -392,6 +394,10 @@ type Task struct {
 	Args    []string
 
 	cmd            *exec.Cmd
+	sandboxPolicy  *security.SandboxPolicy
+	sandboxScope   security.CommandScope
+	environment    []string
+	sandboxCleanup func()
 	cancelFunc     context.CancelFunc
 	processStarted bool
 	done           chan struct{} // closed when task reaches a terminal state
@@ -458,6 +464,19 @@ func (t *Task) Start(ctx context.Context) error {
 
 	// Use sanitized environment to prevent leaking sensitive env vars
 	t.cmd.Env = buildSafeEnv()
+	if t.environment != nil {
+		t.cmd.Env = t.environment
+	}
+	if t.sandboxPolicy != nil {
+		cleanup, err := t.sandboxPolicy.Prepare(execCtx, t.cmd, t.sandboxScope)
+		if err != nil {
+			cancel()
+			t.Output.Close()
+			t.mu.Unlock()
+			return err
+		}
+		t.sandboxCleanup = cleanup
+	}
 
 	// Set up process group for proper cleanup of child processes
 	setProcAttr(t.cmd)
@@ -477,6 +496,9 @@ func (t *Task) run() {
 	// Publish Done only after the transcript has been synced and closed, so
 	// WaitAll and FullString never race a still-open writer.
 	defer func() {
+		if t.sandboxCleanup != nil {
+			t.sandboxCleanup()
+		}
 		t.Output.Close()
 		t.doneOnce.Do(func() { close(t.done) })
 	}()

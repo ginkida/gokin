@@ -18,6 +18,7 @@ import (
 	appcontext "gokin/internal/context"
 	"gokin/internal/logging"
 	"gokin/internal/repl"
+	"gokin/internal/security"
 	"gokin/internal/ui"
 )
 
@@ -1015,6 +1016,11 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		availability := repl.Detect(ctx, app.GetWorkDir())
 		hybridAvailability = &availability
 	}
+	var bashStatus *security.SandboxStatus
+	if reporter, ok := app.(interface{ GetBashSandboxStatus() security.SandboxStatus }); ok {
+		status := reporter.GetBashSandboxStatus()
+		bashStatus = &status
+	}
 	return RenderDoctor(DoctorOptions{
 		Version:             app.GetVersion(),
 		Config:              cfg,
@@ -1022,6 +1028,7 @@ func (c *DoctorCommand) Execute(ctx context.Context, args []string, app AppInter
 		RuntimeEngineMode:   mode,
 		RuntimeREPLDisabled: replCapabilityDisabled,
 		HybridAvailability:  hybridAvailability,
+		BashSandbox:         bashStatus,
 	}), nil
 }
 
@@ -1041,6 +1048,7 @@ type DoctorOptions struct {
 	RuntimeEngineMode   string
 	RuntimeREPLDisabled bool
 	HybridAvailability  *repl.Availability
+	BashSandbox         *security.SandboxStatus
 }
 
 func RenderDoctor(options DoctorOptions) string {
@@ -1199,6 +1207,25 @@ func RenderDoctor(options DoctorOptions) string {
 			fmt.Fprintf(&sb, "  %s○%s Auto fallback to structured tools: %s\n", colorYellow, colorReset, availability.Reason)
 		}
 	}
+
+	if status := options.BashSandbox; status != nil {
+		fs := "unrestricted"
+		if status.Status == "enforced" {
+			fs = "workspace + grants RW, system/cache sources RO, secrets denied"
+		}
+		fmt.Fprintf(&sb, "  Bash sandbox: %s (%s) · fs: %s · network: %s\n", status.Status, status.Backend, fs, status.Network)
+		if status.Reason != "" {
+			fmt.Fprintf(&sb, "  Bash sandbox reason: %s\n", status.Reason)
+		}
+		if status.Status == "unavailable" {
+			if status.Network == "blocked" {
+				fmt.Fprintln(&sb, "  WARNING: unsafe isolation policy; command execution is refused")
+			} else {
+				fmt.Fprintln(&sb, "  WARNING: commands run UNSANDBOXED unless tools.bash.require_sandbox / --require-sandbox is set")
+			}
+		}
+	}
+	fmt.Fprintln(&sb, "  Hooks are privileged (unsandboxed); SSH intentionally uses host network access.")
 
 	fmt.Fprintf(&sb, "\n%s─── Environment ───%s\n", colorCyan, colorReset)
 

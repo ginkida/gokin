@@ -60,6 +60,9 @@ var (
 	headlessBudget       float64
 	permissionMode       string
 	skipPermissions      bool
+	allowNetwork         bool
+	requireSandbox       bool
+	noSandbox            bool
 	toolCeiling          []string
 	allowedTools         []string
 	deniedTools          []string
@@ -143,6 +146,9 @@ func newRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().Float64Var(&headlessBudget, "max-budget-usd", 0, "maximum estimated provider cost in headless mode (0 disables)")
 	rootCmd.PersistentFlags().StringVar(&permissionMode, "permission-mode", "", "permission mode for this run: default, acceptEdits, dontAsk, bypassPermissions, or plan")
 	rootCmd.PersistentFlags().BoolVar(&skipPermissions, "dangerously-skip-permissions", false, "bypass permission prompts for this run (sandbox, path boundaries, and hard safety checks remain active)")
+	rootCmd.PersistentFlags().BoolVar(&allowNetwork, "allow-network", false, "allow host network access for sandboxed commands in this run")
+	rootCmd.PersistentFlags().BoolVar(&requireSandbox, "require-sandbox", false, "refuse command execution if OS sandbox enforcement is unavailable")
+	rootCmd.PersistentFlags().BoolVar(&noSandbox, "no-sandbox", false, "explicitly disable command isolation for this run")
 	rootCmd.PersistentFlags().StringSliceVar(&allowedToolsCompat, "allowedTools", nil, "pre-approve matching tools for this run without widening --tools (Claude-compatible)")
 	rootCmd.PersistentFlags().StringSliceVar(&allowedTools, "allowed-tools", nil, "pre-approve matching tools for this run without widening --tools (see command-analysis example above)")
 	rootCmd.PersistentFlags().StringSliceVar(&toolCeiling, "tools", nil, "restrict available tools to these exact names (comma-separated; empty means no tools)")
@@ -1333,6 +1339,26 @@ func applyRunConfigOverrides(
 		cfg.Session.Enabled = false
 		cfg.Session.AutoLoad = false
 	}
+	if err := applyBashIsolationOverrides(cfg, allowNetwork, requireSandbox, noSandbox); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyBashIsolationOverrides(cfg *config.Config, network, required, disabled bool) error {
+	if disabled && (required || cfg.Tools.Bash.RequireSandbox) {
+		return fmt.Errorf("--no-sandbox conflicts with required sandbox enforcement")
+	}
+	if network {
+		cfg.Tools.Bash.AllowNetwork = true
+	}
+	if required {
+		cfg.Tools.Bash.RequireSandbox = true
+		cfg.Tools.Bash.Sandbox = true
+	}
+	if disabled {
+		cfg.Tools.Bash.Sandbox = false
+	}
 	return nil
 }
 
@@ -1697,6 +1723,7 @@ func writeHeadlessFailure(w io.Writer, sessionID, kind string, failure error, ti
 		kind = "startup"
 	}
 	result := app.HeadlessResult{
+		Sandbox:           security.SandboxStatus{Status: "unavailable", Backend: "none", Network: "unknown", Reason: "bash policy was not initialized before startup failed"},
 		Verification:      tools.VerificationSummary{Status: "not_run"},
 		Incomplete:        true,
 		PermissionDenials: []tools.PermissionDenial{},

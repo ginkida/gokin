@@ -382,6 +382,8 @@ type ProactiveContextConfig struct {
 // BashConfig holds bash tool settings.
 type BashConfig struct {
 	Sandbox         bool     `yaml:"sandbox"`
+	AllowNetwork    bool     `yaml:"allow_network"`
+	RequireSandbox  bool     `yaml:"require_sandbox"`
 	BlockedCommands []string `yaml:"blocked_commands"`
 }
 

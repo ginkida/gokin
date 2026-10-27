@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"gokin/internal/gitexec"
 	"gokin/internal/tools"
 )
 
@@ -313,6 +314,9 @@ func runCommand(dir, name string, args ...string) (string, error) {
 // ctx terminates the process via os.Kill (exec.CommandContext default).
 func runCommandCtx(ctx context.Context, dir, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "git" {
+		cmd = gitexec.CommandContext(ctx, args...)
+	}
 	cmd.Dir = dir
 
 	var stdout, stderr bytes.Buffer

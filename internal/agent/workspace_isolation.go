@@ -7,13 +7,13 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"gokin/internal/git"
+	"gokin/internal/gitexec"
 	"gokin/internal/logging"
 	"gokin/internal/tools"
 )
@@ -170,7 +170,7 @@ func prepareGitWorktree(baseWorkDir string, applyBackOnSuccess bool) (*isolatedW
 	worktreeDir := filepath.Join(parent, "workspace")
 	ctx, cancel := context.WithTimeout(context.Background(), worktreePrepareTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", baseWorkDir, "worktree", "add", "--detach", worktreeDir, "HEAD")
+	cmd := gitexec.CommandContext(ctx, "-C", baseWorkDir, "worktree", "add", "--detach", worktreeDir, "HEAD")
 	tools.KillProcessGroupOnCancel(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -189,7 +189,7 @@ func prepareGitWorktree(baseWorkDir string, applyBackOnSuccess bool) (*isolatedW
 		cleanup: func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), worktreeRemoveTimeout)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "git", "-C", baseWorkDir, "worktree", "remove", "--force", worktreeDir)
+			cmd := gitexec.CommandContext(ctx, "-C", baseWorkDir, "worktree", "remove", "--force", worktreeDir)
 			tools.KillProcessGroupOnCancel(cmd)
 			output, err := cmd.CombinedOutput()
 			removeErr := os.RemoveAll(parent)
@@ -400,7 +400,7 @@ func runGitCommandWithInput(workDir string, input []byte, args ...string) ([]byt
 	defer cancel()
 
 	cmdArgs := append([]string{"-C", workDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := gitexec.CommandContext(ctx, cmdArgs...)
 	tools.KillProcessGroupOnCancel(cmd)
 	if len(input) > 0 {
 		cmd.Stdin = bytes.NewReader(input)

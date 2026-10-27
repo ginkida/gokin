@@ -9,6 +9,7 @@ import (
 
 	"gokin/internal/commands"
 	"gokin/internal/repl"
+	"gokin/internal/security"
 
 	"github.com/spf13/cobra"
 )
@@ -60,6 +61,12 @@ func newDoctorCmd() *cobra.Command {
 				}
 			}
 			executablePath, _ := os.Executable()
+			bashConfig := security.DefaultSandboxConfig()
+			bashConfig.Enabled = cfg.Tools.Bash.Sandbox
+			bashConfig.RequireSandbox = cfg.Tools.Bash.RequireSandbox
+			bashConfig.AllowNetwork = cfg.Tools.Bash.AllowNetwork
+			bashConfig.SensitivePaths = []string{configPath}
+			bashStatus := security.NewSandboxPolicy(workDir, bashConfig).Status(cmd.Context())
 			var hybridAvailability *repl.Availability
 			if strings.ToLower(strings.TrimSpace(cfg.Engine.Mode)) != "tools" && !replCapabilityDisabled {
 				availability := doctorREPLDetector(cmd.Context(), workDir)
@@ -74,6 +81,7 @@ func newDoctorCmd() *cobra.Command {
 				CLI:                 true,
 				RuntimeREPLDisabled: replCapabilityDisabled,
 				HybridAvailability:  hybridAvailability,
+				BashSandbox:         &bashStatus,
 			})
 			_, err = fmt.Fprint(cmd.OutOrStdout(), doctorANSIPattern.ReplaceAllString(report, ""))
 			return err

@@ -3,10 +3,11 @@ package git
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"gokin/internal/gitexec"
 )
 
 // GitContext contains git repository context for prompt injection.
@@ -274,7 +275,7 @@ func isHex(s string) bool {
 
 // runGit executes a git command and returns its output.
 func (p *GitContextProvider) runGit(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitexec.CommandContext(ctx, args...)
 	cmd.Dir = p.workDir
 	output, err := cmd.Output()
 	return string(output), err

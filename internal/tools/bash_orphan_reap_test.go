@@ -5,10 +5,15 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"gokin/internal/security"
+	"gokin/internal/testkit"
 )
 
 // v0.100.104 field report: a foreground bash command that backgrounds a child
@@ -18,6 +23,7 @@ import (
 // exit, group survivors must be reaped.
 func TestBashNormalExitReapsBackgroundedDescendants(t *testing.T) {
 	bt := NewBashTool(t.TempDir())
+	bt.SetSandboxEnabled(false) // CHILD is interpreted as a host PID below.
 
 	// Backgrounds an effectively-infinite sleep with its output REDIRECTED
 	// (the real field shape — `yes >/dev/null &`): the child holds no
@@ -54,4 +60,36 @@ func TestBashNormalExitReapsBackgroundedDescendants(t *testing.T) {
 	// Clean up ourselves so a failing test doesn't leak the sleeper.
 	_ = syscall.Kill(childPid, syscall.SIGKILL)
 	t.Fatalf("backgrounded child %d survived the tool call — orphan leak", childPid)
+}
+
+func TestBashSandboxNormalExitReapsBackgroundedDescendants(t *testing.T) {
+	root := testkit.ResolvedTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	config := security.DefaultSandboxConfig()
+	config.RequireSandbox = true
+	policy := security.NewSandboxPolicy(root, config)
+	if status := policy.Status(t.Context()); status.Status != "enforced" {
+		if os.Getenv("GOKIN_TEST_REQUIRE_SANDBOX") == "1" {
+			t.Fatalf("sandbox required: %+v", status)
+		}
+		t.Skipf("sandbox capability: %s", status.Reason)
+	}
+	bt := NewBashTool(root)
+	bt.SetSandboxPolicy(policy)
+	// Observe effects in the namespace rather than treating $! as a host PID.
+	// The sentinel also stops a survivor without signalling any host process.
+	t.Cleanup(func() { _ = os.WriteFile(filepath.Join(root, "stop"), nil, 0600) })
+	result, err := bt.Execute(t.Context(), map[string]any{"command": "(while [ ! -e stop ]; do printf x >> heartbeat; sleep 0.02; done) >/dev/null 2>&1 & while [ ! -s heartbeat ]; do sleep 0.01; done"})
+	if err != nil || !result.Success {
+		t.Fatalf("sandbox command: %+v %v", result, err)
+	}
+	before, err := os.Stat(filepath.Join(root, "heartbeat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	after, err := os.Stat(filepath.Join(root, "heartbeat"))
+	if err != nil || after.Size() != before.Size() {
+		t.Fatalf("sandbox descendant kept writing after return: %v", err)
+	}
 }

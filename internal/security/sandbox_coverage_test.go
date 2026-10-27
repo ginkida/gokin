@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -162,26 +163,32 @@ func TestSandbox_NewCommand_Disabled(t *testing.T) {
 // SandboxedCommand.Run (0% → full)
 // ===========================================================================
 
-// requireSandboxExec skips when the ENVIRONMENT cannot actually execute a
-// sandboxed command. On linux the sandbox clones mount/UTS namespaces
-// (CLONE_NEWNS|CLONE_NEWUTS, sandbox_linux.go) — forbidden inside
-// unprivileged CI containers, where fork/exec fails with "operation not
-// permitted". These tests verify the BEHAVIOR of a working sandbox, not the
-// host's namespace privileges (the macOS-written-test-breaks-on-linux-CI
-// class, environmental-capability flavor).
+// Enforcement assertions may skip only after the real bash policy probe gives
+// an explicit host capability failure. Optional unsandboxed fallback is never
+// evidence that isolation works.
 func requireSandboxExec(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("sandbox uses bash")
 	}
-	dir := t.TempDir()
-	sc, err := NewSandboxedCommand(context.Background(), dir, "true", DefaultSandboxConfig())
-	if err != nil {
-		t.Skipf("sandbox unavailable here: %v", err)
+	var capability *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		capability = exec.CommandContext(t.Context(), "bwrap", "--unshare-all", "--ro-bind", "/", "/", "--proc", "/proc", "--", "/bin/true")
+	case "darwin":
+		capability = exec.CommandContext(t.Context(), "sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true")
+	default:
+		t.Skipf("no bash isolation backend for %s", runtime.GOOS)
 	}
-	if res := sc.Run(10 * time.Second); res.Error != nil &&
-		strings.Contains(res.Error.Error(), "operation not permitted") {
-		t.Skipf("environment cannot execute sandboxed commands: %v", res.Error)
+	if output, err := capability.CombinedOutput(); err != nil {
+		if os.Getenv("GOKIN_TEST_REQUIRE_SANDBOX") == "1" {
+			t.Fatalf("sandbox capability required: %v: %s", err, output)
+		}
+		t.Skipf("OS sandbox capability probe: %v: %s", err, output)
+	}
+	status := NewSandboxPolicy(t.TempDir(), DefaultSandboxConfig()).Status(context.Background())
+	if status.Status != "enforced" {
+		t.Fatalf("OS backend works but bash policy is unavailable: %+v", status)
 	}
 }
 

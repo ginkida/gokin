@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"gokin/internal/gitexec"
 )
 
 // GrepCommand runs a quick inline search against the working tree.
@@ -118,7 +120,7 @@ func (c *GrepCommand) Execute(ctx context.Context, args []string, app AppInterfa
 	gitArgs = append(gitArgs, "--", pattern)
 	gitArgs = append(gitArgs, paths...)
 
-	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	cmd := gitexec.CommandContext(ctx, gitArgs...)
 	cmd.Dir = workDir
 	// Capture stderr separately so a real failure (bad revision, malformed
 	// pathspec, etc.) surfaces git's actual error text instead of a bare

@@ -289,6 +289,13 @@ func (m Model) minimalStatusSegments() []string {
 
 func (m Model) safetyModeSegments(minimal bool) []string {
 	var parts []string
+	if m.runtimeStatus.SandboxStatus == "unavailable" {
+		label := "!SBX unavailable"
+		if minimal {
+			label = "!SBX?"
+		}
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render(label))
+	}
 	if !m.permissionsEnabled {
 		parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO"))
 	}
@@ -591,6 +598,9 @@ func (m Model) baseStatusSegments(withContextBar bool) []string {
 // (this session bypasses confirmations). Empty when both protections are on.
 func (m Model) safetyBadge() string {
 	var b []string
+	if m.runtimeStatus.SandboxStatus == "unavailable" {
+		b = append(b, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("!SBX unavailable"))
+	}
 	if !m.permissionsEnabled {
 		b = append(b, lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("YOLO"))
 	}

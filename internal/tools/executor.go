@@ -313,7 +313,8 @@ type Executor struct {
 	toolStatsLookup func(tool string) (p95 time.Duration, successRate float64, ok bool)
 
 	// Auto-formatter for write/edit operations
-	formatter *Formatter
+	formatter     *Formatter
+	sandboxPolicy *security.SandboxPolicy
 
 	// Delta-check guardrail for mutating operations.
 	deltaCheckEnabled     bool
@@ -3636,7 +3637,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	if e.formatter != nil && result.Success {
 		if call.Name == "write" || call.Name == "edit" {
 			if filePath, ok := call.Args["file_path"].(string); ok {
-				_ = e.formatter.Format(ctx, filePath)
+				if err := e.formatter.formatInWorkspace(ctx, filePath, e.registry, e.workDir, e.sandboxPolicy); err != nil {
+					result.Content += "\nAutomatic formatter did not run: " + err.Error()
+				}
 			}
 		}
 	}

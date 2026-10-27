@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"gokin/internal/git"
+	"gokin/internal/gitexec"
 	"gokin/internal/tools"
 )
 
@@ -45,7 +45,7 @@ func snapshotClaimWorkspace(parent context.Context, root string) *claimWorkspace
 		s.known = true
 		return s
 	}
-	head := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	head := gitexec.CommandContext(ctx, "rev-parse", "HEAD")
 	head.Dir = root
 	head.WaitDelay = 100 * time.Millisecond
 	tools.KillProcessGroupOnCancel(head)
@@ -58,7 +58,7 @@ func snapshotClaimWorkspace(parent context.Context, root string) *claimWorkspace
 		{"diff", "--no-ext-diff", "--name-only", "--relative", "-z", "HEAD", "--", "."},
 		{"ls-files", "--others", "--exclude-standard", "-z", "--", "."},
 	} {
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := gitexec.CommandContext(ctx, args...)
 		cmd.Dir = root
 		cmd.WaitDelay = 100 * time.Millisecond
 		tools.KillProcessGroupOnCancel(cmd)

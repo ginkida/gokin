@@ -49,11 +49,12 @@ import (
 // Builder provides a fluent interface for constructing App instances.
 // This breaks up the massive New() function and makes dependency injection clearer.
 type Builder struct {
-	cfg     *config.Config
-	workDir string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	options BuildOptions
+	cfg         *config.Config
+	workDir     string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	options     BuildOptions
+	bashSandbox *security.SandboxPolicy
 
 	// Git snapshots belong to this builder's startup batch, never the App.
 	gitProbes *git.StartupProbes
@@ -447,6 +448,9 @@ func (b *Builder) initTools() error {
 	} else {
 		b.registry = tools.DefaultRegistry(b.workDir)
 	}
+	b.bashSandbox = security.NewSandboxPolicy(b.workDir, bashSandboxConfig(b.cfg))
+	tools.SetSandboxPolicyOnRegistry(b.registry, b.bashSandbox)
+	_ = b.bashSandbox.Status(b.ctx)
 	// Plugin discovery later activates LSP. Construction alone must not
 	// advertise an unavailable tool or start language servers.
 	b.registry.Unregister("lsp")
@@ -467,6 +471,7 @@ func (b *Builder) initTools() error {
 	b.mainClient.SetTools(mainTools)
 
 	b.executor = tools.NewExecutor(b.registry, b.mainClient, b.cfg.Tools.Timeout)
+	b.executor.SetSandboxPolicy(b.bashSandbox)
 	b.executor.SetCostCalculator(func(provider, model string, input, output, cacheRead int) (float64, bool) {
 		if strings.EqualFold(strings.TrimSpace(provider), "ollama") {
 			return 0, true
@@ -1546,7 +1551,6 @@ func (b *Builder) initIntegrations() error {
 	// Apply bash policy config (the task manager is bound above).
 	if bashTool, ok := b.registry.Get("bash"); ok {
 		if bt, ok := bashTool.(*tools.BashTool); ok {
-			bt.SetSandboxEnabled(b.cfg.Tools.Bash.Sandbox)
 			// Set unrestricted mode for bash tool (skip command validation)
 			sandboxOff := !b.cfg.Tools.Bash.Sandbox
 			permissionOff := !b.cfg.Permission.Enabled
@@ -2933,6 +2937,7 @@ func (b *Builder) assembleApp() *App {
 		client:                        b.mainClient,
 		registry:                      b.registry,
 		executor:                      b.executor,
+		bashSandbox:                   b.bashSandbox,
 		session:                       b.session,
 		tui:                           b.tuiModel,
 		ctx:                           b.ctx,

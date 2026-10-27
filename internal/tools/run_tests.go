@@ -32,6 +32,7 @@ const (
 type RunTestsTool struct {
 	workDir       string
 	pathValidator *security.PathValidator
+	sandboxPolicy *security.SandboxPolicy
 }
 
 // NewRunTestsTool creates a new RunTestsTool instance.
@@ -40,6 +41,7 @@ func NewRunTestsTool(workDir string) *RunTestsTool {
 	return &RunTestsTool{
 		workDir:       workDir,
 		pathValidator: newWorkspacePathValidator(workDir, nil),
+		sandboxPolicy: security.NewSandboxPolicy(workDir, security.DefaultSandboxConfig()),
 	}
 }
 
@@ -47,7 +49,7 @@ func NewRunTestsTool(workDir string) *RunTestsTool {
 // run_tests executes project-controlled code, so its path boundary must match
 // read/write tools rather than trusting a model-supplied ../ path.
 func (t *RunTestsTool) SetAllowedDirs(dirs []string) {
-	t.pathValidator = newWorkspacePathValidator(t.workDir, dirs)
+	t.pathValidator.SetAllowedDirs(append([]string{t.workDir}, dirs...))
 }
 
 func (t *RunTestsTool) Name() string { return "run_tests" }
@@ -189,6 +191,11 @@ func (t *RunTestsTool) Execute(ctx context.Context, args map[string]any) (ToolRe
 
 	cmd := exec.CommandContext(testCtx, cmdName, cmdArgs...)
 	cmd.Dir = workDir
+	cleanup, err := prepareProjectCommand(testCtx, cmd, t.sandboxPolicy, t.workDir, t.pathValidator)
+	if err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	defer cleanup()
 	// Timeout must kill the whole group: `npm test`/`go test` spawn children
 	// that a leader-only SIGKILL orphans forever (the orphaned-`yes` class).
 	KillProcessGroupOnCancel(cmd)

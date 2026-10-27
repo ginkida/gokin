@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"gokin/internal/gitexec"
 	"gokin/internal/logging"
 )
 
@@ -101,7 +102,7 @@ func (e *Executor) ensureDeltaBaseline(ctx context.Context) {
 		return
 	}
 
-	paths, _, ok := deltaGitStatusPaths(ctx, workDir)
+	paths, _, ok := e.deltaGitStatusPaths(ctx, workDir)
 
 	e.deltaCheckMu.Lock()
 	defer e.deltaCheckMu.Unlock()
@@ -305,7 +306,7 @@ func (e *Executor) runDeltaCheck(ctx context.Context) deltaCheckResult {
 		maxModules = deltaCheckDefaultMaxModule
 	}
 
-	changed, hashSeed := collectDeltaChangedPaths(ctx, workDir, baselineCaptured, baseline, pending)
+	changed, hashSeed := e.collectDeltaChangedPaths(ctx, workDir, baselineCaptured, baseline, pending)
 	commands := buildDeltaCheckCommands(workDir, changed, maxModules)
 
 	if len(commands) == 0 {
@@ -334,10 +335,15 @@ func (e *Executor) runDeltaCheck(ctx context.Context) deltaCheckResult {
 		runCtx, cancel := context.WithTimeout(ctx, timeout)
 		cmd := exec.CommandContext(runCtx, check.Command, check.Args...)
 		cmd.Dir = check.Dir
+		cleanup, err := PrepareVerificationCommand(runCtx, cmd, e.registry, workDir, e.sandboxPolicy)
+		var output []byte
 		// Arbitrary project build/test commands spawn children — a timeout
 		// must kill the whole group, not orphan them (orphaned-`yes` class).
 		KillProcessGroupOnCancel(cmd)
-		output, err := cmd.CombinedOutput()
+		if err == nil {
+			output, err = cmd.CombinedOutput()
+			cleanup()
+		}
 		cancel()
 
 		outputText := strings.TrimSpace(string(output))
@@ -419,7 +425,7 @@ func (e *Executor) commitDeltaCheckResult(result deltaCheckResult, warnOnly bool
 	}
 }
 
-func collectDeltaChangedPaths(
+func (e *Executor) collectDeltaChangedPaths(
 	ctx context.Context,
 	workDir string,
 	baselineCaptured bool,
@@ -434,7 +440,7 @@ func collectDeltaChangedPaths(
 	}
 
 	hashSeed := ""
-	if statusPaths, statusText, ok := deltaGitStatusPaths(ctx, workDir); ok {
+	if statusPaths, statusText, ok := e.deltaGitStatusPaths(ctx, workDir); ok {
 		if baselineCaptured {
 			for rel := range statusPaths {
 				if _, exists := baseline[rel]; exists {
@@ -462,18 +468,29 @@ func collectDeltaChangedPaths(
 	return changed, hashSeed
 }
 
-func deltaGitStatusPaths(ctx context.Context, workDir string) (map[string]struct{}, string, bool) {
+func (e *Executor) deltaGitStatusPaths(ctx context.Context, workDir string) (map[string]struct{}, string, bool) {
 	paths := make(map[string]struct{})
 	if strings.TrimSpace(workDir) == "" {
 		return paths, "", false
 	}
 
-	if out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--is-inside-work-tree").CombinedOutput(); err != nil ||
+	runGit := func(args ...string) ([]byte, error) {
+		cmd := gitexec.CommandContext(ctx, append([]string{"-C", workDir}, args...)...)
+		cmd.Dir = workDir
+		cleanup, err := PrepareVerificationCommand(ctx, cmd, e.registry, workDir, e.sandboxPolicy)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		KillProcessGroupOnCancel(cmd)
+		return cmd.CombinedOutput()
+	}
+	if out, err := runGit("rev-parse", "--is-inside-work-tree"); err != nil ||
 		!strings.EqualFold(strings.TrimSpace(string(out)), "true") {
 		return paths, "", false
 	}
 
-	out, err := exec.CommandContext(ctx, "git", "-C", workDir, "status", "--porcelain", "--untracked-files=all").CombinedOutput()
+	out, err := runGit("status", "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return paths, "", false
 	}

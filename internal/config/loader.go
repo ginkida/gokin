@@ -157,6 +157,8 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 	// user's cross-project memory. Treat the user-level decision loaded by Load
 	// as a capability ceiling: project config may narrow it, never widen it.
 	userAllowsGlobal := cfg.Memory.AllowGlobal
+	userBash := cfg.Tools.Bash
+	userDirs := append([]string(nil), cfg.Tools.AllowedDirs...)
 	if err := loadFromFile(cfg, projectConfigPath); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to load project config: %w", err)
@@ -165,6 +167,8 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 		cfg.modelRoundTimeoutProjectPath = projectConfigPath
 	}
 	cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
+	narrowProjectBashPolicy(cfg, userBash)
+	narrowProjectAllowedDirs(cfg, userDirs)
 
 	migrateRemovedProviders(cfg)
 	return cfg, nil
@@ -188,6 +192,8 @@ func loadProjectConfig(cfg *Config) {
 		if _, err := os.Stat(projectConfig); err == nil {
 			// Found project config, merge it
 			userAllowsGlobal := cfg.Memory.AllowGlobal
+			userBash := cfg.Tools.Bash
+			userDirs := append([]string(nil), cfg.Tools.AllowedDirs...)
 			userTrustedWorkspaces := append([]string(nil), cfg.Hooks.TrustedWorkspaces...)
 			if err := loadFromFile(cfg, projectConfig); err != nil {
 				slog.Warn("failed to load project config", "path", projectConfig, "error", err)
@@ -198,6 +204,8 @@ func loadProjectConfig(cfg *Config) {
 			// may grant itself. A project may explicitly disable it, but cannot
 			// widen a user-level false into cross-project prompt injection.
 			cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
+			narrowProjectBashPolicy(cfg, userBash)
+			narrowProjectAllowedDirs(cfg, userDirs)
 			// Workspace trust is also user-owned authority. A repository may
 			// configure hook behavior after the user trusts it, but it may not
 			// add its own path to the trust ledger and thereby activate
@@ -212,6 +220,58 @@ func loadProjectConfig(cfg *Config) {
 		}
 		dir = parent
 	}
+}
+
+// Project files may strengthen isolation, but never grant host execution or
+// network authority that the user's configuration withheld.
+func narrowProjectBashPolicy(cfg *Config, user BashConfig) {
+	cfg.Tools.Bash.Sandbox = user.Sandbox || cfg.Tools.Bash.Sandbox
+	cfg.Tools.Bash.AllowNetwork = user.AllowNetwork && cfg.Tools.Bash.AllowNetwork
+	cfg.Tools.Bash.RequireSandbox = user.RequireSandbox || cfg.Tools.Bash.RequireSandbox
+}
+
+// Directory grants are user authority too: otherwise a project could retain
+// sandbox=true but mount the entire host through tools.allowed_dirs: ["/"].
+func narrowProjectAllowedDirs(cfg *Config, userDirs []string) {
+	unchanged := len(cfg.Tools.AllowedDirs) == len(userDirs)
+	if unchanged {
+		for i, dir := range userDirs {
+			if cfg.Tools.AllowedDirs[i] != dir {
+				unchanged = false
+				break
+			}
+		}
+	}
+	if unchanged {
+		return
+	}
+	kept := make([]string, 0, len(cfg.Tools.AllowedDirs))
+	for _, dir := range cfg.Tools.AllowedDirs {
+		candidate, err := filepath.Abs(expandTilde(dir))
+		if err != nil {
+			continue
+		}
+		candidate, err = filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		for _, allowed := range userDirs {
+			root, err := filepath.Abs(expandTilde(allowed))
+			if err != nil {
+				continue
+			}
+			root, err = filepath.EvalSymlinks(root)
+			if err != nil {
+				continue
+			}
+			rel, err := filepath.Rel(root, candidate)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+				kept = append(kept, candidate)
+				break
+			}
+		}
+	}
+	cfg.Tools.AllowedDirs = kept
 }
 
 // explicitConfigPath pins the process to the file the launcher was given with
@@ -306,6 +366,14 @@ func loadFromFile(cfg *Config, path string) error {
 
 	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
 		return fmt.Errorf("failed to parse config file %s: %w", path, err)
+	}
+	var misplaced struct {
+		Tools struct {
+			Sandbox *bool `yaml:"sandbox"`
+		} `yaml:"tools"`
+	}
+	if err := yaml.Unmarshal([]byte(expanded), &misplaced); err == nil && misplaced.Tools.Sandbox != nil {
+		slog.Warn("tools.sandbox is ignored; use tools.bash.sandbox", "path", path)
 	}
 
 	return nil

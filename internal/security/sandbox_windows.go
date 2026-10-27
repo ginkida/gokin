@@ -3,6 +3,7 @@
 package security
 
 import (
+	"fmt"
 	"os/exec"
 	"strconv"
 )
@@ -19,8 +20,6 @@ func terminateSandboxProcessTree(cmd *exec.Cmd) {
 }
 
 // applySandbox applies basic process isolation for Windows
-func (sc *SandboxedCommand) applySandbox(workDir string) error {
-	// Windows doesn't support Unix process groups
-	// Basic isolation is handled by the OS
-	return nil
+func wrapBashSandbox(_ *exec.Cmd, _ string, _ []sandboxMount, _ []string, _ string, _ bool) error {
+	return fmt.Errorf("no bash isolation backend on Windows")
 }

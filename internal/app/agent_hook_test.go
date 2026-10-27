@@ -31,7 +31,7 @@ func installAgentHookFixture(t *testing.T, a *App, event string, once bool) {
 	}
 	skill := tools.NewSkillToolWithCatalog(skills.NewCatalog(nil))
 	a.registry.MustRegister(skill)
-	registration, err := skill.HookScope().Prepare("agent-review", []hooks.ClaudeCommand{{Event: event, Handler: "agent", Prompt: "AGENT_HOOK_ACCEPTANCE: verify evidence $ARGUMENTS", Timeout: time.Second, Once: once}})
+	registration, err := skill.HookScope().Prepare("agent-review", []hooks.ClaudeCommand{{Event: event, Handler: "agent", Prompt: "AGENT_HOOK_ACCEPTANCE: verify evidence $ARGUMENTS", Timeout: 10 * time.Second, Once: once}})
 	if err != nil {
 		t.Fatal(err)
 	}

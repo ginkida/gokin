@@ -1,17 +1,12 @@
-//go:build !linux && unix
+//go:build !linux && !darwin && !windows
 
 package security
 
 import (
-	"syscall"
+	"fmt"
+	"os/exec"
 )
 
-// applySandbox applies basic process isolation for non-Linux Unix platforms (macOS, BSD)
-func (sc *SandboxedCommand) applySandbox(workDir string) error {
-	// For non-Linux Unix systems, we provide basic process group isolation
-	sc.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-
-	return nil
+func wrapBashSandbox(_ *exec.Cmd, _ string, _ []sandboxMount, _ []string, _ string, _ bool) error {
+	return fmt.Errorf("no bash isolation backend on this platform")
 }

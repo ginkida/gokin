@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"gokin/internal/fileutil"
+	"gokin/internal/gitexec"
 	"gokin/internal/pluginpolicy"
 	"gokin/internal/security"
 )
@@ -180,6 +181,9 @@ func commandEnv() []string {
 }
 func runCommand(ctx context.Context, dir string, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "git" {
+		cmd = gitexec.CommandContext(ctx, args...)
+	}
 	configureProcess(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir
@@ -266,7 +270,7 @@ func fetchGit(ctx context.Context, source Source, stage string) (string, string,
 	}
 	archiveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(archiveCtx, "git", archiveArgs...)
+	cmd := gitexec.CommandContext(archiveCtx, archiveArgs...)
 	configureProcess(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = commandEnv()

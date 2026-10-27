@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"os/exec"
+
+	"gokin/internal/gitexec"
 )
 
 // newProcessGroupCommand creates a context-bound command whose cancellation
@@ -12,6 +14,9 @@ import (
 // after the user presses Esc or a tool deadline expires.
 func newProcessGroupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "git" {
+		cmd = gitexec.CommandContext(ctx, args...)
+	}
 	KillProcessGroupOnCancel(cmd)
 	return cmd
 }

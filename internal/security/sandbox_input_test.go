@@ -22,8 +22,8 @@ func TestSandboxTempDirectoryExistsBeforeCommand(t *testing.T) {
 	}
 	path := strings.TrimSpace(string(result.Stdout))
 	t.Cleanup(func() { _ = os.Remove(path) })
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("private sandbox scratch survived command teardown: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(work, "tmp")); !os.IsNotExist(err) {
 		t.Fatal("sandbox created an unnecessary project tmp directory")

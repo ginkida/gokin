@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"gokin/internal/gitexec"
 )
 
 // IsGitRepo is an optional context probe: errors, including timeout, mean false.
@@ -25,7 +27,7 @@ func isGitRepo(workDir string, output gitOutput) bool {
 func CheckGitRepo(ctx context.Context, workDir string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	cmd := gitexec.CommandContext(ctx, "rev-parse", "--git-dir")
 	cmd.Dir = workDir
 	cmd.WaitDelay = 100 * time.Millisecond
 	killProbeGroupOnCancel(cmd)

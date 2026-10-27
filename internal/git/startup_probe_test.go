@@ -17,7 +17,10 @@ func installStartupGitFixture(t *testing.T, script string) string {
 	t.Helper()
 	root := t.TempDir()
 	logPath := filepath.Join(root, "calls")
-	script = "#!/bin/sh\nprintf 'probe\\n' >> \"$GOKIN_TEST_GIT_LOG\"\n" + script
+	// Host git calls go through gitexec, which prefixes `-c key=value` safety
+	// overrides; drop them so fixtures can match the real subcommand.
+	script = "#!/bin/sh\nprintf 'probe\\n' >> \"$GOKIN_TEST_GIT_LOG\"\n" +
+		"while [ \"$1\" = -c ]; do shift 2; done\n" + script
 	if err := os.WriteFile(filepath.Join(root, "git"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

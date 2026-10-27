@@ -71,12 +71,16 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 		workspaceBoundaryEnabled := t.workspaceBoundaryEnabled
 		workspaceRoot := t.workspaceRoot
 		taskManager := t.taskManager
+		sandboxPolicy := t.sandboxPolicy
+		sandboxDirs := append([]string(nil), t.sandboxDirs...)
 		t.policyMu.RUnlock()
 
 		dir := pickWorkDir(workDir, sourceWorkDir)
 		cloned := NewBashTool(dir)
 		cloned.SetTimeout(timeout)
 		cloned.SetSandboxEnabled(sandboxEnabled)
+		cloned.SetSandboxPolicy(sandboxPolicy)
+		cloned.SetAllowedDirs(sandboxDirs)
 		cloned.SetUnrestrictedMode(unrestrictedMode)
 		cloned.SetBackgroundAllowed(backgroundAllowed)
 		if workDir != "" {
@@ -160,15 +164,19 @@ func CloneToolForWorkDir(tool Tool, workDir string) Tool {
 	case *GitAddTool:
 		return NewGitAddTool(pickWorkDir(workDir, t.workDir))
 	case *GitCommitTool:
-		return NewGitCommitTool(pickWorkDir(workDir, t.workDir))
+		return &GitCommitTool{workDir: pickWorkDir(workDir, t.workDir), hooks: t.hooks}
 	case *GitBranchTool:
 		return NewGitBranchTool(pickWorkDir(workDir, t.workDir))
 	case *GitPRTool:
 		return NewGitPRTool(pickWorkDir(workDir, t.workDir))
 	case *RunTestsTool:
-		return NewRunTestsTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewRunTestsTool(pickWorkDir(workDir, t.workDir))
+		cloned.SetSandboxPolicy(t.sandboxPolicy)
+		return cloned
 	case *VerifyCodeTool:
-		return NewVerifyCodeTool(pickWorkDir(workDir, t.workDir))
+		cloned := NewVerifyCodeTool(pickWorkDir(workDir, t.workDir))
+		cloned.SetSandboxPolicy(t.sandboxPolicy)
+		return cloned
 	case *CheckImpactTool:
 		return NewCheckImpactTool(pickWorkDir(workDir, t.workDir))
 	case *GoToDefinitionTool:

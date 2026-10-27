@@ -43,6 +43,7 @@ var SafeEnvVars = []string{
 	// Go-specific
 	"GOPATH",
 	"GOROOT",
+	"GOTOOLCHAIN",
 	"GOPROXY",
 	"GOPRIVATE",
 	"GOFLAGS",
@@ -176,7 +177,9 @@ type BashTool struct {
 	taskManager               *tasks.Manager
 	timeout                   time.Duration // Explicit timeout for commands
 	sandboxEnabled            bool          // Enable sandboxing for bash commands
-	unrestrictedMode          bool          // Skip command validation when both sandbox and permissions are off
+	sandboxPolicy             *security.SandboxPolicy
+	sandboxDirs               []string
+	unrestrictedMode          bool // Skip command validation when both sandbox and permissions are off
 	workspaceRoot             string
 	workspaceBoundaryEnabled  bool
 	managedWorkspaceApplyBack bool
@@ -205,7 +208,8 @@ func NewBashTool(workDir string) *BashTool {
 		workDir:           workDir,
 		session:           NewBashSession(workDir),
 		timeout:           DefaultBashTimeout, // Set default timeout
-		sandboxEnabled:    false,              // Sandbox disabled by default (requires root)
+		sandboxEnabled:    true,
+		sandboxPolicy:     security.NewSandboxPolicy(workDir, security.DefaultSandboxConfig()),
 		backgroundAllowed: true,
 		policyRevision:    1,
 	}
@@ -278,7 +282,7 @@ func (t *BashTool) SetBackgroundAllowed(allowed bool) {
 }
 
 // SetSandboxEnabled enables or disables sandbox mode.
-// When enabled, commands run in a Linux namespace sandbox (requires root).
+// When enabled, commands use the platform's probed isolation policy.
 // When disabled, commands run directly without isolation.
 func (t *BashTool) SetSandboxEnabled(enabled bool) {
 	t.policyMu.Lock()
@@ -287,6 +291,12 @@ func (t *BashTool) SetSandboxEnabled(enabled bool) {
 		t.policyRevision++
 	}
 	t.sandboxEnabled = enabled
+	if t.sandboxPolicy != nil {
+		config := t.sandboxPolicy.Config()
+		config.Enabled = enabled || config.RequireSandbox
+		t.sandboxPolicy.Configure(t.workDir, config)
+	}
+	t.clampSandboxCwdLocked()
 }
 
 // SetUnrestrictedMode enables or disables unrestricted mode.
@@ -595,7 +605,8 @@ func (t *BashTool) executeBackground(ctx context.Context, command string) (ToolR
 	// kill_shell all see this task); the working directory travels with the
 	// task instead of coming from the manager.
 	taskDir := t.sessionWorkDir()
-	taskID, err := t.taskManager.StartInDir(bgCtx, taskDir, command)
+	scope := security.CommandScope{WorkDir: t.workDir, AllowedDirs: append([]string(nil), t.sandboxDirs...), ReadFiles: hooks.SessionEnvironmentFiles(ctx)}
+	taskID, err := t.taskManager.StartSandboxedInDir(bgCtx, taskDir, command, t.sandboxPolicy, scope, t.buildSessionEnv())
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("failed to start background task: %s", err)), nil
 	}
@@ -822,12 +833,6 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 		defer cancel()
 	}
 
-	// Apply sandboxing if enabled
-	if t.sandboxEnabled {
-		// Use sandbox wrapper for command execution
-		return t.executeSandboxed(execCtx, command, stdinContent, commandTimeout)
-	}
-
 	// Use session working directory
 	workDir := t.sessionWorkDir()
 
@@ -854,6 +859,14 @@ func (t *BashTool) executeForeground(ctx context.Context, command string, stdinC
 
 	// Use sanitized environment with session env vars injected
 	cmd.Env = t.buildSessionEnv()
+	cleanup, err := t.sandboxPolicy.Prepare(execCtx, cmd, security.CommandScope{
+		WorkDir: t.workDir, AllowedDirs: t.sandboxDirs,
+		ReadFiles: hooks.SessionEnvironmentFiles(ctx), WriteFiles: []string{probe.path},
+	})
+	if err != nil {
+		return NewErrorResult(fmt.Sprintf("sandbox setup failed: %s", err)), nil
+	}
+	defer cleanup()
 
 	// Set up process group for proper cleanup of child processes
 	setBashProcAttr(cmd)
@@ -1310,60 +1323,6 @@ func (t *BashTool) buildResult(stdoutStr, stderrStr string) ToolResult {
 	}
 
 	return NewSuccessResult(result)
-}
-
-// executeSandboxed executes the command with sandbox isolation
-func (t *BashTool) executeSandboxed(ctx context.Context, command, stdinContent string, commandTimeout time.Duration) (ToolResult, error) {
-	// Create sandbox configuration
-	sandboxConfig := security.DefaultSandboxConfig()
-	sandboxConfig.Enabled = true
-
-	// Create sandboxed command — use sessionWorkDir so that cd changes made in
-	// earlier sandboxed commands are respected, matching non-sandboxed behaviour.
-	probe, err := newBashCwdProbe()
-	if err != nil {
-		return NewErrorResult(fmt.Sprintf("cannot track shell working directory: %v", err)), nil
-	}
-	defer probe.close()
-	sandboxed, err := security.NewSandboxedCommand(ctx, t.sessionWorkDir(), probe.wrap(command), sandboxConfig)
-	if err != nil {
-		return NewErrorResult(fmt.Sprintf("sandbox setup failed: %s", err)), nil
-	}
-	if stdinContent != "" {
-		sandboxed.SetStdin(stdinContent)
-	}
-
-	// Run the sandboxed command
-	result := sandboxed.Run(commandTimeout)
-
-	// Handle errors
-	if result.Error != nil {
-		return NewErrorResult(fmt.Sprintf("command failed in sandbox: %s", result.Error)), nil
-	}
-	cleanOutput, detectedDir := string(result.Stdout), probe.directory()
-	if detectedDir != "" {
-		t.updateSessionFromPWD(detectedDir)
-	}
-
-	// Build output
-	var output strings.Builder
-	if len(result.Stdout) > 0 {
-		output.WriteString(cleanOutput)
-	}
-	if len(result.Stderr) > 0 {
-		if output.Len() > 0 {
-			output.WriteString("\n")
-		}
-		output.WriteString("STDERR:\n")
-		output.Write(result.Stderr)
-	}
-
-	// Check exit code
-	if result.ExitCode != 0 {
-		return t.buildExitResult(command, cleanOutput, string(result.Stderr), result.ExitCode), nil
-	}
-
-	return NewSuccessResult(output.String()), nil
 }
 
 var managedWorkspaceBlockedFragments = []struct {

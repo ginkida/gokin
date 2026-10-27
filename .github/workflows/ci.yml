@@ -22,6 +22,14 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
+      - name: Bash isolation acceptance
+        # The test probes OS capability separately: a working backend MUST
+        # enforce the policy; unavailable userns reports an explicit skip reason.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap curl python3 nodejs
+          GOKIN_TEST_REQUIRE_WORKLOADS=1 go test ./internal/security -run '^TestBashIsolation' -count=1 -v
+
       - name: Build
         run: go build ./...
 

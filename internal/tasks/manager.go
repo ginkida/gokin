@@ -12,6 +12,7 @@ import (
 
 	"gokin/internal/fileutil"
 	"gokin/internal/logging"
+	"gokin/internal/security"
 )
 
 // CompletionHandler is called when a task completes.
@@ -119,11 +120,24 @@ func (m *Manager) taskDirLocked(dir string) string {
 // StartInDir starts a background task whose process runs in dir. An empty dir
 // falls back to the manager's own working directory.
 func (m *Manager) StartInDir(ctx context.Context, dir, command string) (string, error) {
+	return m.StartSandboxedInDir(ctx, dir, command, nil, security.CommandScope{}, nil)
+}
+
+// StartSandboxedInDir carries the bash owner's immutable policy with this task.
+// Other callers, notably SSH, continue using the unsandboxed StartInDir path.
+func (m *Manager) StartSandboxedInDir(ctx context.Context, dir, command string, policy *security.SandboxPolicy, scope security.CommandScope, env []string) (string, error) {
 	m.mu.Lock()
 	m.counter++
 	id := fmt.Sprintf("task_%d_%d_%d", time.Now().UnixNano(), os.Getpid(), m.counter)
 
 	task := NewTask(id, command, m.taskDirLocked(dir))
+	task.sandboxPolicy = policy.Snapshot()
+	task.sandboxScope = scope
+	task.environment = append([]string(nil), env...)
+	if policy != nil {
+		task.Program = "bash"
+		task.Args = []string{"-c", command}
+	}
 	m.tasks[id] = task
 	onComplete := m.onComplete
 	m.mu.Unlock()

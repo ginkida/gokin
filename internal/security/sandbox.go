@@ -14,23 +14,28 @@ import (
 	"gokin/internal/logging"
 )
 
-// SandboxConfig holds sandbox configuration
+// SandboxConfig holds OS command isolation configuration.
 type SandboxConfig struct {
 	// Enabled determines if sandboxing is active
 	Enabled bool
-	// RootDir is the root directory for chroot (empty = use current workDir)
-	RootDir string
-	// EnableSeccomp enables seccomp-bpf syscall filtering (Linux only)
-	EnableSeccomp bool
-	// ReadOnly makes the sandbox filesystem read-only
-	ReadOnly bool
+	// RootDir, EnableSeccomp and ReadOnly are legacy hints, not enforcement
+	// controls. Filesystem scope comes from CommandScope and the OS backend.
+	RootDir        string
+	EnableSeccomp  bool
+	ReadOnly       bool
+	AllowNetwork   bool
+	RequireSandbox bool
+	SensitivePaths []string
+	Policy         *SandboxPolicy
+	Scope          CommandScope
+	Environment    []string
 }
 
 // DefaultSandboxConfig returns the default sandbox configuration
 func DefaultSandboxConfig() SandboxConfig {
 	return SandboxConfig{
 		Enabled:       true,
-		EnableSeccomp: false, // Disabled by default (requires libseccomp)
+		EnableSeccomp: false,
 		ReadOnly:      false,
 	}
 }
@@ -45,14 +50,14 @@ type SandboxResult struct {
 
 // SandboxedCommand represents a command that will be executed in a sandbox
 type SandboxedCommand struct {
-	cmd    *exec.Cmd
-	ctx    context.Context
-	config SandboxConfig
+	cmd     *exec.Cmd
+	ctx     context.Context
+	config  SandboxConfig
+	cleanup func()
 }
 
-// NewSandboxedCommand creates a new sandboxed command
-// Note: Full chroot and seccomp require Linux and specific permissions
-// This implementation provides basic isolation with safety checks
+// NewSandboxedCommand uses the same probed policy as the production command
+// runners and owns teardown on every completion/cancellation path.
 func NewSandboxedCommand(ctx context.Context, workDir string, command string, config SandboxConfig) (*SandboxedCommand, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context cannot be nil")
@@ -81,6 +86,9 @@ func NewSandboxedCommand(ctx context.Context, workDir string, command string, co
 
 	// Set safe environment variables (limited set)
 	cmd.Env = safeEnvironment(absWorkDir)
+	if config.Environment != nil {
+		cmd.Env = config.Environment
+	}
 
 	sandboxed := &SandboxedCommand{
 		cmd:    cmd,
@@ -92,10 +100,19 @@ func NewSandboxedCommand(ctx context.Context, workDir string, command string, co
 	configureSandboxProcessGroup(cmd)
 
 	// Apply sandboxing if enabled
-	if config.Enabled {
-		if err := sandboxed.applySandbox(absWorkDir); err != nil {
-			return nil, fmt.Errorf("failed to apply sandbox: %w", err)
-		}
+	policy := config.Policy
+	if policy == nil {
+		policyConfig := config
+		policyConfig.Policy = nil
+		policy = NewSandboxPolicy(absWorkDir, policyConfig)
+	}
+	scope := config.Scope
+	if scope.WorkDir == "" {
+		scope.WorkDir = absWorkDir
+	}
+	sandboxed.cleanup, err = policy.Prepare(ctx, cmd, scope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply sandbox: %w", err)
 	}
 
 	return sandboxed, nil
@@ -103,7 +120,7 @@ func NewSandboxedCommand(ctx context.Context, workDir string, command string, co
 
 // sandboxPATH returns a safe PATH that includes platform-specific directories.
 func sandboxPATH() string {
-	base := "/usr/local/bin:/usr/bin:/bin"
+	base := filepath.Join(runtime.GOROOT(), "bin") + ":/usr/local/bin:/usr/bin:/bin"
 	if runtime.GOOS == "darwin" {
 		// Homebrew on Apple Silicon installs to /opt/homebrew/bin
 		return "/opt/homebrew/bin:" + base
@@ -113,20 +130,26 @@ func sandboxPATH() string {
 
 // safeEnvironment returns a sanitized environment with safe defaults
 func safeEnvironment(workDir string) []string {
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = sandboxPATH()
+	}
 	// Safe environment variables whitelist
 	safeVars := map[string]string{
-		"PATH":        sandboxPATH(),
+		"PATH":        path,
 		"HOME":        workDir,
 		"USER":        os.Getenv("USER"),
 		"TERM":        "xterm",
-		"LANG":        "en_US.UTF-8",
-		"LC_ALL":      "en_US.UTF-8",
+		"LANG":        "C",
+		"LC_ALL":      "C",
 		"PWD":         workDir,
 		"TMPDIR":      os.TempDir(),
 		"SHELL":       "/bin/bash",
 		"GOPATH":      os.Getenv("GOPATH"),
 		"GOROOT":      os.Getenv("GOROOT"),
 		"GOPROXY":     os.Getenv("GOPROXY"),
+		"GOFLAGS":     os.Getenv("GOFLAGS"),
+		"GOTOOLCHAIN": os.Getenv("GOTOOLCHAIN"),
 		"NODE_PATH":   os.Getenv("NODE_PATH"),
 		"PYTHONPATH":  os.Getenv("PYTHONPATH"),
 		"VIRTUAL_ENV": os.Getenv("VIRTUAL_ENV"),
@@ -153,6 +176,9 @@ func (sc *SandboxedCommand) SetStdin(content string) {
 
 // Run runs the sandboxed command and returns the result
 func (sc *SandboxedCommand) Run(timeout time.Duration) *SandboxResult {
+	if sc.cleanup != nil {
+		defer sc.cleanup()
+	}
 	result := &SandboxResult{ExitCode: -1}
 	if err := sc.ctx.Err(); err != nil {
 		result.Error = err

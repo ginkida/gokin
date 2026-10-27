@@ -146,7 +146,9 @@ func TestAgentToolHooksRouteSuccessAndFailure(t *testing.T) {
 func TestAgentBashHookCannotChangeCapturedExecutionScopeWithoutPermissions(t *testing.T) {
 	workDir := t.TempDir()
 	registry := tools.NewRegistry()
-	if err := registry.Register(tools.NewBashTool(workDir)); err != nil {
+	bash := tools.NewBashTool(workDir)
+	bash.SetSandboxEnabled(false) // The hook below changes an actual off -> on policy.
+	if err := registry.Register(bash); err != nil {
 		t.Fatalf("register bash: %v", err)
 	}
 	agent := NewAgent(AgentTypeGeneral, nil, registry, workDir, 1, "", nil, nil)

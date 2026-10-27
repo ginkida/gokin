@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"gokin/internal/git"
+	"gokin/internal/gitexec"
 )
 
 const (
@@ -122,7 +123,7 @@ func gitRootIgnored(parent context.Context, gitPath, workDir, rel string) (bool,
 	}
 	ctx, cancel := context.WithTimeout(parent, fileIndexGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, gitPath,
+	cmd := gitexec.CommandContext(gitexec.WithExecutable(ctx, gitPath),
 		"--no-optional-locks", "-C", workDir,
 		"-c", "core.fsmonitor=false",
 		"check-ignore", "--no-index", "-q", "-z", "--stdin",
@@ -158,7 +159,7 @@ func (m *Manager) writeGitFileIndex(parent context.Context, rel string) (fileInd
 		// outer repository root.
 		args = append(args, "--", ":(literal)"+rel)
 	}
-	cmd := exec.CommandContext(ctx, m.opts.GitPath, args...)
+	cmd := gitexec.CommandContext(gitexec.WithExecutable(ctx, m.opts.GitPath), args...)
 	cmd.Env = fileIndexGitEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"gokin/internal/gitexec"
 	"gokin/internal/security"
 )
 
@@ -509,7 +510,7 @@ func (t *FindReferencesTool) referencesViaGrep(ctx context.Context, symbol strin
 func (t *FindReferencesTool) gitGrepMatches(ctx context.Context, symbol string) ([]SemanticMatch, bool, bool, error) {
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "git", "grep", "--untracked", "--exclude-standard", "-n", "-F", "-w", "-e", symbol, "--", "*.go")
+	cmd := gitexec.CommandContext(cmdCtx, "grep", "--untracked", "--exclude-standard", "-n", "-F", "-w", "-e", symbol, "--", "*.go")
 	cmd.Dir = t.workDir
 
 	stdout, err := cmd.StdoutPipe()

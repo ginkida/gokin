@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gokin/internal/gitexec"
 )
 
 type gitOutput func(string, ...string) ([]byte, error)
@@ -73,7 +74,7 @@ func (p *StartupProbes) GetMainWorktreeRoot(workDir string) string {
 func startupGitOutput(workDir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitexec.CommandContext(ctx, args...)
 	cmd.Dir = workDir
 	cmd.WaitDelay = 100 * time.Millisecond
 	killProbeGroupOnCancel(cmd)

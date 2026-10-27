@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gokin/internal/logging"
+	"gokin/internal/security"
 )
 
 // Formatter runs language-specific formatters on files after write/edit operations.
@@ -39,6 +40,16 @@ func NewFormatter(commands map[string]string, timeout time.Duration) *Formatter 
 // Errors from the formatter itself are logged but not returned to avoid
 // breaking the main tool execution flow.
 func (f *Formatter) Format(ctx context.Context, filePath string) error {
+	var err error
+	filePath, err = filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	root := filepath.Dir(filePath)
+	return f.formatInWorkspace(ctx, filePath, nil, root, nil)
+}
+
+func (f *Formatter) formatInWorkspace(ctx context.Context, filePath string, registry ToolRegistry, root string, policy *security.SandboxPolicy) error {
 	if len(f.commands) == 0 {
 		return nil
 	}
@@ -62,6 +73,12 @@ func (f *Formatter) Format(ctx context.Context, filePath string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, parts[0], append(parts[1:], filePath)...)
+	cmd.Dir = root
+	cleanup, err := PrepareVerificationCommand(ctx, cmd, registry, root, policy)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	// A user-configured formatter is routinely a wrapper (`npx prettier`,
 	// `pnpm exec …`) whose real work happens in a child. CommandContext's
 	// default Cancel SIGKILLs only the leader, so on timeout the child both

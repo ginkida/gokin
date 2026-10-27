@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -42,6 +43,7 @@ import (
 	"gokin/internal/repl"
 	"gokin/internal/rewind"
 	"gokin/internal/router"
+	"gokin/internal/security"
 	"gokin/internal/tasks"
 	"gokin/internal/tools"
 	"gokin/internal/toolusage"
@@ -194,9 +196,10 @@ The user's working directory is: %s`
 
 // App is the main application orchestrator.
 type App struct {
-	config  *config.Config
-	workDir string
-	client  client.Client
+	bashSandbox *security.SandboxPolicy
+	config      *config.Config
+	workDir     string
+	client      client.Client
 	// runtimeEngineMode is fixed when this App is assembled. engine.mode
 	// determines the physical registry shape and owns the secure Python worker
 	// lifecycle, so changing only the config pointer cannot be a truthful live
@@ -750,6 +753,7 @@ func (a *App) Run() error {
 // RunWithInitialPrompt starts the interactive application and submits an
 // optional first user message through the same UI/ownership pipeline as Enter.
 func (a *App) RunWithInitialPrompt(initialPrompt string) error {
+	a.bashSandbox.Warn(a.ctx, os.Stderr)
 	// Interactive runs own the active session lease for their full lifetime,
 	// including any runtime /resume switches. Keep this defer at the outermost
 	// boundary so early returns and panics do not strand an in-process lease.
@@ -2627,6 +2631,7 @@ func (a *App) GetUIRuntimeStatus() ui.RuntimeStatusSnapshot {
 	if cfg != nil {
 		out.Provider = runtimeProviderForConfig(cfg)
 	}
+	out.SandboxStatus = a.GetBashSandboxStatus().Status
 	if a.reliability != nil {
 		s := a.reliability.Snapshot()
 		if s.Degraded {
@@ -4469,9 +4474,16 @@ func (a *App) TogglePlanningModeAsync() {
 // ToggleSandbox toggles the bash sandbox mode on/off.
 func (a *App) ToggleSandbox() bool {
 	a.mu.Lock()
+	if a.bashSandbox.Required() {
+		a.mu.Unlock()
+		return true
+	}
 
 	a.config.Tools.Bash.Sandbox = !a.config.Tools.Bash.Sandbox
 	newEnabled := a.config.Tools.Bash.Sandbox
+	if a.bashSandbox != nil {
+		a.bashSandbox.Configure(a.workDir, bashSandboxConfig(a.config))
+	}
 
 	// Update bash tool sandbox setting
 	if a.registry != nil {
@@ -4841,6 +4853,10 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	a.mu.Lock()
 	// NOTE: no defer Unlock() — we release before safeSendToProgram. Every
 	// early-return below unlocks explicitly.
+	if a.bashSandbox.Required() {
+		cfg.Tools.Bash.Sandbox = true
+		cfg.Tools.Bash.RequireSandbox = true
+	}
 	if baseRevision, tracked := cfg.SnapshotRevision(); tracked && baseRevision != a.configRevision {
 		a.mu.Unlock()
 		return 0, fmt.Errorf("%w (based on revision %d, current revision %d)", errConfigConflict, baseRevision, a.configRevision)
@@ -5130,6 +5146,9 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	}
 
 	// 8a. Update bash tool sandbox mode
+	if a.bashSandbox != nil {
+		a.bashSandbox.Configure(a.workDir, bashSandboxConfig(a.config))
+	}
 	if a.registry != nil {
 		if bashTool, ok := a.registry.Get("bash"); ok {
 			if bt, ok := bashTool.(*tools.BashTool); ok {

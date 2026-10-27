@@ -25,6 +25,13 @@ type PathValidator struct {
 	allowSymlinks bool
 }
 
+// AllowedDirs returns a snapshot for OS sandbox launch scopes.
+func (v *PathValidator) AllowedDirs() []string {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return append([]string(nil), v.allowedDirs...)
+}
+
 // SetAllowedDirs replaces the allowed set. Grants only ever widen the scope, so
 // a reader that observes the previous set fails closed — it rejects a path that
 // has just become legal, rather than admitting one that has not.

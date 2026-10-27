@@ -23,6 +23,7 @@ const DefaultVerifyCodeTimeout = 3 * time.Minute
 type VerifyCodeTool struct {
 	workDir       string
 	pathValidator *security.PathValidator
+	sandboxPolicy *security.SandboxPolicy
 }
 
 // NewVerifyCodeTool creates a new VerifyCodeTool instance.
@@ -31,6 +32,7 @@ func NewVerifyCodeTool(workDir string) *VerifyCodeTool {
 	return &VerifyCodeTool{
 		workDir:       workDir,
 		pathValidator: newWorkspacePathValidator(workDir, nil),
+		sandboxPolicy: security.NewSandboxPolicy(workDir, security.DefaultSandboxConfig()),
 	}
 }
 
@@ -150,9 +152,13 @@ func (t *VerifyCodeTool) Execute(ctx context.Context, args map[string]any) (Tool
 	// Timeout must kill the whole group: package-manager runners (npm/pnpm/
 	// yarn/bun) and compilers spawn children that a leader-only SIGKILL
 	// orphans forever (the orphaned-`yes` class).
-	KillProcessGroupOnCancel(cmd)
-
 	cmd.Dir = targetDir
+	cleanup, err := prepareProjectCommand(verifyCtx, cmd, t.sandboxPolicy, t.workDir, t.pathValidator)
+	if err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	defer cleanup()
+	KillProcessGroupOnCancel(cmd)
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
