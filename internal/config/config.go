@@ -344,8 +344,9 @@ type ModelConfig struct {
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
 	// DeferredSchemas publishes a fixed small tool set with discovery/dispatch.
-	// Opt-in until GLM and DeepSeek live coding acceptance passes.
-	DeferredSchemas bool `yaml:"deferred_schemas,omitempty"`
+	// On by default since GLM and DeepSeek passed live coding evals with it.
+	// No omitempty: an explicit false must survive a save.
+	DeferredSchemas bool `yaml:"deferred_schemas"`
 	// DisableSkillShellExecution renders a policy marker in place of dynamic
 	// SKILL.md shell context. Applied at startup and inherited by sub-agents.
 	DisableSkillShellExecution bool                   `yaml:"disable_skill_shell_execution,omitempty"`
@@ -712,6 +713,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Tools: ToolsConfig{
+			DeferredSchemas:   true,
 			Timeout:           2 * time.Minute,
 			ModelRoundTimeout: DefaultModelRoundTimeout,
 			Bash: BashConfig{

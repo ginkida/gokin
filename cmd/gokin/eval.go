@@ -220,7 +220,7 @@ fixture, command, timeout, or explicitly selected GOKIN_BIN is rejected.`,
 	cmd.Flags().StringVar(&opts.FixturesRoot, "fixtures", "evals/coding/fixtures", "fixture root directory")
 	cmd.Flags().StringVar(&opts.WorkRoot, "workdir", "", "workspace root for copied fixtures (default: temp dir)")
 	cmd.Flags().StringVar(&opts.OutputPath, "output", ".gokin/evals/results.jsonl", "JSONL output path")
-	cmd.Flags().BoolVar(&opts.DeferredSchemas, "deferred-schemas", false, "enable deferred schemas in each headless eval process")
+	cmd.Flags().BoolVar(&opts.DeferredSchemas, "deferred-schemas", true, "use deferred schemas in each headless eval process (=false publishes every schema)")
 	cmd.Flags().StringVar(&opts.AgentCommand, "agent-command", "", "shell command template to run in each fixture workspace")
 	cmd.Flags().StringArrayVar(&opts.ScenarioIDs, "scenario", nil, "scenario id to run; repeatable")
 	cmd.Flags().StringArrayVar(&opts.Providers, "provider", nil, "provider to include in the matrix; repeatable")
