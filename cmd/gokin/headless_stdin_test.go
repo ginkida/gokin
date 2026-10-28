@@ -203,6 +203,9 @@ func TestHeadlessCLIIdleStdinUsesPromptOrReportsMissingPrompt(t *testing.T) {
 	for _, supplied := range []bool{true, false} {
 		t.Run(map[bool]string{true: "prompt supplied", false: "missing prompt"}[supplied], func(t *testing.T) {
 			root := t.TempDir()
+			// Gokin and Claude state live outside the workspace: on Linux the
+			// sandbox cannot mask a missing secret dir inside a writable grant.
+			state := t.TempDir()
 			cfg := filepath.Join(root, "config.yaml")
 			if err := os.WriteFile(cfg, []byte("api: {active_provider: glm, glm_key: test-key-for-fixture}\nmodel: {provider: glm, name: glm-5.3-flash, fallback_providers: []}\nengine: {mode: tools}\nmemory: {enabled: false}\nsession_memory: {enabled: false}\nhooks: {enabled: false}\nmcp: {enabled: false}\n"), 0600); err != nil {
 				t.Fatal(err)
@@ -222,9 +225,9 @@ func TestHeadlessCLIIdleStdinUsesPromptOrReportsMissingPrompt(t *testing.T) {
 			cmd.Dir = root
 			cmd.Env = os.Environ()
 			for key, value := range map[string]string{
-				"GOKIN_TEST_AGENT_CALLER_CLI": "1", "XDG_CONFIG_HOME": filepath.Join(root, "config"),
-				"XDG_DATA_HOME": filepath.Join(root, "data"), "XDG_CACHE_HOME": filepath.Join(root, "cache"),
-				"CLAUDE_CONFIG_DIR": filepath.Join(root, "claude"), "GOKIN_PROVIDER_HEALTH_FILE": filepath.Join(root, "health.json"),
+				"GOKIN_TEST_AGENT_CALLER_CLI": "1", "XDG_CONFIG_HOME": filepath.Join(state, "config"),
+				"XDG_DATA_HOME": filepath.Join(state, "data"), "XDG_CACHE_HOME": filepath.Join(state, "cache"),
+				"CLAUDE_CONFIG_DIR": filepath.Join(state, "claude"), "GOKIN_PROVIDER_HEALTH_FILE": filepath.Join(state, "health.json"),
 				"GOKIN_MODEL": "", "GOKIN_BACKEND": "", "GOKIN_ENGINE_MODE": "tools",
 			} {
 				cmd.Env = replaceEnvironmentValue(cmd.Env, key, value)

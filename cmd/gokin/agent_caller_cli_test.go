@@ -149,11 +149,14 @@ func TestAgentCallerCLIHeadlessAndBackgroundSkipDeniedChecks(t *testing.T) {
 				fmt.Fprintf(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":%q},\"usage\":{\"output_tokens\":1}}\n\ndata: {\"type\":\"message_stop\"}\n\n", stop)
 			}))
 			defer server.Close()
+			// Gokin and Claude state live outside the workspace: on Linux the
+			// sandbox cannot mask a missing secret dir inside a writable grant.
+			state := testkit.ResolvedTempDir(t)
 			env := os.Environ()
 			for key, value := range map[string]string{
-				"GOKIN_TEST_AGENT_CALLER_CLI": "1", "XDG_CONFIG_HOME": filepath.Join(root, "config"),
-				"XDG_DATA_HOME": filepath.Join(root, "data"), "XDG_CACHE_HOME": filepath.Join(root, "cache"),
-				"CLAUDE_CONFIG_DIR": filepath.Join(root, "claude"), "GOKIN_PROVIDER_HEALTH_FILE": filepath.Join(root, "health.json"),
+				"GOKIN_TEST_AGENT_CALLER_CLI": "1", "XDG_CONFIG_HOME": filepath.Join(state, "config"),
+				"XDG_DATA_HOME": filepath.Join(state, "data"), "XDG_CACHE_HOME": filepath.Join(state, "cache"),
+				"CLAUDE_CONFIG_DIR": filepath.Join(state, "claude"), "GOKIN_PROVIDER_HEALTH_FILE": filepath.Join(state, "health.json"),
 				"GOKIN_GLM_KEY": "test-key-for-fixture", "GLM_API_KEY": "", "GOKIN_API_KEY": "",
 				"GOKIN_MODEL": "", "GOKIN_BACKEND": "", "GOKIN_ENGINE_MODE": "tools", "GOKIN_NO_SELF_REVIEW": "",
 			} {
@@ -185,7 +188,7 @@ func TestAgentCallerCLIHeadlessAndBackgroundSkipDeniedChecks(t *testing.T) {
 				t.Fatalf("CLI: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 			}
 			if detached {
-				store, err := backgroundstore.NewStoreAt(filepath.Join(root, "data", "gokin", "background"))
+				store, err := backgroundstore.NewStoreAt(filepath.Join(state, "data", "gokin", "background"))
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -20,6 +20,12 @@ func TestBubblewrapAppliesWorkerSeccompBeforePython(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 unavailable")
 	}
+	// Hosts that restrict unprivileged user namespaces (Ubuntu 24.04 AppArmor,
+	// GitHub runners) refuse every --unshare-all sandbox; that is a missing
+	// capability, not a seccomp regression.
+	if out, probeErr := exec.Command(bwrap, "--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", "true").CombinedOutput(); probeErr != nil {
+		t.Skipf("OS sandbox capability probe: %v: %s", probeErr, strings.TrimSpace(string(out)))
+	}
 	workDir := t.TempDir()
 	runtimeDir := t.TempDir()
 	for label, target := range map[string]*string{
