@@ -69,9 +69,8 @@ func TestBashDenyMatchesEveryShellSegment(t *testing.T) {
 	}
 }
 
-// dontAsk mode auto-executes whatever this classifier calls read-only, so the
-// allowlisted inspection programs must not be usable in their mutating or
-// command-launching forms.
+// Keep obvious mutations out of advisory loop recovery too. Automatic permission
+// grants use the stricter classifier covered in bash_side_effect_free_test.go.
 func TestReadOnlyBashRejectsMutatingFormsOfAllowlistedPrograms(t *testing.T) {
 	mutating := []string{
 		"find . -name '*.go' -delete",

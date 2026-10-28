@@ -113,7 +113,8 @@ func (t *WorkspaceWriteTracker) ObserveTool(ctx context.Context, root string, to
 // checks. Verification tools execute arbitrary project code and can also write.
 func (t *WorkspaceWriteTracker) Observe(ctx context.Context, root, name string, args map[string]any,
 	run func(context.Context) (ToolResult, error), background func(ToolResult, bool)) (ToolResult, error) {
-	if !observesWorkspaceWrites(name) || name == "bash" && permission.IsReadOnlyBashArgs(args) {
+	command, _ := args["command"].(string)
+	if !observesWorkspaceWrites(name) || name == "bash" && permission.IsSideEffectFreeBashCommand(command) {
 		return run(ctx)
 	}
 	limits := workspace.DefaultLimits()

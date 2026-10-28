@@ -136,7 +136,7 @@ func ObserveHeadlessToolResult(ctx context.Context, call *genai.FunctionCall, re
 	// An arbitrary shell can write without declaring paths, including before
 	// a nonzero exit. Retain earlier proof only for recognized checks or reads.
 	trustedWrapper := runnerRecordsCheck && result.HookUpdatedInput == nil
-	possibleShellWrite := call.Name == "bash" && !trustedWrapper && !validationCommand && !permission.IsReadOnlyBashArgs(args)
+	possibleShellWrite := call.Name == "bash" && !trustedWrapper && !validationCommand && !permission.IsSideEffectFreeBashCommand(command)
 	confirmedWrites := (result.Success || HasWorkspaceWriteObservation(result)) && len(WrittenPathsFromResult(result)) > 0
 	if possibleShellWrite && result.PolicyBlock == nil || confirmedWrites || result.Success &&
 		IsImplementationTool(call.Name) && len(MutationPathsFromResult(call.Name, args, result)) > 0 {
@@ -234,7 +234,7 @@ func IsVerificationCommand(command string) bool {
 		// A successful && chain still proves its check ran when followed by
 		// an inspection/success marker. File redirects and unknown tails do
 		// not gain this exception.
-		if found && permission.IsReadOnlyBashCommand(segment) {
+		if found && permission.IsSideEffectFreeBashCommand(segment) {
 			continue
 		}
 		switch program {

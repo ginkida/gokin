@@ -13,7 +13,7 @@ type readOnlyBashWrapperKey struct{}
 // command of its own wrapper. Authority is bound to the exact shell text so
 // a hook rewrite cannot inherit it. Deny rules and elevated floors still apply.
 func ContextWithReadOnlyBashWrapper(ctx context.Context, wrapped, inner string) context.Context {
-	if !IsReadOnlyBashCommand(inner) {
+	if !IsSideEffectFreeBashCommand(inner) {
 		return ctx
 	}
 	return context.WithValue(ctx, readOnlyBashWrapperKey{}, wrapped)
@@ -22,17 +22,13 @@ func ContextWithReadOnlyBashWrapper(ctx context.Context, wrapped, inner string) 
 func isReadOnlyBashInvocation(ctx context.Context, args map[string]any) bool {
 	command, _ := args["command"].(string)
 	wrapped, ok := ctx.Value(readOnlyBashWrapperKey{}).(string)
-	return ok && command == wrapped || IsReadOnlyBashCommand(command)
+	return ok && command == wrapped || IsSideEffectFreeBashCommand(command)
 }
 
-// IsReadOnlyBashCommand reports whether every shell segment is a conservative,
-// allowlisted inspection command. Unknown programs, command substitution, and
-// redirects to user files fail closed.
-//
-// This classifier is shared by dontAsk permission mode and the executor's
-// stagnation recovery. Keeping one implementation prevents a command from
-// being treated as harmless for loop recovery but mutating for permissions, or
-// vice versa.
+// IsReadOnlyBashCommand is an advisory classifier for stagnation hints. It is
+// deliberately lenient and must never grant permission, bypass a mutation
+// safeguard, or suppress workspace observation. Use IsSideEffectFreeBashCommand
+// for those decisions.
 func IsReadOnlyBashCommand(command string) bool {
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -54,7 +50,7 @@ func IsReadOnlyBashCommand(command string) bool {
 	return true
 }
 
-// IsReadOnlyBashArgs extracts and classifies a Bash tool invocation.
+// IsReadOnlyBashArgs applies the advisory classifier to Bash arguments.
 func IsReadOnlyBashArgs(args map[string]any) bool {
 	command, _ := args["command"].(string)
 	return IsReadOnlyBashCommand(command)

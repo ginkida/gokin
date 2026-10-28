@@ -210,12 +210,28 @@ func TestWorkspaceObservationSkipsReadOnlyBash(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, command := range []string{"git status --short", "git log -1", "git diff", "ls", "cat a", "rg x", "find . -name '*.go'", "go vet ./..."} {
+	for _, command := range []string{"git status --short", "git log -1", "git diff", "ls", "cat a", "cat f | wc -l", "grep -rn x .", "rg x", "find . -name '*.go'"} {
 		t.Run(command, func(t *testing.T) {
 			var tracker WorkspaceWriteTracker
 			r, err := tracker.Observe(t.Context(), root, "bash", map[string]any{"command": command}, func(context.Context) (ToolResult, error) { return NewSuccessResult("read"), nil }, nil)
 			if err != nil || HasWorkspaceWriteObservation(r) || tracker.previous != nil || tracker.Partial() {
 				t.Fatalf("read-only command paid snapshot cost: %+v %v", r, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceObservationIncludesPreviouslyReadOnlyEscapes(t *testing.T) {
+	for _, command := range []string{"go test ./...", "go build ./...", "go vet ./...", "git diff --output=state.go", "git -c core.fsmonitor=./mutate status", "printf ok\ntouch changed", "find . '-exec' touch changed +"} {
+		t.Run(command, func(t *testing.T) {
+			root := testkit.ResolvedTempDir(t)
+			var tracker WorkspaceWriteTracker
+			path := filepath.Join(root, "changed")
+			r, err := tracker.Observe(t.Context(), root, "bash", map[string]any{"command": command}, func(context.Context) (ToolResult, error) {
+				return NewSuccessResult("completed"), os.WriteFile(path, []byte("changed"), 0600)
+			}, nil)
+			if err != nil || !HasWorkspaceWriteObservation(r) || !reflect.DeepEqual(WrittenPathsFromResult(r), []string{path}) {
+				t.Fatalf("workspace write escaped observation: %+v err=%v", r, err)
 			}
 		})
 	}

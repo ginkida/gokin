@@ -43,6 +43,14 @@ type CheckpointJournal struct {
 	// recorded by the new attempt are deliberately outside that generation and
 	// must not make an exhausted replay look active again.
 	replayRemaining int
+	// Delivery digests bind the raw outcome to its notification/compression
+	// envelope. They are runtime-only: a restored outcome is rebound on replay.
+	deliveries map[checkpointDeliveryKey][sha256.Size]byte
+}
+
+type checkpointDeliveryKey struct {
+	callID, signature string
+	result            [sha256.Size]byte
 }
 
 type checkpointReplayState uint8
@@ -125,7 +133,12 @@ func (j *CheckpointJournal) AcknowledgeResults(history []*genai.Content) int {
 					continue
 				}
 				expected, err := json.Marshal(entry.Result.ToMap())
-				if err == nil && bytes.Equal(encoded, expected) {
+				if err != nil {
+					continue
+				}
+				key := checkpointDeliveryKey{call.ID, signature, sha256.Sum256(expected)}
+				delivered, bound := j.deliveries[key]
+				if bytes.Equal(encoded, expected) || bound && delivered == sha256.Sum256(encoded) {
 					acknowledged[idx] = true
 					break
 				}
@@ -156,6 +169,30 @@ func (j *CheckpointJournal) AcknowledgeResults(history []*genai.Content) int {
 		j.beginReplayLocked()
 	}
 	return len(acknowledged)
+}
+
+// recordDelivery binds only the exact raw result produced by this call to its
+// final history payload. AcknowledgeResults still requires the original input,
+// a complete retained pair and a matching checkpoint outcome; arbitrary altered
+// history cannot retire a mutation. Keep the full outcome intact for replay.
+func (j *CheckpointJournal) recordDelivery(call *genai.FunctionCall, raw [sha256.Size]byte, response map[string]any) {
+	if call == nil || call.ID == "" || raw == ([sha256.Size]byte{}) || !isWriteOperation(call.Name) {
+		return
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+	key := checkpointDeliveryKey{call.ID, checkpointSignature(call.Name, call.Args), raw}
+	if key.signature == "" {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.deliveries == nil {
+		j.deliveries = make(map[checkpointDeliveryKey][sha256.Size]byte)
+	}
+	j.deliveries[key] = sha256.Sum256(encoded)
 }
 
 // EndReplay drops the one-shot recovery snapshot without clearing the durable
@@ -398,6 +435,7 @@ func (j *CheckpointJournal) Clear() {
 	j.replayBySignature = nil
 	j.replayConsumed = nil
 	j.replayRemaining = 0
+	j.deliveries = nil
 }
 
 // Entries returns a copy of all journal entries.

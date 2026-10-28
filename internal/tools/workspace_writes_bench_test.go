@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gokin/internal/gitexec"
@@ -29,18 +30,24 @@ func BenchmarkBashObservationWarm(b *testing.B) {
 			}
 		}
 	}
-	for _, mode := range []string{"Cold", "Warm", "ReadOnly"} {
+	for _, mode := range []string{"Cold", "Warm", "ReadOnly", "GoTestCold", "GoTestWarm", "GitOutputCold", "GitOutputWarm"} {
 		b.Run(mode, func(b *testing.B) {
 			var tracker WorkspaceWriteTracker
 			args := map[string]any{"command": ":"}
 			if mode == "ReadOnly" {
 				args["command"] = "git status --short"
 			}
+			if strings.HasPrefix(mode, "GoTest") {
+				args["command"] = "go test ./..."
+			}
+			if strings.HasPrefix(mode, "GitOutput") {
+				args["command"] = "git diff --output=state.go"
+			}
 			run := func(context.Context) (ToolResult, error) { return NewSuccessResult(""), nil }
 			_, _ = tracker.Observe(b.Context(), root, "bash", args, run, nil)
 			b.ResetTimer()
 			for range b.N {
-				if mode == "Cold" {
+				if strings.HasSuffix(mode, "Cold") {
 					tracker = WorkspaceWriteTracker{}
 				}
 				r, err := tracker.Observe(b.Context(), root, "bash", args, run, nil)

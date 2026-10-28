@@ -2059,6 +2059,19 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				}
 			}
 
+			// Checkpoints hold the raw outcome. Bind it to the exact payload
+			// retained below, after notifications and structured compression.
+			rawResultDigests := make([][sha256.Size]byte, len(results))
+			if e.checkpoint != nil {
+				for j, result := range results {
+					if result != nil {
+						if encoded, err := json.Marshal(result.Response); err == nil {
+							rawResultDigests[j] = sha256.Sum256(encoded)
+						}
+					}
+				}
+			}
+
 			// Track last result for smart fallback
 			if len(results) > 0 {
 				lastResult := results[len(results)-1]
@@ -2184,6 +2197,9 @@ func (e *Executor) executeLoop(ctx context.Context, history []*genai.Content) ([
 				// Sending the uncompressed original would rewrite the next
 				// request's earlier prefix when history supplies this part.
 				results[j] = part.FunctionResponse
+				if e.checkpoint != nil && j < len(resp.FunctionCalls) {
+					e.checkpoint.recordDelivery(resp.FunctionCalls[j], rawResultDigests[j], part.FunctionResponse.Response)
+				}
 			}
 			funcResultContent := &genai.Content{
 				Role:  genai.RoleUser,
@@ -3148,25 +3164,8 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		})
 		return cached
 	}
-	if replayState == checkpointReplayMismatch {
-		reason := fmt.Sprintf(
-			"Exactly-once recovery blocked divergent side effect %q: it does not match any of the %d unconsumed checkpoint(s). The tool was NOT executed because new mutations would invalidate the remaining saved outcomes. Replay the original pending mutations first; if they cannot be reconstructed, stop and ask the user to inspect /recovery and restart the task manually.",
-			call.Name, replayRemaining)
-		logging.Warn("checkpoint recovery blocked divergent side effect",
-			"tool", call.Name,
-			"call_id", call.ID,
-			"remaining", replayRemaining)
-		if e.handler != nil && e.handler.OnToolDenied != nil {
-			e.handler.OnToolDenied(call.Name, reason)
-		}
-		if e.notificationMgr != nil {
-			e.notificationMgr.NotifyDenied(call.Name, reason)
-		}
-		e.reportRetrySafetyEvent(RetrySafetyEvent{
-			Kind: RetrySafetyDivergentBlocked, Tool: call.Name, CallID: call.ID,
-			Reason: reason, Remaining: replayRemaining,
-		})
-		return NewPolicyBlockedResult(PolicyBlockSafety, reason)
+	if replayState == checkpointReplayMismatch && !isRecoveryInspection(call) {
+		return e.blockCheckpointDivergence(call, replayRemaining)
 	}
 
 	// Hooks are part of actual execution, not replay. Running them before a
@@ -3224,6 +3223,11 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 		if err := tool.Validate(call.Args); err != nil {
 			return NewErrorResult("hook updatedInput validation: " + err.Error())
+		}
+		// An inspection exemption belongs to the actual command, not to a
+		// mutating replacement supplied by a pre-tool hook.
+		if replayState == checkpointReplayMismatch && !isRecoveryInspection(call) {
+			return e.blockCheckpointDivergence(call, replayRemaining)
 		}
 		if hookDecision == "ask" && e.permissions == nil {
 			return NewPolicyBlockedResult(PolicyBlockPermission, "Hook requires permission approval but no permission manager is available")
@@ -3983,6 +3987,35 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 
 type internalToolInvocationKey struct {
 	executor *Executor
+}
+
+func isRecoveryInspection(call *genai.FunctionCall) bool {
+	if call == nil {
+		return false
+	}
+	command, _ := call.Args["command"].(string)
+	return call.Name == "bash" && permission.IsSideEffectFreeBashCommand(command)
+}
+
+func (e *Executor) blockCheckpointDivergence(call *genai.FunctionCall, remaining int) ToolResult {
+	reason := fmt.Sprintf(
+		"Exactly-once recovery blocked divergent side effect %q: it does not match any of the %d unconsumed checkpoint(s). The tool was NOT executed because new mutations would invalidate the remaining saved outcomes. Replay the original pending mutations first; if they cannot be reconstructed, stop and ask the user to inspect /recovery and restart the task manually.",
+		call.Name, remaining)
+	logging.Warn("checkpoint recovery blocked divergent side effect",
+		"tool", call.Name,
+		"call_id", call.ID,
+		"remaining", remaining)
+	if e.handler != nil && e.handler.OnToolDenied != nil {
+		e.handler.OnToolDenied(call.Name, reason)
+	}
+	if e.notificationMgr != nil {
+		e.notificationMgr.NotifyDenied(call.Name, reason)
+	}
+	e.reportRetrySafetyEvent(RetrySafetyEvent{
+		Kind: RetrySafetyDivergentBlocked, Tool: call.Name, CallID: call.ID,
+		Reason: reason, Remaining: remaining,
+	})
+	return NewPolicyBlockedResult(PolicyBlockSafety, reason)
 }
 
 func isInternalToolInvocation(ctx context.Context, executor *Executor) bool {

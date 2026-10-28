@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -70,13 +71,23 @@ func callerReviewGateApp(t *testing.T) (*App, *tools.Executor, *testkit.MockClie
 }
 
 func TestInteractiveDoneGateDontAskAllowsWrappedReadChecks(t *testing.T) {
-	a, exec, mock, bash := callerReviewGateApp(t)
-	manager := permission.NewManager(permission.DefaultRules(), true)
-	manager.SetDontAsk(true)
-	manager.SetRunToolRules([]string{"edit", "verify_code", "run_tests"}, nil)
-	exec.SetPermissions(manager)
-	if !a.enforceDoneGate(t.Context(), "Update m.go") || bash.CallCount() < 1 || len(mock.Calls()) != 0 {
-		t.Fatalf("trusted wrapped vet was denied or auto-fixed: bash=%d model=%d", bash.CallCount(), len(mock.Calls()))
+	for _, grant := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit-bash-grant=%t", grant), func(t *testing.T) {
+			a, exec, mock, bash := callerReviewGateApp(t)
+			manager := permission.NewManager(permission.DefaultRules(), true)
+			manager.SetDontAsk(true)
+			allowed := []string{"edit", "verify_code", "run_tests"}
+			if grant {
+				allowed = append(allowed, "bash")
+			}
+			manager.SetRunToolRules(allowed, nil)
+			exec.SetPermissions(manager)
+			// Wrapped go vet executes project code and needs an explicit grant;
+			// refusing it must still preserve work without an auto-fix exchange.
+			if !a.enforceDoneGate(t.Context(), "Update m.go") || (bash.CallCount() > 0) != grant || len(mock.Calls()) != 0 {
+				t.Fatalf("wrapped vet grant=%t: bash=%d model=%d", grant, bash.CallCount(), len(mock.Calls()))
+			}
+		})
 	}
 }
 

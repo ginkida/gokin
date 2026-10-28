@@ -4,15 +4,17 @@ import "testing"
 
 func TestDontAskTrustedBashWrapperIsExactAndPreservesDenials(t *testing.T) {
 	wrapped := "( cd '/project' || exit 1; go vet . )"
+	inspection := "( cd '/project' || exit 1; git diff --stat )"
 	for _, tc := range []struct {
 		name, command, inner string
 		deny, allowed        bool
 	}{
-		{"trusted vet", wrapped, "go vet .", false, true},
-		{"hook rewrite", "printf changed > source.go", "go vet .", false, false},
+		{"vet needs a grant", wrapped, "go vet .", false, false},
+		{"trusted inspection", inspection, "git diff --stat", false, true},
+		{"hook rewrite", "printf changed > source.go", "git diff --stat", false, false},
 		{"unknown inner", wrapped, "arbitrary-check", false, false},
-		{"explicit deny", wrapped, "go vet .", true, false},
-		{"elevated wrapper", "git reset --hard HEAD", "go vet .", false, false},
+		{"explicit deny", inspection, "git diff --stat", true, false},
+		{"elevated wrapper", "git reset --hard HEAD", "git diff --stat", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rules := DefaultRules()
@@ -22,6 +24,9 @@ func TestDontAskTrustedBashWrapperIsExactAndPreservesDenials(t *testing.T) {
 			manager := NewManager(rules, true)
 			manager.SetDontAsk(true)
 			bound := wrapped
+			if tc.name == "trusted inspection" || tc.name == "hook rewrite" || tc.name == "explicit deny" {
+				bound = inspection
+			}
 			if tc.name == "elevated wrapper" {
 				bound = tc.command
 			}

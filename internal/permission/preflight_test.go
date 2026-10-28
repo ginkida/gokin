@@ -32,7 +32,8 @@ func TestPermissionPreflightUsesDispatcherPolicyWithoutPrompting(t *testing.T) {
 		{name: "session allow", policy: LevelAsk, session: DecisionAllowSession, want: true},
 		{name: "session deny", policy: LevelAsk, session: DecisionDenySession},
 		{name: "dontAsk read", policy: LevelAsk, command: "git status", dontAsk: true, want: true},
-		{name: "dontAsk build", policy: LevelAsk, command: "go build ./...", dontAsk: true, want: true},
+		{name: "dontAsk build", policy: LevelAsk, command: "go build ./...", dontAsk: true},
+		{name: "dontAsk explicitly granted build", policy: LevelAsk, command: "go build ./...", dontAsk: true, allows: []string{"bash(go build:*)"}, want: true},
 		{name: "dontAsk mutation", policy: LevelAsk, command: "touch output", dontAsk: true},
 		{name: "elevated allow", policy: LevelAllow, command: "sudo true"},
 	} {
