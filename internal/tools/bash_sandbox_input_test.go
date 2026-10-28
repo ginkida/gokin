@@ -2,7 +2,6 @@ package tools
 
 import (
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -12,13 +11,15 @@ func TestSandboxedBashExecutesDeclaredStdinAndUsesExistingTempDirectory(t *testi
 	}
 	tool := NewBashTool(t.TempDir())
 	tool.SetSandboxEnabled(true)
+	// An unavailable backend runs on the host with the host environment, so
+	// this sandbox contract does not apply (e.g. no unprivileged userns).
+	if status := tool.sandboxPolicy.Status(t.Context()); status.Status == "unavailable" {
+		t.Skipf("OS sandbox unavailable: %s", status.Reason)
+	}
 	input := "literal tool input\n"
 	result, err := tool.Execute(t.Context(), map[string]any{
 		"command": `test -d "$TMPDIR" && cat`, "stdin": input,
 	})
-	if strings.Contains(result.Error, "operation not permitted") && runtime.GOOS == "linux" {
-		t.Skip("host cannot create sandbox namespaces")
-	}
 	if err != nil || !result.Success || result.Content != input {
 		t.Fatalf("declared sandbox stdin was not delivered: result=%+v error=%v", result, err)
 	}
