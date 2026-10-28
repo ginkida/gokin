@@ -256,7 +256,10 @@ func TestBashTool_Execute_SimpleCommand(t *testing.T) {
 
 func TestBashTool_Execute_WithTimeout(t *testing.T) {
 	tool := NewBashTool("/tmp")
-	tool.timeout = 1 * time.Second
+	// Generous headroom: the sandbox launch (~20ms warm, far more under -race
+	// and package-parallel load) counts against this budget, and 0.5s of slack
+	// failed CI-style runs. TimeoutExceeded below covers the expiry path.
+	tool.timeout = 5 * time.Second
 
 	ctx := context.Background()
 	result, err := tool.Execute(ctx, map[string]any{

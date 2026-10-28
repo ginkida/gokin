@@ -51,7 +51,7 @@ func TestBashManagedCacheRejectsSymlink(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nprintf gokin-bash-probe"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		useFakeSandboxLauncher(t, filepath.Join(bin, name))
 		cmd := exec.CommandContext(t.Context(), "bash", "-c", "true")
 		cleanup, err := p.Prepare(t.Context(), cmd, CommandScope{WorkDir: root})
 		if err == nil {
@@ -350,4 +350,13 @@ func TestBashIsolationUnixSocketHelper(t *testing.T) {
 	if (err == nil) != (os.Getenv("GOKIN_UNIX_SOCKET_ALLOWED") == "true") {
 		t.Fatalf("unexpected Unix socket result: %v", err)
 	}
+}
+
+// useFakeSandboxLauncher points launcher resolution at a fake for one test.
+// Resolution deliberately ignores PATH, so a PATH-shadowing fake no longer works.
+func useFakeSandboxLauncher(t *testing.T, path string) {
+	t.Helper()
+	darwin, linux := darwinSandboxLaunchers, linuxSandboxLaunchers
+	darwinSandboxLaunchers, linuxSandboxLaunchers = []string{path}, []string{path}
+	t.Cleanup(func() { darwinSandboxLaunchers, linuxSandboxLaunchers = darwin, linux })
 }

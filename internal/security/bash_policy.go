@@ -138,6 +138,32 @@ func (p *SandboxPolicy) Warn(ctx context.Context, writer io.Writer) {
 	})
 }
 
+// sandboxLauncherPath resolves the isolation launcher from fixed system
+// locations first. A PATH lookup alone made isolation depend on the caller's
+// environment: a stripped PATH (launchd, IDE tasks, cron) silently fell back to
+// UNSANDBOXED execution, and an earlier PATH entry could substitute its own
+// "sandbox-exec"/"bwrap". macOS ships sandbox-exec only in /usr/bin, so PATH is
+// never consulted there; distributions install bwrap in varying places, so
+// Linux falls back to PATH when no system copy exists.
+// System launcher locations; package vars so tests can point them at a fake.
+var (
+	darwinSandboxLaunchers = []string{"/usr/bin/sandbox-exec"}
+	linuxSandboxLaunchers  = []string{"/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"}
+)
+
+func sandboxLauncherPath(name string, systemPaths []string, allowPATH bool) string {
+	for _, candidate := range systemPaths {
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return candidate
+		}
+	}
+	if !allowPATH {
+		return ""
+	}
+	path, _ := exec.LookPath(name)
+	return path
+}
+
 func (s *sandboxPolicyState) probe(ctx context.Context) {
 	s.status = SandboxStatus{Status: "disabled", Backend: "none", Network: "host"}
 	if !s.config.Enabled && !s.config.RequireSandbox {
@@ -147,10 +173,10 @@ func (s *sandboxPolicyState) probe(ctx context.Context) {
 	switch runtime.GOOS {
 	case "linux":
 		s.status.Backend = "bubblewrap"
-		s.launcher, _ = exec.LookPath("bwrap")
+		s.launcher = sandboxLauncherPath("bwrap", linuxSandboxLaunchers, true)
 	case "darwin":
 		s.status.Backend = "sandbox-exec"
-		s.launcher, _ = exec.LookPath("sandbox-exec")
+		s.launcher = sandboxLauncherPath("sandbox-exec", darwinSandboxLaunchers, false)
 	default:
 		s.status.Reason = "no bash isolation backend for " + runtime.GOOS
 		return

@@ -26,9 +26,13 @@ func TestRequiredSandboxCoversCommandRunners(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// No launcher in PATH. Runner binaries exist and would write the marker
-	// if any caller silently fell back despite the required policy.
+	// Runner binaries exist and would write the marker if any caller silently
+	// fell back despite the required policy. The launcher is resolved from the
+	// system location (PATH cannot disable isolation), so make isolation
+	// unavailable the honest way: a writable workspace that is an ancestor of
+	// the user's secret directories is refused as an unsafe scope.
 	t.Setenv("PATH", bin)
+	t.Setenv("HOME", root)
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/blocked\ngo 1.25\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +59,8 @@ func TestRequiredSandboxCoversCommandRunners(t *testing.T) {
 	} {
 		tool, _ := registry.Get(test.name)
 		result, err := tool.Execute(t.Context(), test.args)
-		if err != nil || result.Success || !strings.Contains(result.Error, "required bash sandbox unavailable") {
+		refused := strings.Contains(result.Error, "required bash sandbox unavailable") || strings.Contains(result.Error, "unsafe sandbox scope")
+		if err != nil || result.Success || !refused {
 			t.Fatalf("%s escaped required policy: %+v %v", test.name, result, err)
 		}
 	}

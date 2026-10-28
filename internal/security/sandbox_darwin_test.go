@@ -55,7 +55,7 @@ func TestBashSandboxDarwinStatusReportsHostLocalAccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "sandbox-exec"), []byte("#!/bin/sh\nprintf gokin-bash-probe\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	useFakeSandboxLauncher(t, filepath.Join(bin, "sandbox-exec"))
 	for _, network := range []bool{false, true} {
 		t.Run(map[bool]string{false: "host_local", true: "allow_network"}[network], func(t *testing.T) {
 			config := DefaultSandboxConfig()
@@ -72,5 +72,34 @@ func TestBashSandboxDarwinStatusReportsHostLocalAccess(t *testing.T) {
 				t.Fatalf("host-local boundary was misreported: %+v", status)
 			}
 		})
+	}
+}
+
+// The launcher must come from the system location, not the caller's PATH: a
+// stripped PATH used to fall back to UNSANDBOXED bash, and an earlier PATH
+// entry could substitute its own sandbox-exec.
+func TestBashSandboxDarwinLauncherIgnoresPATH(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
+		t.Skip("system sandbox-exec missing")
+	}
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "hijacked")
+	fake := "#!/bin/sh\ntouch " + marker + "\nprintf gokin-bash-probe\n"
+	if err := os.WriteFile(filepath.Join(bin, "sandbox-exec"), []byte(fake), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got := sandboxLauncherPath("sandbox-exec", darwinSandboxLaunchers, false); got != "/usr/bin/sandbox-exec" {
+		t.Fatalf("launcher = %q, want /usr/bin/sandbox-exec", got)
+	}
+	t.Setenv("PATH", bin)
+	if got := sandboxLauncherPath("sandbox-exec", darwinSandboxLaunchers, false); got != "/usr/bin/sandbox-exec" {
+		t.Fatalf("PATH-shadowing launcher selected: %q", got)
+	}
+	t.Setenv("PATH", "")
+	if got := sandboxLauncherPath("sandbox-exec", darwinSandboxLaunchers, false); got != "/usr/bin/sandbox-exec" {
+		t.Fatalf("empty PATH lost the system launcher: %q", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("fake launcher on PATH was executed")
 	}
 }
