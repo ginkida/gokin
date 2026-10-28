@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/build"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,9 @@ type deltaCheckCommand struct {
 	Display string
 	Command string
 	Args    []string
+	// BenignOutputs mark a non-zero exit as "nothing to check" rather than a
+	// failure (e.g. a Go package whose files are all excluded by build tags).
+	BenignOutputs []string
 }
 
 type deltaModuleTarget struct {
@@ -348,7 +352,9 @@ func (e *Executor) runDeltaCheck(ctx context.Context) deltaCheckResult {
 
 		outputText := strings.TrimSpace(string(output))
 		if err != nil {
-			if isDeltaCheckCommandMissing(err) {
+			// A load refusal hides every other package in the same invocation,
+			// so it may only be forgiven when it is the sole target.
+			if isDeltaCheckCommandMissing(err) || (len(check.Args) == 2 && deltaOutputIsBenign(outputText, check.BenignOutputs)) {
 				result.Skipped++
 				continue
 			}
@@ -526,6 +532,7 @@ func buildDeltaCheckCommands(workDir string, changed []string, maxModules int) [
 	}
 
 	targets := make(map[string]deltaModuleTarget)
+	goPackages := make(map[string]map[string]bool)
 	for _, rel := range changed {
 		target, ok := detectDeltaModuleTarget(workDir, rel)
 		if !ok {
@@ -534,6 +541,16 @@ func buildDeltaCheckCommands(workDir string, changed []string, maxModules int) [
 		key := target.Kind + "|" + target.Dir
 		if target.Kind == "node" {
 			key += "|" + target.Runner + "|" + target.Script
+		}
+		if target.Kind == "go" {
+			pattern, relevant := goDeltaPackagePattern(workDir, target.Dir, rel)
+			if !relevant {
+				continue
+			}
+			if goPackages[key] == nil {
+				goPackages[key] = make(map[string]bool)
+			}
+			goPackages[key][pattern] = true
 		}
 		if _, exists := targets[key]; !exists {
 			targets[key] = target
@@ -554,12 +571,14 @@ func buildDeltaCheckCommands(workDir string, changed []string, maxModules int) [
 		target := targets[key]
 		switch target.Kind {
 		case "go":
+			patterns := goDeltaBuildPatterns(goPackages[key])
 			commands = append(commands, deltaCheckCommand{
-				Key:     key,
-				Dir:     target.Dir,
-				Display: "go build ./...",
-				Command: "go",
-				Args:    []string{"build", "./..."},
+				Key:           key,
+				Dir:           target.Dir,
+				Display:       "go build " + strings.Join(patterns, " "),
+				Command:       "go",
+				Args:          append([]string{"build"}, patterns...),
+				BenignOutputs: goDeltaBenignOutputs,
 			})
 		case "rust":
 			commands = append(commands, deltaCheckCommand{
@@ -610,6 +629,70 @@ func buildDeltaCheckCommands(workDir string, changed []string, maxModules int) [
 	}
 
 	return commands
+}
+
+// goDeltaBenignOutputs are `go build <dir>` refusals that mean the package has
+// nothing for this platform to compile — `./...` skipped such dirs silently.
+var goDeltaBenignOutputs = []string{
+	"build constraints exclude all Go files",
+	"no non-test Go files",
+}
+
+// goDeltaPackagePattern maps one changed path to the `go build` pattern that
+// covers it. Building only the touched packages (plus their dependencies) is
+// what makes the post-edit check fast: `./...` after an edit to a low-level
+// package recompiles every dependent (~30s on gokin itself, ~5s for the one
+// package). Breakage in reverse dependencies is left to the done-gate's full
+// build/vet/test at the end of the turn. Module metadata, directories and
+// vanished paths fall back to `./...`; `_test.go` files are not compiled by
+// `go build` at all, so they contribute nothing (relevant=false).
+func goDeltaPackagePattern(workDir, moduleDir, relPath string) (pattern string, relevant bool) {
+	abs := filepath.Join(workDir, filepath.FromSlash(normalizeDeltaRelPath(relPath)))
+	base := filepath.Base(abs)
+	switch base {
+	case "go.mod", "go.sum", "go.work", "go.work.sum":
+		return "./...", true
+	}
+	if !strings.HasSuffix(base, ".go") {
+		return "./...", true
+	}
+	if strings.HasSuffix(base, "_test.go") {
+		return "", false
+	}
+	dir := filepath.Dir(abs)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "./...", true
+	}
+	rel, err := filepath.Rel(moduleDir, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "./...", true
+	}
+	// A directory with nothing buildable for this platform (all files behind
+	// build tags, or tests only) makes `go build <dir>` abort at package load
+	// BEFORE compiling the other listed packages — so it must never reach the
+	// command line, or a real error elsewhere would be masked.
+	if _, err := build.Default.ImportDir(dir, 0); err != nil {
+		var noGo *build.NoGoError
+		if errors.As(err, &noGo) {
+			return "", false
+		}
+	}
+	if rel == "." {
+		return ".", true
+	}
+	return "./" + filepath.ToSlash(rel), true
+}
+
+func goDeltaBuildPatterns(set map[string]bool) []string {
+	if len(set) == 0 || set["./..."] {
+		return []string{"./..."}
+	}
+	patterns := make([]string, 0, len(set))
+	for pattern := range set {
+		patterns = append(patterns, pattern)
+	}
+	sort.Strings(patterns)
+	return patterns
 }
 
 func detectDeltaModuleTarget(workDir, relPath string) (deltaModuleTarget, bool) {
@@ -883,6 +966,29 @@ func copyStringSet(src map[string]struct{}) map[string]struct{} {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func deltaOutputIsBenign(output string, benign []string) bool {
+	if output == "" || len(benign) == 0 {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		matched := false
+		for _, marker := range benign {
+			if strings.Contains(line, marker) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func logDeltaCheckFailure(result deltaCheckResult) {
