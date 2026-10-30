@@ -3392,7 +3392,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 				return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("directory access check failed for %s: %s", p, gErr))
 			}
 			if !allowed {
-				return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("Access to %s is outside the workspace and is NOT granted. This is a hard permission boundary — retrying or rewriting the path will not help. Ask the user to run: /add-dir %s  (add --persist to keep it across restarts). Until then, work within the workspace.", p, filepath.Dir(p)))
+				// Models often invent an absolute path to a sibling checkout; the
+				// workspace root and the relative-path hint let them recover.
+				return NewPolicyBlockedResult(PolicyBlockPermission, fmt.Sprintf("Path %s is outside the workspace %s and is NOT granted. If you meant a file in this project, use a path relative to the workspace (do not guess absolute paths). Do not retry this same path. If you really need that directory, ask the user to run: /add-dir %s  (add --persist to keep it across restarts).", p, e.workDir, filepath.Dir(p)))
 			}
 		}
 	}

@@ -236,6 +236,19 @@ func (v *DefaultSafetyValidator) initMetadata() {
 		AllowRetry:           true,
 	}
 
+	// The deferred-schema meta tools are virtual, so GetAllDeclarations never
+	// lists them. tool_search only reads the catalog. A well-formed use_tool is
+	// resolved to its target before validation; only a malformed one arrives
+	// here, and it is refused at execution.
+	v.metadata["tool_search"] = &ToolMetadata{
+		Name: "tool_search", SafetyLevel: SafetyLevelSafe, Category: "tool",
+		Impact: "Searches the tool catalog and returns tool schemas", AllowRetry: true,
+	}
+	v.metadata["use_tool"] = &ToolMetadata{
+		Name: "use_tool", SafetyLevel: SafetyLevelSafe, Category: "tool",
+		Impact: "Dispatches a deferred tool; the target is validated as itself",
+	}
+
 	// Git tools - caution
 	for _, tool := range []string{"git_log", "git_diff", "git_blame"} {
 		v.metadata[tool] = &ToolMetadata{

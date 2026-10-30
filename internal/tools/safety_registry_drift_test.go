@@ -1,6 +1,10 @@
 package tools
 
-import "testing"
+import (
+	"testing"
+
+	"gokin/internal/toolschema"
+)
 
 func TestSafetyMetadataCoversRegisteredTools(t *testing.T) {
 	v := NewDefaultSafetyValidator()
@@ -11,6 +15,9 @@ func TestSafetyMetadataCoversRegisteredTools(t *testing.T) {
 	for _, name := range DefaultLazyRegistry(t.TempDir()).Names() {
 		known[name] = true
 	}
+	// The deferred-schema meta tools are published but never registered.
+	known[toolschema.SearchDeclaration().Name] = true
+	known[toolschema.UseDeclaration().Name] = true
 	for name := range known {
 		meta, ok := v.GetMetadata(name)
 		if !ok || meta.Name != name || meta.SafetyLevel == "" || meta.Impact == "" {

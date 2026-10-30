@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/genai"
@@ -160,6 +161,13 @@ func ApplyHeadlessPermissionResult(ctx context.Context, call *genai.FunctionCall
 		return result
 	}
 	reason := fmt.Sprintf("Denied by permission mode %s or a permission rule. Do not retry this call; continue without it.", state.mode)
+	// The model also gets the specific cause (e.g. a path outside the
+	// workspace): the generic text alone gives it nothing to correct. The
+	// published denial keeps only the generic text (see PermissionDenial).
+	modelReason := reason
+	if cause := strings.TrimSpace(result.Error); cause != "" {
+		modelReason = cause + " (" + reason + ")"
+	}
 	state.denials = append(state.denials, PermissionDenial{Tool: call.Name, ToolUseID: call.ID, Reason: reason})
 	args := call.Args
 	if result.HookUpdatedInput != nil {
@@ -172,7 +180,7 @@ func ApplyHeadlessPermissionResult(ctx context.Context, call *genai.FunctionCall
 	}
 	state.mu.Unlock()
 	result.Success = false
-	result.Error = reason
+	result.Error = modelReason
 	if !strict {
 		block := *result.PolicyBlock
 		block.Recoverable = true

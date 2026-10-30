@@ -189,3 +189,20 @@ func TestProcessIncludes_MissingFileKeepsOriginalLine(t *testing.T) {
 		t.Errorf("missing-file line should be preserved, got:\n%s", got)
 	}
 }
+
+func TestGokinGitignoreCoversRuntimeFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	EnsureGokinGitignore(root)
+	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{".gokin/execution_journal.jsonl", ".gokin/recovery_snapshot.json", ".gokin/agent-output/", ".gokin/agents/checkpoints/"} {
+		if !strings.Contains(string(data), entry+"\n") {
+			t.Errorf(".gitignore misses runtime file %s", entry)
+		}
+	}
+}
