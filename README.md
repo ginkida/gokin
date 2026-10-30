@@ -516,7 +516,12 @@ allowed by that mode.
 `acceptEdits` permits edits; an unapproved Bash check can be denied without
 reverting the edit or failing the whole invocation. JSON results always include
 `permission_denials`, with `tool`, optional `tool_use_id`, and a short reason;
-raw inputs and potentially sensitive policy text are omitted. Use
+raw inputs and potentially sensitive policy text are omitted. Any recorded
+permission denial sets `incomplete: true` and adds a `warnings` entry with the
+denied call count and tool names, warning that the answer may not be based on
+those calls. These fields do not change `status: "success"` or the exit code.
+Other failures, unfinished todos, incomplete delegated work, and mismatched
+file-change claims can also set `incomplete: true`. Use
 `--strict-permissions` to stop on the first ordinary denial with
 `status: "policy_blocked"`. Capability/schema ceilings, hard safety blocks and
 blocking pre-tool hooks, hook `continue:false`, and missing required managed

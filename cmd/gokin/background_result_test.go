@@ -14,7 +14,7 @@ import (
 func TestBackgroundResultPrintsOnlyLastResult(t *testing.T) {
 	store, worker := newBackgroundControlFixture(t)
 	path, _ := store.StdoutPath(worker.id)
-	last := `{"type":"result","status":"success","result":"final answer","verification":{"status":"denied"},"incomplete":false}`
+	last := `{"type":"result","status":"success","result":"final answer","verification":{"status":"denied"},"incomplete":true}`
 	data := "{\"type\":\"result\",\"result\":\"first turn\"}\n{\"type\":\"tool_end\",\"content\":\"" + strings.Repeat("x", 70000) + "\"}\n" + last + "\n"
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)

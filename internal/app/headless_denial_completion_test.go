@@ -1,6 +1,9 @@
 package app
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +16,84 @@ import (
 	"gokin/internal/testkit"
 	"gokin/internal/tools"
 )
+
+func TestHeadlessPermissionDenialsMarkResultIncomplete(t *testing.T) {
+	tests := []struct {
+		name      string
+		toolNames []string
+		denied    bool
+		warning   string
+	}{
+		{name: "allowed read", toolNames: []string{"read"}},
+		{
+			name: "denied read", toolNames: []string{"read"}, denied: true,
+			warning: "1 tool call(s) were denied by permissions (read); the answer may not be based on them",
+		},
+		{
+			name: "multiple denied calls", toolNames: []string{"read", "grep", "read"}, denied: true,
+			warning: "3 tool call(s) were denied by permissions (grep, read); the answer may not be based on them",
+		},
+	}
+	for _, format := range []HeadlessOutputFormat{HeadlessOutputJSON, HeadlessOutputStreamJSON} {
+		for _, tt := range tests {
+			t.Run(string(format)+"/"+tt.name, func(t *testing.T) {
+				mock := testkit.NewMockClient()
+				for _, name := range tt.toolNames {
+					mock.EnqueueToolCall(name, map[string]any{})
+				}
+				mock.EnqueueText("Final answer.")
+				read := &appHeadlessScriptedTool{name: "read", results: []tools.ToolResult{tools.NewSuccessResult("read content")}}
+				grep := &appHeadlessScriptedTool{name: "grep"}
+				a, exec := newHeadlessPolicyTestApp(t, mock, read)
+				a.registry.MustRegister(grep)
+				rules := permission.DefaultRules()
+				for _, name := range []string{"read", "grep"} {
+					level := permission.LevelAllow
+					if tt.denied {
+						level = permission.LevelAsk
+					}
+					rules.SetPolicy(name, level)
+				}
+				manager := permission.NewManager(rules, true)
+				manager.SetDontAsk(true)
+				manager.SetPromptHandler(func(context.Context, *permission.Request) (permission.Decision, error) {
+					t.Error("dontAsk opened a permission prompt")
+					return permission.DecisionDeny, nil
+				})
+				exec.SetPermissions(manager)
+				var stdout bytes.Buffer
+				opts := HeadlessOptions{PermissionMode: "dontAsk", NoSelfReview: true, OutputFormat: format, Stdout: &stdout, Stderr: io.Discard}
+				result, err := a.RunHeadlessWithOptions(t.Context(), "Inspect and answer", opts)
+				if err != nil || result.Status != "success" || result.Error != nil || result.Result != "Final answer." || len(mock.Calls()) != len(tt.toolNames)+1 {
+					t.Fatalf("result=%+v err=%v rounds=%d", result, err, len(mock.Calls()))
+				}
+				wantDenials, wantExecutions := 0, len(tt.toolNames)
+				if tt.denied {
+					wantDenials, wantExecutions = len(tt.toolNames), 0
+				}
+				if len(result.PermissionDenials) != wantDenials || read.CallCount()+grep.CallCount() != wantExecutions {
+					t.Fatalf("denials=%+v read=%d grep=%d", result.PermissionDenials, read.CallCount(), grep.CallCount())
+				}
+				records := decodeHeadlessJSONL(t, stdout.Bytes())
+				var terminal HeadlessResult
+				if err := json.Unmarshal(records[len(records)-1], &terminal); err != nil {
+					t.Fatal(err)
+				}
+				for _, receipt := range []HeadlessResult{result, terminal} {
+					if receipt.Status != "success" || receipt.Incomplete != tt.denied || strings.Join(receipt.Warnings, "\n") != tt.warning {
+						t.Errorf("incorrect completion receipt: %+v", receipt)
+					}
+				}
+				mock.EnqueueText("Clean answer.")
+				stdout.Reset()
+				clean, err := a.RunHeadlessWithOptions(t.Context(), "Answer without tools", opts)
+				if err != nil || clean.Status != "success" || clean.Incomplete || len(clean.PermissionDenials) != 0 || len(clean.Warnings) != 0 {
+					t.Fatalf("denial metadata leaked into next invocation: %+v err=%v", clean, err)
+				}
+			})
+		}
+	}
+}
 
 func TestHeadlessUnavailableVerificationContinuesImplementationTodos(t *testing.T) {
 	testHeadlessImplementationTodo(t, "Update the second file")
@@ -149,7 +230,7 @@ func TestHeadlessDenialFinishesWithoutAutomaticContinuation(t *testing.T) {
 				if len(result.PermissionDenials) != 1 || len(result.FilesChanged) != 1 {
 					t.Fatalf("lost edits or denial: %+v", result)
 				}
-				if result.Verification.Status != "denied" || result.Incomplete != pendingTodo {
+				if result.Verification.Status != "denied" || !result.Incomplete {
 					t.Fatalf("verification or unfinished-work receipt=%+v", result)
 				}
 			})

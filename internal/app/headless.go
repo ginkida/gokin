@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -756,10 +757,16 @@ func (a *App) RunHeadlessWithOptions(ctx context.Context, prompt string, opts He
 	}
 	unfinished, _ := tools.IncompleteTodoSummary(a.registry)
 	result.Incomplete = result.ClaimMismatch || result.Status != "success" || unfinished > 0 || permissionState.Incomplete()
-	for _, denial := range result.PermissionDenials {
-		if tools.IsImplementationTool(denial.Tool) {
-			result.Incomplete = true
+	if len(result.PermissionDenials) > 0 {
+		result.Incomplete = true
+		deniedTools := make([]string, 0, len(result.PermissionDenials))
+		for _, denial := range result.PermissionDenials {
+			deniedTools = append(deniedTools, denial.Tool)
 		}
+		sort.Strings(deniedTools)
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"%d tool call(s) were denied by permissions (%s); the answer may not be based on them",
+			len(result.PermissionDenials), strings.Join(slices.Compact(deniedTools), ", ")))
 	}
 	a.mu.Lock()
 	result.FilesChanged = append([]string{}, a.headlessFilesChanged...)
