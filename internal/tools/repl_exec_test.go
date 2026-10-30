@@ -68,6 +68,7 @@ type fakeREPLExecutor struct {
 	result repl.Result
 	err    error
 	code   string
+	calls  int
 	resets int
 	stats  repl.Stats
 }
@@ -77,6 +78,7 @@ func (f *fakeREPLExecutor) Stats() repl.Stats           { return f.stats }
 
 func (f *fakeREPLExecutor) Execute(_ context.Context, code string) (repl.Result, error) {
 	f.code = code
+	f.calls++
 	return f.result, f.err
 }
 

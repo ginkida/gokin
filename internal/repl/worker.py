@@ -1348,7 +1348,11 @@ def _analytical_module(module):
         name.startswith(allowed + ".") or allowed.startswith(name + ".")
         for allowed in _ALLOWED_CELL_IMPORTS
     ):
-        raise PermissionError("runtime module references are disabled in the REPL")
+        raise PermissionError(
+            "REPL rejected runtime module %r: runtime module references are disabled. "
+            "Use analytical stdlib modules or bounded context APIs instead. "
+            "Do not retry unchanged code." % name
+        )
     proxy = _ANALYTICAL_MODULES.get(name)
     if proxy is None:
         proxy = _AnalyticalModule(module)
@@ -1391,7 +1395,11 @@ def _copy_analytical_value(value, memo=None):
 
 def _analytical_import(name, globals=None, locals=None, fromlist=(), level=0):
     if level != 0 or name not in _ALLOWED_CELL_IMPORTS:
-        raise PermissionError("this module is outside the analytical REPL import allowlist")
+        raise PermissionError(
+            "REPL rejected import %r: only absolute analytical stdlib imports are allowed. "
+            "Use analytical stdlib modules (e.g. json, re, math) or structured tools "
+            "for external actions. Do not retry unchanged code." % ("." * level + name)
+        )
     module = _RUNTIME_IMPORT(name, globals, locals, fromlist, 0)
     return _analytical_module(module)
 
@@ -1416,6 +1424,14 @@ _CELL_BUILTINS["__import__"] = _analytical_import
 _CELL_BUILTINS["eprint"] = _cell_eprint
 
 
+def _reject_cell_construct(node, construct, reason, alternative):
+    raise PermissionError(
+        "REPL rejected %s at line %d, column %d: %s. Use %s instead. "
+        "Do not retry unchanged code."
+        % (construct, node.lineno, node.col_offset + 1, reason, alternative)
+    )
+
+
 def _validate_cell_ast(tree):
     """Keep model code out of worker telemetry/runtime internals.
 
@@ -1426,46 +1442,66 @@ def _validate_cell_ast(tree):
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
+            # Public data methods (including bound method references) are allowed;
+            # reject mutation and reflection shapes rather than attribute calls.
+            construct = "attribute %r" % node.attr
             if isinstance(node.ctx, (ast.Store, ast.Del)):
-                raise PermissionError("object and module attribute mutation is disabled in the REPL")
+                _reject_cell_construct(
+                    node, construct, "object and module attribute mutation is disabled",
+                    "item assignment/deletion on your own dict/list values",
+                )
             if node.attr.startswith("_") and node.attr != "__name__":
-                raise PermissionError("private attribute access is disabled in the REPL")
+                _reject_cell_construct(
+                    node, construct, "private attribute access is disabled",
+                    "public data methods or bounded context APIs",
+                )
             private_runtime_attribute = (
                 node.attr.startswith("_")
                 and isinstance(node.value, ast.Name)
                 and node.value.id in {"context", "rlm"}
             )
             if private_runtime_attribute or node.attr in _BLOCKED_CELL_ATTRIBUTES:
-                raise PermissionError(
-                    "private or reflective attribute access is disabled in the REPL"
+                _reject_cell_construct(
+                    node, construct, "private or reflective attribute access is disabled",
+                    "public data methods or bounded context APIs",
                 )
         elif isinstance(node, ast.Name):
             if isinstance(node.ctx, ast.Load) and (
                 node.id in _BLOCKED_CELL_CALLS or node.id == "__builtins__"
             ):
-                raise PermissionError(
-                    "dynamic code and runtime reflection are disabled in the REPL"
+                _reject_cell_construct(
+                    node, "name %r" % node.id,
+                    "dynamic code, direct file access and runtime reflection are disabled",
+                    "context.read_slice(path) for reads or direct Python expressions on plain data",
                 )
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in _BLOCKED_CELL_CALLS:
-                raise PermissionError(
-                    "dynamic code and runtime reflection are disabled in the REPL"
+                _reject_cell_construct(
+                    node, "call %r" % node.func.id,
+                    "dynamic code, direct file access and runtime reflection are disabled",
+                    "context.read_slice(path) for reads or direct Python expressions on plain data",
                 )
         elif isinstance(node, ast.Import):
-            if any(
-                alias.name not in _ALLOWED_CELL_IMPORTS
-                for alias in node.names
-            ):
-                raise PermissionError("this module is outside the analytical REPL import allowlist")
+            for alias in node.names:
+                if alias.name not in _ALLOWED_CELL_IMPORTS:
+                    _reject_cell_construct(
+                        node, "import %r" % alias.name, "outside the analytical import allowlist",
+                        "analytical stdlib modules (e.g. json, re, math) or structured tools for external actions",
+                    )
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if module not in _ALLOWED_CELL_IMPORTS or any(
-                alias.name == "*"
-                or alias.name in _BLOCKED_CELL_ATTRIBUTES
-                or alias.name.startswith("_")
-                for alias in node.names
-            ):
-                raise PermissionError("this import is outside the analytical REPL allowlist")
+            if module not in _ALLOWED_CELL_IMPORTS:
+                _reject_cell_construct(
+                    node, "import from %r" % module, "outside the analytical import allowlist",
+                    "analytical stdlib modules (e.g. json, re, math) or structured tools for external actions",
+                )
+            for alias in node.names:
+                if alias.name == "*" or alias.name in _BLOCKED_CELL_ATTRIBUTES or alias.name.startswith("_"):
+                    _reject_cell_construct(
+                        node, "import %r from %r" % (alias.name, module),
+                        "wildcard, private and reflective imports are disabled",
+                        "explicit public analytical imports (e.g. from math import sqrt)",
+                    )
 
 
 def _evaluate(code, namespace):
