@@ -11,6 +11,7 @@ import (
 )
 
 var readRuleTools = map[string]bool{
+	"diff": true, "git_diff": true, "git_blame": true, "go_to_definition": true, "find_references": true, "go_search": true,
 	"read": true, "grep": true, "glob": true, "list_dir": true, "tree": true, "lsp": true,
 }
 
@@ -406,6 +407,15 @@ func permissionPathTargets(runtimeName string, args map[string]any, workDir stri
 		return value, ok && value != ""
 	}
 	switch runtimeName {
+	case "diff":
+		first, firstOK := stringArg("file1")
+		if second, ok := stringArg("file2"); ok {
+			return []string{first, second}, firstOK
+		}
+		return []string{first}, firstOK
+	case "git_diff", "git_blame", "go_to_definition", "find_references", "go_search":
+		value, ok := stringArg("file")
+		return []string{value}, ok
 	case "lsp":
 		value, ok := stringArg("filePath")
 		return []string{value}, ok

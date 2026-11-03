@@ -41,6 +41,7 @@ func (a *App) rotateClearedConversation(ctx context.Context) (int, error) {
 	freshSession.SetToolSchemaProfile(toolschema.New(a.session.ToolSchemaProfile().Deferred()))
 	fresh := freshSession.GetState()
 	fresh.WorkDir, fresh.Provider = previous.WorkDir, previous.Provider
+	fresh.RunPolicy = chat.CloneRunPolicy(previous.RunPolicy)
 	fresh.Version = previous.Version + 1
 	persistent := a.sessionManager.PersistenceEnabled()
 	var targetLease *chat.SessionWriterLease
@@ -182,6 +183,9 @@ func (a *App) ResumePreviousClearSession(ctx context.Context, expected string, f
 		return fmt.Sprintf("Previous conversation %s restored (%d messages).", id, len(state.History)), nil
 	}
 	defer a.sessionLeaseMu.Unlock()
+	if ephemeral.RunPolicy != nil || a.session.RunPolicy() != nil {
+		return "", sessionRunPolicySwitchError(id)
+	}
 	if !force {
 		current := a.session.GetState()
 		if current.WorkDir != ephemeral.WorkDir || current.Provider != ephemeral.Provider {

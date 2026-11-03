@@ -12,6 +12,10 @@ type SecretRedactor struct {
 	whitelist map[string]bool
 }
 
+// envStyleCredentialPattern matches NAME=value where NAME is UPPER_SNAKE and
+// ends in a credential word. Shared with the outbound guard.
+var envStyleCredentialPattern = regexp.MustCompile(`\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIALS?))=["']?([^\s"',;()\[\]{}]{8,})["']?`)
+
 // NewSecretRedactor creates a new redactor with default patterns for common secrets.
 func NewSecretRedactor() *SecretRedactor {
 	whitelist := map[string]bool{
@@ -29,7 +33,17 @@ func NewSecretRedactor() *SecretRedactor {
 			// ============================================================
 			// API Keys and Tokens (with context)
 			// ============================================================
-			regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*[:=]\s*["']?([^\s"',;)\]}]{8,})["']?`),
+			regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd)\s*[:=]\s*["']?([^\s"',;)\[\]}]{8,})["']?`),
+
+			// Environment-style assignments whose UPPER_SNAKE name ends in a
+			// credential word: CLAUDE_CODE_MESSAGING_TOKEN=…, STRIPE_SECRET=…,
+			// DEPLOY_PRIVATE_KEY=…. The pattern above needs the credential
+			// word at the start of the key, so these escaped it whenever the
+			// value contained '-' or '_' (env/printenv output). Deliberately
+			// case-SENSITIVE and '='-only: source code such as
+			// `token = tokenizer.Next()` or `Token: cfg.GitHubToken` must not
+			// be rewritten, or the model edits against text that isn't there.
+			envStyleCredentialPattern,
 
 			// ============================================================
 			// Bearer Tokens (limited to 256 chars, stops at delimiter)
@@ -157,7 +171,7 @@ func (r *SecretRedactor) Redact(text string) string {
 		return ""
 	}
 
-	result := text
+	result := redactSecretLiterals(text)
 	for _, pattern := range r.patterns {
 		if pattern.MatchString(result) {
 			// If the pattern has submatches (like key=secret), we want to preserve the key part
@@ -171,6 +185,13 @@ func (r *SecretRedactor) Redact(text string) string {
 		}
 	}
 	return result
+}
+
+// ContainsSecret reports whether text carries something the redactor would
+// mask — a registered secret literal or a pattern match. Outbound tools use it
+// to refuse sending a credential to a third party.
+func (r *SecretRedactor) ContainsSecret(text string) bool {
+	return text != "" && r.Redact(text) != text
 }
 
 // redactSubmatches handles patterns with capture groups (e.g., key=secret)

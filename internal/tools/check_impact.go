@@ -22,6 +22,7 @@ type CheckImpactTool struct {
 
 // NewCheckImpactTool creates a new CheckImpactTool instance.
 func NewCheckImpactTool(workDir string) *CheckImpactTool {
+	workDir = canonicalToolWorkDir(workDir)
 	return &CheckImpactTool{
 		workDir: workDir,
 		engine:  NewGrepTool(workDir),
@@ -70,7 +71,7 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 	// semantics). Engine errors must reach the model rather than masquerade
 	// as "symbol is private or unused": this is a blast-radius tool, and a
 	// false "unused" invites deleting a symbol that actually has callers.
-	files, err := t.engine.getFiles(t.workDir, "")
+	files, skipped, err := t.engine.getFilesWithSkipped(t.workDir, "")
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("check_impact: search failed for %q: %v", symbol, err)), nil
 	}
@@ -141,8 +142,8 @@ func (t *CheckImpactTool) Execute(ctx context.Context, args map[string]any) (Too
 	}
 
 	if report.Len() < 100 { // Just the header
-		return NewSuccessResult(fmt.Sprintf("No significant impact found for symbol: %s. It might be private or unused.", symbol)), nil
+		return NewSuccessResult(fmt.Sprintf("No significant impact found for symbol: %s. It might be private or unused.", symbol) + skipped.footer()), nil
 	}
 
-	return NewSuccessResult(report.String()), nil
+	return NewSuccessResult(report.String() + skipped.footer()), nil
 }

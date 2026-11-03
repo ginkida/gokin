@@ -285,6 +285,9 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, args map[string]any) (T
 // and renders it via renderNewFileBlock. The byte cap keeps a huge generated
 // artifact (dataset, binary) from being slurped whole for a 60-line preview.
 func renderUntrackedFile(path string) (string, int, error) {
+	if sensitive, _ := security.ClassifySensitivePath(path); sensitive {
+		return "  (content withheld: credential-like file)\n", 1, nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", 0, err

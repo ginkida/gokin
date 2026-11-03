@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -501,14 +500,10 @@ func validateSSHLocalPath(localPath string) error {
 			return fmt.Errorf("local path %s is in a restricted system directory", abs)
 		}
 	}
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		sensitive := []string{".ssh", ".gnupg", ".aws", ".config/gcloud"}
-		for _, dir := range sensitive {
-			if strings.HasPrefix(abs, filepath.Join(home, dir)) {
-				return fmt.Errorf("local path %s is in a sensitive directory", abs)
-			}
-		}
+	if security.IsSecretPath(abs) {
+		return fmt.Errorf("local path is a credential location; copy the file into the workspace")
 	}
-	return nil
+	// Resolve aliases and missing leaf paths through the same credential deny.
+	_, err = security.NewPathValidator(nil, true).Validate(abs)
+	return err
 }

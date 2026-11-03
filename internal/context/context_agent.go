@@ -175,7 +175,8 @@ func (a *ContextAgent) Checkpoint(ctx context.Context) {
 	}
 
 	checkpointDir := filepath.Join(a.storageDir, "checkpoints")
-	if err := os.MkdirAll(checkpointDir, 0755); err != nil {
+	// Owner-only like every other gokin store: also repairs a legacy 0755 dir.
+	if err := fileutil.EnsurePrivateDir(checkpointDir); err != nil {
 		logging.Error("failed to create checkpoint dir", "error", err)
 		return
 	}
@@ -200,7 +201,7 @@ func (a *ContextAgent) Checkpoint(ctx context.Context) {
 		return
 	}
 
-	if err := fileutil.AtomicWrite(filename, data, 0644); err != nil {
+	if err := fileutil.AtomicWrite(filename, data, 0o600); err != nil {
 		logging.Error("failed to write checkpoint", "error", err)
 		return
 	}

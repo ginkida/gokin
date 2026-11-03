@@ -1034,7 +1034,8 @@ class Context(metaclass=_ImmutableContextType):
         root_info = root.stat()
         if stat.S_ISREG(root_info.st_mode):
             _record_context_operation("file_inventory")
-            return iter(((root, root_info.st_size),)), False
+            # Even explicit file searches need the parent credential filter.
+            return self._indexed_file_entries(root.parent, file=root.name)
         if not stat.S_ISDIR(root_info.st_mode):
             _record_context_operation("file_inventory")
             return iter(()), False
@@ -1048,12 +1049,12 @@ class Context(metaclass=_ImmutableContextType):
         _cell_entry_cache[cache_key] = snapshot
         return snapshot.iterate(), snapshot.truncated
 
-    def _indexed_file_entries(self, root):
+    def _indexed_file_entries(self, root, file=None):
         relative_root = root.relative_to(self._root)
-        response = _protocol_call(
-            "context.file_index",
-            {"path": str(relative_root) if relative_root.parts else "."},
-        )
+        params = {"path": str(relative_root) if relative_root.parts else "."}
+        if file is not None:
+            params["file"] = file
+        response = _protocol_call("context.file_index", params)
         if not isinstance(response, dict):
             raise RuntimeError("invalid file index response")
         raw_path = response.get("path")

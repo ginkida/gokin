@@ -35,6 +35,17 @@ func TestPolicyToolSetsNameOnlyRegisteredTools(t *testing.T) {
 		"planModeReadOnlyTools":   planModeReadOnlyTools,
 		"idempotentStateTools":    idempotentStateTools,
 	}
+	for preset, members := range toolPresets {
+		expanded, err := ExpandToolPresets(members)
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := make(map[string]bool, len(expanded))
+		for _, name := range expanded {
+			set[name] = true
+		}
+		sets[preset] = set
+	}
 
 	var phantom []string
 	for setName, set := range sets {

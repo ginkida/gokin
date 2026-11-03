@@ -37,11 +37,12 @@ func (c hybridComponents) publish() {
 type deferredHybridInit struct {
 	mu sync.Mutex
 
-	registry        *tools.Registry
-	opener          func(context.Context, repl.Options) (hybridRuntime, repl.Availability)
-	opts            repl.Options
-	handler         repl.CallHandler
-	onPromptChanged func()
+	registry         *tools.Registry
+	opener           func(context.Context, repl.Options) (hybridRuntime, repl.Availability)
+	opts             repl.Options
+	handler          repl.CallHandler
+	allowSecretPaths []string
+	onPromptChanged  func()
 
 	attempted    bool
 	initializing bool
@@ -371,6 +372,9 @@ func (d *deferredHybridInit) activate(ctx context.Context) (hybridRuntime, error
 			}
 		} else {
 			components.manager.SetCallHandler(d.handler)
+			if scoped, ok := components.manager.(interface{ SetAllowSecretPaths([]string) }); ok {
+				scoped.SetAllowSecretPaths(d.allowSecretPaths)
+			}
 			d.manager = components.manager
 			d.attempted = true
 			d.ready = true
@@ -562,4 +566,13 @@ func initializeHybridComponents(
 		manager: manager, store: store, replTool: replTool,
 		harnessTool: harnessTool, availability: availability,
 	}, nil
+}
+
+func (d *deferredHybridInit) SetAllowSecretPaths(paths []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.allowSecretPaths = append([]string(nil), paths...)
+	if scoped, ok := d.manager.(interface{ SetAllowSecretPaths([]string) }); ok {
+		scoped.SetAllowSecretPaths(paths)
+	}
 }

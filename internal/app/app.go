@@ -714,14 +714,18 @@ type App struct {
 
 // New creates a new application instance.
 func New(cfg *config.Config, workDir string) (*App, error) {
-	return NewBuilder(cfg, workDir).Build()
+	return NewWithOptions(cfg, workDir, BuildOptions{})
 }
 
 // NewWithOptions creates an application with explicit startup behavior. Use
 // NonInteractive for headless/automation entry points so construction cannot
 // pause for input or start an implicit model download.
 func NewWithOptions(cfg *config.Config, workDir string, options BuildOptions) (*App, error) {
-	return NewBuilderWithOptions(cfg, workDir, options).Build()
+	application, err := NewBuilderWithOptions(cfg, workDir, options).Build()
+	if err == nil {
+		application.configureSecretPaths()
+	}
+	return application, err
 }
 
 // markOnboardingWelcomeSeen persists the first-launch flag only after the TUI
@@ -886,6 +890,8 @@ func (a *App) RunWithInitialPrompt(initialPrompt string) error {
 					a.tui.AddSystemMessage(fmt.Sprintf(
 						"Skipped auto-resume: session %s is already open in another Gokin process. Started a fresh protected session instead.",
 						info.ID))
+				} else if errors.Is(restoreErr, ErrSessionRunPolicySwitch) {
+					a.tui.AddSystemMessage(fmt.Sprintf("Skipped auto-resume: %v", restoreErr))
 				}
 			} else {
 				state = restoredState
@@ -4856,6 +4862,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 	}
 	originalCandidate := cfg
 	cfg = cfg.Clone()
+	registerConfigSecrets(cfg)
 	a.mu.Lock()
 	// NOTE: no defer Unlock() — we release before safeSendToProgram. Every
 	// early-return below unlocks explicitly.
@@ -4933,6 +4940,7 @@ func (a *App) applyConfig(cfg *config.Config) (uint64, error) {
 		a.config.Permission.DefaultPolicy != cfg.Permission.DefaultPolicy ||
 		!reflect.DeepEqual(a.config.Permission.Rules, cfg.Permission.Rules)
 	a.config = cfg
+	a.configureSecretPathsLocked()
 	if a.hooksManager != nil && !cfg.Bare {
 		a.hooksManager.SetEnabled(cfg.Hooks.Enabled)
 		a.hooksManager.ConfigureClaudeSettings(a.workDir, candidateClaudeSettingsDir,

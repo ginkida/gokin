@@ -186,6 +186,9 @@ func (t *TreeTool) buildTree(ctx context.Context, builder *strings.Builder, path
 	default:
 	}
 
+	if t.pathValidator.IsSecretPath(path) {
+		return nil
+	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return err

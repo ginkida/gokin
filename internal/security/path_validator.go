@@ -18,8 +18,10 @@ type PathValidator struct {
 	// tool instead, an unsynchronized pointer write that the race detector
 	// reports against every concurrent read. Keeping the mutation inside the
 	// validator fixes it in one place, leaving the eighty-odd read sites alone.
-	mu          sync.RWMutex
-	allowedDirs []string
+	mu                 sync.RWMutex
+	allowedDirs        []string
+	allowSecretPaths   []string
+	secretPathRevision uint64
 
 	// allowSymlinks is set once and never changes, so it needs no guard.
 	allowSymlinks bool
@@ -101,6 +103,10 @@ func (v *PathValidator) Validate(path string) (string, error) {
 		return "", err
 	}
 
+	if v.IsSecretPath(resolvedPath) {
+		return "", secretPathError(resolvedPath)
+	}
+
 	// Check if resolved path is within allowed directories
 	if !v.isAllowed(resolvedPath) {
 		return "", fmt.Errorf("path '%s' is outside allowed directories", filepath.Base(path))
@@ -125,7 +131,10 @@ func evalSymlinksWithParentFallback(absPath string) (string, error) {
 	}
 	// Path doesn't exist yet — resolve the parent dir to block symlink attacks.
 	parentDir := filepath.Dir(absPath)
-	resolvedParent, parentErr := filepath.EvalSymlinks(parentDir)
+	if parentDir == absPath {
+		return "", fmt.Errorf("cannot resolve path root: %w", err)
+	}
+	resolvedParent, parentErr := evalSymlinksWithParentFallback(parentDir)
 	if parentErr != nil && !os.IsNotExist(parentErr) {
 		return "", fmt.Errorf("failed to resolve parent path: %w", parentErr)
 	}
@@ -141,16 +150,15 @@ func evalSymlinksWithParentFallback(absPath string) (string, error) {
 // It is the read-only pre-filter for the out-of-workspace access gate: it never
 // grants access — it only answers "is this already inside an allowed area?" so
 // the executor knows whether to prompt. The tool's own PathValidator remains the
-// real enforcement boundary. An empty dirs slice means "no restriction" -> true.
-func IsPathWithinAny(target string, dirs []string) (bool, error) {
+// real enforcement boundary. Credential locations are denied even with empty
+// dirs; the optional third argument applies user-configured secret exceptions.
+// Empty dirs otherwise means no workspace restriction.
+func IsPathWithinAny(target string, dirs []string, allowSecretPaths ...[]string) (bool, error) {
 	if target == "" {
 		return false, fmt.Errorf("empty path")
 	}
 	if strings.Contains(target, "\x00") {
 		return false, fmt.Errorf("null byte in path")
-	}
-	if len(dirs) == 0 {
-		return true, nil
 	}
 
 	absTarget, err := filepath.Abs(filepath.Clean(target))
@@ -160,6 +168,17 @@ func IsPathWithinAny(target string, dirs []string) (bool, error) {
 	resolvedTarget, err := evalSymlinksWithParentFallback(absTarget)
 	if err != nil {
 		return false, err
+	}
+
+	validator := NewPathValidator(nil, true)
+	if len(allowSecretPaths) > 0 {
+		validator.SetAllowSecretPaths(allowSecretPaths[0])
+	}
+	if validator.IsSecretPath(resolvedTarget) {
+		return false, secretPathError(resolvedTarget)
+	}
+	if len(dirs) == 0 {
+		return true, nil
 	}
 
 	for _, dir := range dirs {
@@ -258,9 +277,9 @@ func pathWithin(target, base string) bool {
 	if runtime.GOOS == "windows" {
 		lowerJoined := strings.ToLower(joined)
 		lowerBase := strings.ToLower(base)
-		return lowerJoined == lowerBase || strings.HasPrefix(lowerJoined, lowerBase+string(filepath.Separator))
+		return lowerJoined == lowerBase || strings.HasPrefix(lowerJoined, strings.TrimRight(lowerBase, string(filepath.Separator))+string(filepath.Separator))
 	}
-	return joined == base || strings.HasPrefix(joined, base+string(filepath.Separator))
+	return joined == base || strings.HasPrefix(joined, strings.TrimRight(base, string(filepath.Separator))+string(filepath.Separator))
 }
 
 // checkSymlink checks if any component of the path is a symlink.
@@ -323,14 +342,19 @@ func IsBlockedWritePath(path string) error {
 // IsGrantableDir reports an error if resolvedDir (an absolute, symlink-resolved
 // directory path) must never be added to the allowed set by a user grant. It
 // refuses the filesystem root, OS system directories, the .git directory, and
-// well-known secret directories (~/.ssh, ~/.aws, ~/.gnupg, the gokin config dir).
-// Granting a PARENT of these is still allowed (you can grant ~), so the check is
-// "is the grant target itself inside a forbidden location", not "does it contain
-// one". Writes into a granted subtree remain subject to IsBlockedWritePath and
-// the normal per-tool permission prompt.
+// credential locations. HOME and its ancestors are too broad to grant. Ordinary
+// project directories remain grantable even if they contain a .docker folder.
+// Writes still require the normal per-tool permissions and IsBlockedWritePath.
 func IsGrantableDir(resolvedDir string) error {
 	clean := filepath.Clean(resolvedDir)
 
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		for _, canonicalHome := range resolveSecretPaths([]string{home}) {
+			if pathWithin(canonicalHome, clean) {
+				return fmt.Errorf("refusing to grant your home directory (or a parent of it); grant the specific subdirectory, or copy the file into the workspace")
+			}
+		}
+	}
 	// Filesystem / volume root is too broad to ever grant.
 	if clean == string(filepath.Separator) || clean == filepath.VolumeName(clean)+string(filepath.Separator) {
 		return fmt.Errorf("refusing to grant access to the filesystem root")
@@ -349,20 +373,8 @@ func IsGrantableDir(resolvedDir string) error {
 		}
 	}
 
-	// Well-known secret/credential directories under the user's home.
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		secretDirs := []string{
-			filepath.Join(home, ".ssh"),
-			filepath.Join(home, ".aws"),
-			filepath.Join(home, ".gnupg"),
-			filepath.Join(home, ".kube"),
-			filepath.Join(home, ".config", "gokin"),
-		}
-		for _, d := range secretDirs {
-			if withinBlockedDir(clean, d) {
-				return fmt.Errorf("refusing to grant access to sensitive directory %s", d)
-			}
-		}
+	if IsSecretPath(clean) {
+		return fmt.Errorf("refusing to grant access to a credential location; copy the file into the workspace")
 	}
 
 	return nil

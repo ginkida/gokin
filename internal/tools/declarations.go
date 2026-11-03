@@ -306,14 +306,24 @@ func TreeToolDeclaration() *genai.FunctionDeclaration {
 	}
 }
 
-// EnvToolDeclaration returns the declaration for the env tool.
+// EnvToolDeclaration returns the declaration for the env tool. EnvTool's
+// Declaration delegates here so the eager and lazy registries serve one schema.
 func EnvToolDeclaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        "env",
-		Description: "Returns environment information (working directory, OS, etc.).",
+		Description: "Shows the environment variables commands run with (an allowlist: PATH, HOME, GOPATH, VIRTUAL_ENV, ...). Credentials and anything outside the allowlist are never shown.",
 		Parameters: &genai.Schema{
-			Type:       genai.TypeObject,
-			Properties: map[string]*genai.Schema{},
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"name": {
+					Type:        genai.TypeString,
+					Description: "Name of one variable to show. If empty, lists all visible variables.",
+				},
+				"prefix": {
+					Type:        genai.TypeString,
+					Description: "Filter variables by prefix (e.g., 'GO', 'XDG')",
+				},
+			},
 		},
 	}
 }

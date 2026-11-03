@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"gokin/internal/fileutil"
 	"gokin/internal/hooks"
 	"gokin/internal/logging"
 	"gokin/internal/security"
@@ -626,7 +627,8 @@ func (t *BashTool) buildSessionEnv() []string {
 
 	if t.managedWorkspaceApplyBack && t.workspaceRoot != "" {
 		tmpDir := filepath.Join(t.workspaceRoot, ".gokin-tmp")
-		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		// Owner-only; also repairs a directory created 0755 by older builds.
+		if err := fileutil.EnsurePrivateDir(tmpDir); err != nil {
 			logging.Debug("failed to create managed bash tmp dir", "dir", tmpDir, "error", err)
 		}
 		env = upsertEnvVar(env, "HOME", t.workspaceRoot)

@@ -174,6 +174,9 @@ func (a *App) switchSession(ctx context.Context, selected *chat.SessionState, fo
 	if state == nil || state.ID != targetID {
 		return nil, fmt.Errorf("reload target session %q returned mismatched identity", targetID)
 	}
+	if state.RunPolicy != nil || a.session.RunPolicy() != nil {
+		return nil, sessionRunPolicySwitchError(targetID)
+	}
 	if !force && (a.workDir == "" || state.WorkDir == "" || filepath.Clean(a.workDir) != filepath.Clean(state.WorkDir)) {
 		return nil, fmt.Errorf("refusing target session %q from a different work directory", targetID)
 	}

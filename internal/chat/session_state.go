@@ -19,6 +19,7 @@ import (
 
 // SessionState represents the serializable state of a session.
 type SessionState struct {
+	RunPolicy   *SessionRunPolicy    `json:"run_policy,omitempty"`
 	ToolSchemas *toolschema.Snapshot `json:"tool_schemas,omitempty"`
 
 	ID         string    `json:"id"`

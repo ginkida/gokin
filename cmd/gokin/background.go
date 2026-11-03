@@ -20,6 +20,7 @@ import (
 	backgroundstore "gokin/internal/background"
 	"gokin/internal/chat"
 	"gokin/internal/lifecycle"
+	"gokin/internal/tools"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -352,7 +353,12 @@ func preflightBackgroundLaunch(cmd *cobra.Command) error {
 	if err := validateHeadlessExecutionLimits(true, headlessTurns, headlessLimit, headlessBudget); err != nil {
 		return err
 	}
-	if _, err := resolveCLIPermissionMode(permissionMode, skipPermissions); err != nil {
+	mode, err := resolveCLIPermissionMode(permissionMode, skipPermissions)
+	if err != nil {
+		return err
+	}
+	ceiling, err := tools.ExpandToolPresets(toolCeiling)
+	if err != nil {
 		return err
 	}
 	if _, err := resolveCLIDebug(cliDebugFlags{
@@ -387,9 +393,10 @@ func preflightBackgroundLaunch(cmd *cobra.Command) error {
 	)); err != nil {
 		return err
 	}
-	if _, err := resolveCLIDeniedToolRules(append(
+	denies, err := resolveCLIDeniedToolRules(append(
 		append([]string(nil), deniedTools...), deniedToolsCompat...,
-	)); err != nil {
+	))
+	if err != nil {
 		return err
 	}
 	resumeID, err := validateResumeSelection(continueLast, resumeSession)
@@ -399,7 +406,28 @@ func preflightBackgroundLaunch(cmd *cobra.Command) error {
 	if _, err := validateNewSessionSelection(sessionID, continueLast, resumeID, forkSession); err != nil {
 		return err
 	}
-	return validateSessionPersistenceFlags(noSessionPersistence, continueLast, resumeID, forkSession)
+	if err := validateSessionPersistenceFlags(noSessionPersistence, continueLast, resumeID, forkSession); err != nil {
+		return err
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	state, err := loadRunPolicySession(resumeID, continueLast, workDir)
+	if err != nil {
+		return err
+	}
+	if state != nil {
+		if mode == cliPermissionInherit {
+			// Preflight validates saved policy; the worker resolves inherited
+			// mode against its loaded config before constructing the app.
+			mode = cliPermissionDefault
+		}
+		_, _, err = effectiveSessionRunPolicy(state.RunPolicy, &chat.SessionRunPolicy{
+			ToolCeiling: ceiling, DeniedRules: denies, PermissionMode: string(mode),
+		}, resetSessionPolicy)
+	}
+	return err
 }
 
 func startDetachedBackgroundJob(

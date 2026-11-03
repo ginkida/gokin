@@ -25,8 +25,10 @@ type allowedDirsRegistry interface {
 // name list), a new path-scoping tool is covered automatically. Passing an
 // empty/short list resets every tool to its workDir-only default — that is how
 // a session grant is revoked (/remove-dir, /clear). Returns the number of tools
-// updated (for logging and the drift-guard test).
-func SetAllowedDirsOnRegistry(reg allowedDirsRegistry, dirs []string) int {
+// updated (for logging and the drift-guard test). The optional third argument
+// installs user-configured credential-location exceptions; omitting it preserves
+// the current exceptions during ordinary directory grant changes.
+func SetAllowedDirsOnRegistry(reg allowedDirsRegistry, dirs []string, allowSecretPaths ...[]string) int {
 	if reg == nil {
 		return 0
 	}
@@ -35,6 +37,11 @@ func SetAllowedDirsOnRegistry(reg allowedDirsRegistry, dirs []string) int {
 		if s, ok := t.(allowedDirsSetter); ok {
 			s.SetAllowedDirs(dirs)
 			count++
+		}
+		if len(allowSecretPaths) > 0 {
+			if scoped, ok := t.(secretPathScoped); ok && scoped.secretPathValidator() != nil {
+				scoped.secretPathValidator().SetAllowSecretPaths(allowSecretPaths[0])
+			}
 		}
 	}
 	return count

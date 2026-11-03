@@ -3424,8 +3424,9 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 	}
 
 	// Step 4.5: Check tool result cache for read-only tools
+	cacheArgs := secretPathCacheArgs(tool, call.Args)
 	if e.toolCache != nil && !hooks.AgentHookActive(ctx) {
-		if cached, hit := e.toolCache.Get(call.Name, call.Args); hit {
+		if cached, hit := e.toolCache.Get(call.Name, cacheArgs); hit {
 			serveCache := true
 			// For read tool: dedup unchanged repeats to a stub, but DETECT
 			// staleness — CheckAndRecord stats the file and its 3rd return
@@ -3793,7 +3794,7 @@ func (e *Executor) doExecuteTool(ctx context.Context, call *genai.FunctionCall) 
 		}
 	} else if e.toolCache != nil && result.Success && !hooks.AgentHookActive(ctx) {
 		// Only cache read-only tool results
-		e.toolCache.Put(call.Name, call.Args, result)
+		e.toolCache.Put(call.Name, cacheArgs, result)
 	}
 
 	// Step 12.7: Deduplicate read content for history optimization
@@ -5024,6 +5025,9 @@ func (e *Executor) buildStagnationRecoveryResults(calls []*genai.FunctionCall, r
 func (e *Executor) lookupCachedReadOnlyResult(toolName string, args map[string]any) (ToolResult, bool) {
 	if e.toolCache == nil || toolName == "" {
 		return ToolResult{}, false
+	}
+	if tool, ok := e.registry.Get(toolName); ok {
+		args = secretPathCacheArgs(tool, args)
 	}
 	return e.toolCache.Get(toolName, args)
 }

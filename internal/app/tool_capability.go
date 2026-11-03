@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -59,7 +60,7 @@ func (a *App) ConfigureToolCapability(allowed, denied []string) error {
 	if restricted {
 		a.toolCapabilityCeiling = make([]string, len(ceiling))
 		copy(a.toolCapabilityCeiling, ceiling)
-		a.toolCapabilityAllowInput = append([]string(nil), allowed...)
+		a.toolCapabilityAllowInput = slices.Clone(allowed)
 		a.toolCapabilityDenyInput = append([]string(nil), denied...)
 		if allowed == nil {
 			a.toolCapabilityAllowInput = nil
@@ -88,7 +89,7 @@ func (a *App) refreshToolCapabilityCeiling() {
 	}
 	a.mu.Lock()
 	restricted := a.toolCapabilityRestricted
-	allowed := append([]string(nil), a.toolCapabilityAllowInput...)
+	allowed := slices.Clone(a.toolCapabilityAllowInput)
 	if a.toolCapabilityAllowInput == nil {
 		allowed = nil
 	}

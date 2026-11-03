@@ -15,6 +15,7 @@ import (
 
 	"gokin/internal/git"
 	"gokin/internal/gitexec"
+	"gokin/internal/security"
 )
 
 const (
@@ -50,6 +51,25 @@ func (m *Manager) buildFileIndex(ctx context.Context, params map[string]any) (fi
 		return fileIndexResult{}, err
 	}
 
+	if file, ok := params["file"].(string); ok {
+		if file == "" || filepath.Base(file) != file || file == "." || file == ".." {
+			return fileIndexResult{}, fmt.Errorf("invalid index file")
+		}
+		path := filepath.Join(root, file)
+		return m.writeIndex(func(emit func(string) bool) error {
+			if m.indexPathWithheld(path) {
+				return nil
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if info.Mode().IsRegular() {
+				emit(filepath.ToSlash(filepath.Join(rel, file)))
+			}
+			return nil
+		})
+	}
 	if m.opts.GitPath != "" {
 		// An explicit ignored scope is authority to read that directory, not a
 		// request to apply ignore filtering inside its root. Check the root even
@@ -103,6 +123,9 @@ func (m *Manager) validatedIndexRoot(params map[string]any) (string, string, err
 	within, err := filepath.Rel(m.opts.WorkDir, resolved)
 	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("file index path escapes workspace")
+	}
+	if m.secretValidator().IsSecretPath(resolved) {
+		return "", "", fmt.Errorf("credential directory withheld; copy needed files into the workspace or configure tools.allow_secret_paths")
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
@@ -219,6 +242,12 @@ func (m *Manager) writeMatcherFileIndex(root string) (fileIndexResult, error) {
 			if path == root {
 				return nil
 			}
+			if m.secretValidator().IsSecretPath(path) {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if matcher.IsIgnored(path) {
 				if entry.IsDir() {
 					return filepath.SkipDir
@@ -253,6 +282,12 @@ func (m *Manager) writeExplicitFileIndex(root, source string) (fileIndexResult, 
 	result, err := m.writeIndex(func(emit func(string) bool) error {
 		return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil || path == root {
+				return nil
+			}
+			if m.secretValidator().IsSecretPath(path) {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if entry.Type().IsRegular() {
@@ -300,6 +335,10 @@ func (m *Manager) writeIndex(produce func(func(string) bool) error) (fileIndexRe
 	result := fileIndexResult{}
 	written := 0
 	emit := func(rel string) bool {
+		if m.opts.WorkDir != "" && m.indexPathWithheld(filepath.Join(m.opts.WorkDir, filepath.FromSlash(rel))) {
+			return true
+		}
+
 		if result.Entries >= maxFileIndexEntries || len(rel) > maxIndexedPathBytes ||
 			written+len(rel)+1 > maxFileIndexBytes {
 			result.Truncated = true
@@ -357,4 +396,41 @@ func fileIndexGitEnv() []string {
 		}
 	}
 	return env
+}
+
+// REPL inventory omits credential-like files as well as credential directories.
+// This also protects content search/count APIs; list_files uses the same index.
+func (m *Manager) indexPathWithheld(path string) bool {
+	if sensitive, _ := security.ClassifySensitivePath(path); sensitive {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return true
+	}
+	if sensitive, _ := security.ClassifySensitivePath(resolved); sensitive {
+		return true
+	}
+	return m.secretValidator().IsSecretPath(resolved)
+}
+
+func (m *Manager) secretValidator() *security.PathValidator {
+	m.handlerMu.RLock()
+	validator := m.secretPathValidator
+	m.handlerMu.RUnlock()
+	if validator != nil {
+		return validator
+	}
+	return security.NewPathValidator(nil, true)
+}
+
+// SetAllowSecretPaths updates only the parent-owned inventory policy. Python
+// cells cannot modify these config-only exceptions.
+func (m *Manager) SetAllowSecretPaths(paths []string) {
+	m.handlerMu.Lock()
+	defer m.handlerMu.Unlock()
+	if m.secretPathValidator == nil {
+		m.secretPathValidator = security.NewPathValidator(nil, true)
+	}
+	m.secretPathValidator.SetAllowSecretPaths(paths)
 }

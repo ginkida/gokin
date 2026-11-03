@@ -3,12 +3,12 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/bmatcuk/doublestar/v4"
 	"google.golang.org/genai"
 
 	"gokin/internal/cache"
@@ -160,7 +160,7 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	var cacheKey string
 	if t.cache != nil && !hooks.AgentHookActive(ctx) {
 		cacheKey = cache.GlobKey(pattern, searchPath)
-		if cached, ok := t.cache.GetGlob(cacheKey); ok {
+		if cached, ok := t.cache.GetGlob(cacheKey); ok && globCachePathsVisible(cached.Files, t.pathValidator) {
 			// Return cached results
 			if len(cached.Files) == 0 {
 				return NewSuccessResult("(no matches)"), nil
@@ -192,11 +192,11 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult(fmt.Sprintf("error accessing path: %s", err)), nil
 	}
 
-	// Build full pattern
-	fullPattern := filepath.Join(searchPath, pattern)
-
-	// Find matches
-	matches, err := doublestar.FilepathGlob(fullPattern)
+	var matches []string
+	err := walkScopedFiles(searchPath, pattern, t.pathValidator, func(path string, _ fs.DirEntry) error {
+		matches = append(matches, path)
+		return nil
+	})
 	if err != nil {
 		return NewErrorResult(fmt.Sprintf("invalid pattern: %s", err)), nil
 	}
@@ -434,4 +434,13 @@ func isDocPath(path string) bool {
 	}
 	return strings.HasPrefix(base, "readme") || strings.HasPrefix(base, "changelog") ||
 		strings.HasPrefix(base, "contributing") || strings.HasPrefix(base, "license")
+}
+
+func globCachePathsVisible(paths []string, validator *security.PathValidator) bool {
+	for _, path := range paths {
+		if _, err := validator.Validate(path); err != nil {
+			return false
+		}
+	}
+	return true
 }

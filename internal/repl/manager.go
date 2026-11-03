@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"gokin/internal/security"
 )
 
 //go:embed worker.py
@@ -58,6 +60,7 @@ type Manager struct {
 	stderr                *boundedTail
 	handlerMu             sync.RWMutex
 	callHandler           CallHandler
+	secretPathValidator   *security.PathValidator
 	executions            uint64
 	transportFailures     uint64
 	timeouts              uint64

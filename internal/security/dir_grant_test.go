@@ -1,10 +1,13 @@
-package security
+package security_test
 
 import (
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"gokin/internal/security"
+	"gokin/internal/testkit"
 )
 
 func resolved(t *testing.T, p string) string {
@@ -40,7 +43,7 @@ func TestIsPathWithinAny(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := IsPathWithinAny(tc.target, tc.dirs)
+			got, err := security.IsPathWithinAny(tc.target, tc.dirs)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -52,28 +55,29 @@ func TestIsPathWithinAny(t *testing.T) {
 }
 
 func TestIsPathWithinAnyRejectsBadTarget(t *testing.T) {
-	if _, err := IsPathWithinAny("", []string{"/tmp"}); err == nil {
+	if _, err := security.IsPathWithinAny("", []string{"/tmp"}); err == nil {
 		t.Error("empty target should error")
 	}
-	if _, err := IsPathWithinAny("a\x00b", []string{"/tmp"}); err == nil {
+	if _, err := security.IsPathWithinAny("a\x00b", []string{"/tmp"}); err == nil {
 		t.Error("null-byte target should error")
 	}
 }
 
 func TestIsGrantableDir(t *testing.T) {
+	t.Setenv("HOME", testkit.ResolvedTempDir(t))
 	if runtime.GOOS == "windows" {
 		t.Skip("unix path assumptions")
 	}
 	ok := resolved(t, t.TempDir())
 
 	// A normal temp dir is grantable.
-	if err := IsGrantableDir(ok); err != nil {
+	if err := security.IsGrantableDir(ok); err != nil {
 		t.Errorf("normal dir should be grantable: %v", err)
 	}
 
 	// Filesystem root and system dirs are refused.
 	for _, bad := range []string{"/", "/etc", "/etc/ssl", "/sys", "/proc", "/dev"} {
-		if err := IsGrantableDir(bad); err == nil {
+		if err := security.IsGrantableDir(bad); err == nil {
 			t.Errorf("expected %s to be non-grantable", bad)
 		}
 	}
@@ -81,22 +85,22 @@ func TestIsGrantableDir(t *testing.T) {
 	// A .git directory is refused.
 	gitDir := filepath.Join(ok, ".git")
 	if err := os.MkdirAll(gitDir, 0755); err == nil {
-		if err := IsGrantableDir(gitDir); err == nil {
+		if err := security.IsGrantableDir(gitDir); err == nil {
 			t.Error("a .git dir must be non-grantable")
 		}
 	}
 
-	// Secret home dirs are refused; HOME itself stays grantable.
+	// Secret home dirs and HOME itself are refused.
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if err := IsGrantableDir(filepath.Join(home, ".ssh")); err == nil {
+		if err := security.IsGrantableDir(filepath.Join(home, ".ssh")); err == nil {
 			t.Error("~/.ssh must be non-grantable")
 		}
-		if err := IsGrantableDir(filepath.Join(home, ".aws", "x")); err == nil {
+		if err := security.IsGrantableDir(filepath.Join(home, ".aws", "x")); err == nil {
 			t.Error("inside ~/.aws must be non-grantable")
 		}
-		// HOME itself is allowed (Claude-Code parity) — only its secret subdirs are blocked.
-		if err := IsGrantableDir(home); err != nil {
-			t.Errorf("HOME should be grantable (only secret subdirs blocked): %v", err)
+		// HOME is too broad: a grant must name a specific subdirectory.
+		if err := security.IsGrantableDir(home); err == nil {
+			t.Errorf("HOME must not be grantable: %v", err)
 		}
 	}
 }

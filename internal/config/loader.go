@@ -159,6 +159,7 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 	userAllowsGlobal := cfg.Memory.AllowGlobal
 	userBash := cfg.Tools.Bash
 	userDirs := append([]string(nil), cfg.Tools.AllowedDirs...)
+	userSecretPaths := append([]string(nil), cfg.Tools.AllowSecretPaths...)
 	if err := loadFromFile(cfg, projectConfigPath); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to load project config: %w", err)
@@ -169,6 +170,7 @@ func LoadWithProjectDir(projectDir string) (*Config, error) {
 	cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
 	narrowProjectBashPolicy(cfg, userBash)
 	narrowProjectAllowedDirs(cfg, userDirs)
+	cfg.Tools.AllowSecretPaths = userSecretPaths
 
 	migrateRemovedProviders(cfg)
 	return cfg, nil
@@ -194,6 +196,7 @@ func loadProjectConfig(cfg *Config) {
 			userAllowsGlobal := cfg.Memory.AllowGlobal
 			userBash := cfg.Tools.Bash
 			userDirs := append([]string(nil), cfg.Tools.AllowedDirs...)
+			userSecretPaths := append([]string(nil), cfg.Tools.AllowSecretPaths...)
 			userTrustedWorkspaces := append([]string(nil), cfg.Hooks.TrustedWorkspaces...)
 			if err := loadFromFile(cfg, projectConfig); err != nil {
 				slog.Warn("failed to load project config", "path", projectConfig, "error", err)
@@ -206,6 +209,7 @@ func loadProjectConfig(cfg *Config) {
 			cfg.Memory.AllowGlobal = userAllowsGlobal && cfg.Memory.AllowGlobal
 			narrowProjectBashPolicy(cfg, userBash)
 			narrowProjectAllowedDirs(cfg, userDirs)
+			cfg.Tools.AllowSecretPaths = userSecretPaths
 			// Workspace trust is also user-owned authority. A repository may
 			// configure hook behavior after the user trusts it, but it may not
 			// add its own path to the trust ledger and thereby activate
@@ -500,6 +504,11 @@ func (c *Config) Validate() error {
 	}
 	if c.DoneGate.CheckTimeout < 0 {
 		return fmt.Errorf("done_gate.check_timeout must be >= 0")
+	}
+	for _, path := range c.Tools.AllowSecretPaths {
+		if !filepath.IsAbs(path) || strings.ContainsRune(path, 0) {
+			return fmt.Errorf("tools.allow_secret_paths entries must be absolute paths")
+		}
 	}
 	if c.Tools.DeltaCheck.Timeout < 0 {
 		return fmt.Errorf("tools.delta_check.timeout must be >= 0")

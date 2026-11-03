@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
 	"google.golang.org/genai"
 
 	"gokin/internal/cache"
@@ -204,22 +204,27 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		searchPath = validPath
 	}
 
+	files, skipped, err := t.getFilesWithSkipped(searchPath, globPattern)
+	if err != nil {
+		return NewErrorResult(err.Error()), nil
+	}
+	footer := skipped.footer()
 	// Check cache first
 	var cacheKey string
 	if t.cache != nil && !hooks.AgentHookActive(ctx) {
 		cacheKey = cache.GrepKey(pattern, searchPath, globPattern, caseInsensitive, contextLines)
-		if cached, ok := t.cache.GetGrep(cacheKey); ok {
+		if cached, ok := t.cache.GetGrep(cacheKey); ok && grepCachePathsVisible(cached.Matches, files) {
 			// Return cached results
 			content := cache.FormatCachedGrep(cached, t.workDir)
 			if len(cached.Matches) == 0 {
-				return NewSuccessResult("No matches found. (cached)"), nil
+				return NewSuccessResult("No matches found. (cached)" + footer), nil
 			}
 			cachedCount := cached.MatchCount
 			if cachedCount == 0 { // back-compat for entries cached before MatchCount existed
 				cachedCount = len(cached.Matches)
 			}
 			summary := fmt.Sprintf("Found %d match(es) in %d file(s) (cached):\n\n", cachedCount, cached.FileCount)
-			return NewSuccessResult(summary + content), nil
+			return NewSuccessResult(summary + content + footer), nil
 		}
 	}
 
@@ -258,12 +263,6 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 		return NewErrorResult("regex compilation failed unexpectedly"), nil
 	}
 
-	// Get files to search
-	files, err := t.getFiles(searchPath, globPattern)
-	if err != nil {
-		return NewErrorResult(err.Error()), nil
-	}
-
 	// Report progress: searching N files
 	onProgress := GetProgressCallback(ctx)
 	if onProgress != nil && len(files) > 10 {
@@ -299,10 +298,10 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 			}
 		}
 		if totalCount == 0 {
-			return NewSuccessResult("No matches found."), nil
+			return NewSuccessResult("No matches found." + footer), nil
 		}
 		summary := fmt.Sprintf("Total: %d match(es) in %d file(s):\n%s\n", totalCount, fileCount, actionableGrepSummary(perFile, true))
-		return NewSuccessResult(summary + results.String()), nil
+		return NewSuccessResult(summary + results.String() + footer), nil
 	}
 
 	// Build results and cache data
@@ -360,7 +359,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	}
 
 	if matchCount == 0 {
-		return NewSuccessResult("No matches found."), nil
+		return NewSuccessResult("No matches found." + footer), nil
 	}
 
 	label := "Found"
@@ -371,7 +370,7 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (ToolResult
 	if matchCount >= maxMatches {
 		summary = fmt.Sprintf("%s %d+ match(es) in %d file(s) (capped at %d — refine pattern for complete results):\n\n", label, matchCount, fileCount, maxMatches)
 	}
-	return NewSuccessResult(summary + actionableGrepSummary(perFile, false) + "\n" + results.String()), nil
+	return NewSuccessResult(summary + actionableGrepSummary(perFile, false) + "\n" + results.String() + footer), nil
 }
 
 func actionableGrepSummary(perFile map[string]int, countOnly bool) string {
@@ -538,49 +537,82 @@ type fileMatch struct {
 	matches []grepMatch
 }
 
+type credentialSkips struct {
+	count   int
+	example string
+}
+
+func (s credentialSkips) footer() string {
+	if s.count == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n%d credential-like file(s) skipped (e.g. %s); search one explicitly with path=<file> (requires approval)", s.count, s.example)
+}
+
+// A cache entry must not reintroduce a file removed by the current deny set.
+func grepCachePathsVisible(matches []cache.GrepMatch, files []string) bool {
+	visible := make(map[string]bool, len(files))
+	for _, file := range files {
+		visible[file] = true
+	}
+	for _, match := range matches {
+		if !visible[match.FilePath] {
+			return false
+		}
+	}
+	return true
+}
+
 func (t *GrepTool) getFiles(searchPath, globPattern string) ([]string, error) {
+	files, _, err := t.getFilesWithSkipped(searchPath, globPattern)
+	return files, err
+}
+
+func (t *GrepTool) getFilesWithSkipped(searchPath, globPattern string) ([]string, credentialSkips, error) {
+	var skipped credentialSkips
+	if t.pathValidator != nil {
+		resolved, err := t.pathValidator.Validate(searchPath)
+		if err != nil {
+			return nil, skipped, err
+		}
+		searchPath = resolved
+	}
 	info, err := os.Stat(searchPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("path not found: %s", searchPath)
+			return nil, skipped, fmt.Errorf("path not found: %s", searchPath)
 		}
-		return nil, fmt.Errorf("error accessing path: %w", err)
+		return nil, skipped, fmt.Errorf("error accessing path: %w", err)
 	}
-
-	// If it's a file, return just that file
+	// An explicit file is authorized by the permission manager's read floor.
 	if !info.IsDir() {
-		return []string{searchPath}, nil
+		return []string{searchPath}, skipped, nil
 	}
-
-	// Build glob pattern
 	if globPattern == "" {
 		globPattern = "**/*"
 	}
-	fullPattern := filepath.Join(searchPath, globPattern)
-
-	// Find files
-	matches, err := doublestar.FilepathGlob(fullPattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid glob pattern: %w", err)
-	}
-
-	// Filter to only files (not directories)
 	var files []string
-	for _, match := range matches {
-		info, err := os.Stat(match)
-		if err == nil && !info.IsDir() {
-			// Skip binary files and very large files
-			if info.Size() < 10*1024*1024 && !isBinaryFile(match) {
-				// Filter by gitignore
-				if t.gitIgnore != nil && t.gitIgnore.IsIgnored(match) {
-					continue
-				}
-				files = append(files, match)
+	err = walkScopedFiles(searchPath, globPattern, t.pathValidator, func(path string, entry fs.DirEntry) error {
+		if sensitive, _ := security.ClassifySensitivePath(path); sensitive {
+			skipped.count++
+			if skipped.example == "" {
+				skipped.example = filepath.Base(path)
 			}
+			return nil
 		}
-	}
-
-	return files, nil
+		if t.pathValidator.IsSecretPath(path) {
+			return nil
+		}
+		if t.gitIgnore != nil && t.gitIgnore.IsIgnored(path) {
+			return nil
+		}
+		info, err := os.Stat(path) // follows a symlinked file to its real size
+		if err == nil && info.Size() < 10*1024*1024 && !isBinaryFile(path) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files, skipped, err
 }
 
 func (t *GrepTool) searchFile(filePath string, re *regexp.Regexp, contextLines int) []grepMatch {

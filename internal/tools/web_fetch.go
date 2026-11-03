@@ -85,6 +85,10 @@ func (t *WebFetchTool) Validate(args map[string]any) error {
 		return NewValidationError("url", "only http and https URLs are supported")
 	}
 
+	if outboundArgumentCarriesSecret(urlStr) {
+		return NewValidationError("url", outboundSecretRefusal)
+	}
+
 	// SSRF protection: validate URL does not target internal/private networks
 	result := security.ValidateURLForSSRF(urlStr)
 	if !result.Valid {
@@ -96,6 +100,9 @@ func (t *WebFetchTool) Validate(args map[string]any) error {
 
 func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	urlStr, _ := GetString(args, "url")
+	if outboundArgumentCarriesSecret(urlStr) {
+		return NewErrorResult(outboundSecretRefusal), nil
+	}
 	selector, _ := GetString(args, "selector")
 
 	// Create request

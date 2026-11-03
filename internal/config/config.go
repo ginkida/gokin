@@ -146,6 +146,7 @@ func (c *Config) Clone() *Config {
 	clone.API.Retry.Providers = maps.Clone(c.API.Retry.Providers)
 	clone.Model.FallbackProviders = slices.Clone(c.Model.FallbackProviders)
 	clone.Tools.AllowedDirs = slices.Clone(c.Tools.AllowedDirs)
+	clone.Tools.AllowSecretPaths = slices.Clone(c.Tools.AllowSecretPaths)
 	clone.Tools.Formatters = maps.Clone(c.Tools.Formatters)
 	clone.Tools.Bash.BlockedCommands = slices.Clone(c.Tools.Bash.BlockedCommands)
 	clone.Permission.Rules = maps.Clone(c.Permission.Rules)
@@ -355,9 +356,10 @@ type ToolsConfig struct {
 	Bash                       BashConfig             `yaml:"bash"`
 	DeltaCheck                 DeltaCheckConfig       `yaml:"delta_check"`
 	SmartValidation            SmartValidationConfig  `yaml:"smart_validation"`
-	AllowedDirs                []string               `yaml:"allowed_dirs"`      // Additional allowed directories (besides workDir)
-	Formatters                 map[string]string      `yaml:"formatters"`        // ext → command, e.g. {".py": "black"}
-	ProactiveContext           ProactiveContextConfig `yaml:"proactive_context"` // Auto-append related files to Read results.
+	AllowSecretPaths           []string               `yaml:"allow_secret_paths,omitempty"` // User-only credential-location exceptions (absolute paths)
+	AllowedDirs                []string               `yaml:"allowed_dirs"`                 // Additional allowed directories (besides workDir)
+	Formatters                 map[string]string      `yaml:"formatters"`                   // ext → command, e.g. {".py": "black"}
+	ProactiveContext           ProactiveContextConfig `yaml:"proactive_context"`            // Auto-append related files to Read results.
 
 	// ToolBudget caps the number of tool calls a hosted model can issue per
 	// user turn before the executor synthesizes "budget reached" responses

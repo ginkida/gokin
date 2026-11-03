@@ -160,6 +160,7 @@ func (a *App) RewindToPoint(ctx context.Context, id, mode string) (string, error
 		}
 		state.ID, state.StartTime, state.Provider, state.WorkDir = previous.ID, previous.StartTime, previous.Provider, previous.WorkDir
 		state.LastActive = previous.LastActive
+		state.RunPolicy = chat.CloneRunPolicy(previous.RunPolicy)
 		state.Version = previous.Version + 1
 		state.ToolCheckpoints, state.PendingRecoveries = nil, nil
 		probe := chat.NewSession()

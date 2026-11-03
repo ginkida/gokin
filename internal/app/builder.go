@@ -224,6 +224,12 @@ func NewBuilderWithOptions(cfg *config.Config, workDir string, options BuildOpti
 
 // Build constructs the App instance, returning any errors encountered.
 func (b *Builder) Build() (*App, error) {
+	// Register the credentials this process can see before any tool exists:
+	// configured provider keys plus credential-named variables inherited from
+	// the parent process (e.g. an agent session token when gokin runs under
+	// another agent). Every SecretRedactor then scrubs those exact values.
+	registerConfigSecrets(b.cfg)
+	security.RegisterProcessSecrets()
 	// Initialize core components
 	b.options.Lifecycle.Phase("config_dir")
 	if err := b.initConfigDir(); err != nil {

@@ -47,6 +47,16 @@ func CloneRegistryForWorkDirWithToolCeiling(baseRegistry ToolRegistry, workDir s
 // CloneToolForWorkDir clones a tool for agent-local use. If workDir is empty,
 // the tool keeps its current workspace binding.
 func CloneToolForWorkDir(tool Tool, workDir string) Tool {
+	cloned := cloneToolForWorkDir(tool, workDir)
+	source, sourceOK := tool.(secretPathScoped)
+	target, targetOK := cloned.(secretPathScoped)
+	if sourceOK && targetOK && source.secretPathValidator() != nil && target.secretPathValidator() != nil {
+		target.secretPathValidator().SetAllowSecretPaths(source.secretPathValidator().AllowSecretPaths())
+	}
+	return cloned
+}
+
+func cloneToolForWorkDir(tool Tool, workDir string) Tool {
 	switch t := tool.(type) {
 	case *ReadTool:
 		cloned := NewReadTool(pickWorkDir(workDir, t.workDir))

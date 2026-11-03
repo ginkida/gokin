@@ -158,10 +158,11 @@ func (a *App) applyGrantedDirsToTools() {
 	effective := append([]string(nil), a.config.Tools.AllowedDirs...)
 	reg := a.registry
 	runner := a.agentRunner
+	secretPaths := append([]string(nil), a.config.Tools.AllowSecretPaths...)
 	a.mu.Unlock()
 	effective = append(effective, granted...)
 
-	tools.SetAllowedDirsOnRegistry(reg, effective)
+	tools.SetAllowedDirsOnRegistry(reg, effective, secretPaths)
 	if runner != nil {
 		runner.SetGrantedDirs(effective)
 	}
@@ -181,13 +182,14 @@ func (a *App) isDirAccessAllowed(path string) bool {
 	dirs := make([]string, 0, len(a.config.Tools.AllowedDirs)+2)
 	dirs = append(dirs, a.workDir)
 	dirs = append(dirs, a.config.Tools.AllowedDirs...)
+	secretPaths := append([]string(nil), a.config.Tools.AllowSecretPaths...)
 	a.mu.Unlock()
 
 	a.grantedDirsMu.Lock()
 	dirs = append(dirs, a.grantedDirs...)
 	a.grantedDirsMu.Unlock()
 
-	ok, err := security.IsPathWithinAny(path, dirs)
+	ok, err := security.IsPathWithinAny(path, dirs, secretPaths)
 	return err == nil && ok
 }
 

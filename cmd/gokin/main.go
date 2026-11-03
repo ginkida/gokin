@@ -37,7 +37,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version              = "0.102.2"
+	version              = "0.103.0"
 	cfgFile              string
 	model                string
 	reasoningEffort      string
@@ -46,6 +46,7 @@ var (
 	runSetup             bool
 	continueLast         bool
 	resumeSession        string
+	resetSessionPolicy   bool
 	sessionID            string
 	forkSession          bool
 	backgroundMode       bool
@@ -147,13 +148,14 @@ func newRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().DurationVar(&headlessLimit, "timeout", 0, "overall headless execution deadline, for example 30m (0 disables)")
 	rootCmd.PersistentFlags().Float64Var(&headlessBudget, "max-budget-usd", 0, "maximum estimated provider cost in headless mode (0 disables)")
 	rootCmd.PersistentFlags().StringVar(&permissionMode, "permission-mode", "", "permission mode for this run: default, acceptEdits, dontAsk, bypassPermissions, or plan")
+	rootCmd.PersistentFlags().BoolVar(&resetSessionPolicy, "reset-session-policy", false, "discard saved session limits and use only this invocation's policy flags")
 	rootCmd.PersistentFlags().BoolVar(&skipPermissions, "dangerously-skip-permissions", false, "bypass permission prompts for this run (sandbox, path boundaries, and hard safety checks remain active)")
 	rootCmd.PersistentFlags().BoolVar(&allowNetwork, "allow-network", false, "allow host network access for sandboxed commands in this run")
 	rootCmd.PersistentFlags().BoolVar(&requireSandbox, "require-sandbox", false, "refuse command execution if OS sandbox enforcement is unavailable")
 	rootCmd.PersistentFlags().BoolVar(&noSandbox, "no-sandbox", false, "explicitly disable command isolation for this run")
 	rootCmd.PersistentFlags().StringSliceVar(&allowedToolsCompat, "allowedTools", nil, "pre-approve matching tools for this run without widening --tools (Claude-compatible)")
 	rootCmd.PersistentFlags().StringSliceVar(&allowedTools, "allowed-tools", nil, "pre-approve matching tools for this run without widening --tools (see command-analysis example above)")
-	rootCmd.PersistentFlags().StringSliceVar(&toolCeiling, "tools", nil, "restrict available tools to these exact names (comma-separated; empty means no tools)")
+	rootCmd.PersistentFlags().StringSliceVar(&toolCeiling, "tools", nil, "restrict tools to exact names or presets: @read (local inspection + todo), @test (@read + bash/run_tests/verify_code), @edit (@test + edit/write/mkdir); comma-separated; empty means no tools")
 	rootCmd.PersistentFlags().StringSliceVar(&deniedTools, "disallowed-tools", nil, "deny matching tools/calls; bare names are also hidden from the model")
 	rootCmd.PersistentFlags().StringSliceVar(&deniedToolsCompat, "disallowedTools", nil, "deny matching tools/calls; bare names are also hidden from the model (Claude-compatible)")
 	rootCmd.PersistentFlags().StringArrayVar(&pluginDirs, "plugin-dir", nil, "load skills, agents, hooks, MCP, and LSP servers from a Claude plugin directory (repeatable; session only)")
@@ -337,6 +339,17 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	if err != nil {
 		return err
 	}
+	requestedToolCeiling, err := tools.ExpandToolPresets(toolCeiling)
+	if err != nil {
+		return err
+	}
+	if flagChanged("tools", toolCeiling != nil) && requestedToolCeiling == nil {
+		requestedToolCeiling = []string{}
+	}
+	hasRunPolicyFlags := flagChanged("tools", toolCeiling != nil) ||
+		flagChanged("disallowed-tools", len(deniedTools) > 0) ||
+		flagChanged("disallowedTools", len(deniedToolsCompat) > 0) ||
+		flagChanged("permission-mode", permissionMode != "") || skipPermissions
 	resumeID, err := validateResumeSelection(continueLast, resumeSession)
 	if err != nil {
 		if continueLast && resumeSession != "" {
@@ -463,9 +476,6 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		"model", cfg.Model.Name,
 		"headless", effectiveHeadless,
 		"bare", cfg.Bare)
-	if err := applyCLIPermissionMode(cfg, resolvedPermissionMode); err != nil {
-		return err
-	}
 
 	// Validate configuration - if no API key, run setup wizard automatically
 	if err := cfg.Validate(); err != nil {
@@ -491,9 +501,6 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 			}
 			applyBareRunConfig(cfg, bare)
 			applyDebugRunConfig(cfg, resolvedDebug)
-			if err := applyCLIPermissionMode(cfg, resolvedPermissionMode); err != nil {
-				return err
-			}
 			// Re-validate
 			if err := cfg.Validate(); err != nil {
 				return err
@@ -513,6 +520,38 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
+	requestedPermissionMode := resolvedPermissionMode
+	if requestedPermissionMode == cliPermissionInherit {
+		requestedPermissionMode = configuredPermissionMode(cfg)
+	}
+	requestedPolicy := &chat.SessionRunPolicy{
+		ToolCeiling: requestedToolCeiling, DeniedRules: resolvedDeniedToolRules,
+		PermissionMode: string(requestedPermissionMode),
+	}
+	failureKind = "resume_failed"
+	policySession, err := loadRunPolicySession(resumeID, continueLast, workDir)
+	if err != nil {
+		failureKind = sessionPreparationErrorKind(err, true)
+		return err
+	}
+	var storedPolicy *chat.SessionRunPolicy
+	preparedResumeID, preparedContinue := resumeID, continueLast
+	if policySession != nil {
+		storedPolicy = policySession.RunPolicy
+		// Pin --continue's selected identity through app construction.
+		preparedResumeID, preparedContinue = policySession.ID, false
+		failureSessionID = policySession.ID
+	}
+	startupPolicy, _, err := effectiveSessionRunPolicy(storedPolicy, requestedPolicy, resetSessionPolicy)
+	if err != nil {
+		return err
+	}
+	if resolvedPermissionMode != cliPermissionInherit || storedPolicy != nil && !resetSessionPolicy {
+		if err := applyCLIPermissionMode(cfg, cliPermissionMode(startupPolicy.PermissionMode)); err != nil {
+			return err
+		}
+	}
+	resolvedPermissionMode = cliPermissionMode(startupPolicy.PermissionMode)
 
 	// --add-dir grants (repeatable): resolve, refuse ungrantable locations, and
 	// append in-memory only (never persisted).
@@ -523,7 +562,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 
 	// Create the application
-	startupToolDenies := optionalRuntimeDeniesForCLIRules(resolvedDeniedToolRules)
+	startupToolDenies := optionalRuntimeDeniesForCLIRules(startupPolicy.DeniedRules)
 	application, err := app.NewWithOptions(cfg, workDir, app.BuildOptions{
 		Lifecycle:                    trace,
 		NonInteractive:               effectiveHeadless,
@@ -531,7 +570,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		Bare:                         bare,
 		NoPlugins:                    noPlugins,
 		PluginDirs:                   pluginDirs,
-		StartupToolCapabilityAllowed: toolCeiling,
+		StartupToolCapabilityAllowed: startupPolicy.ToolCeiling,
 		StartupToolCapabilityDenied:  startupToolDenies,
 	})
 	if err != nil {
@@ -551,22 +590,26 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	}
 	failureKind = "tool_policy"
 	if err := application.ConfigureRunPermissionRules(
-		resolvedAllowedToolRules, resolvedDeniedToolRules); err != nil {
+		resolvedAllowedToolRules, startupPolicy.DeniedRules); err != nil {
 		return err
 	}
 	capabilityDenies, err := capabilityDeniesForCLIRules(
-		application.GetToolRegistry().Names(), resolvedDeniedToolRules)
+		application.GetToolRegistry().Names(), startupPolicy.DeniedRules)
 	if err != nil {
 		return err
 	}
-	if err := application.ConfigureToolCapability(toolCeiling, capabilityDenies); err != nil {
+	// Validate the actual request too: intersection must not hide a CLI typo.
+	if err := validateRunToolNames(application.GetToolRegistry().Names(), requestedToolCeiling); err != nil {
+		return err
+	}
+	if err := application.ConfigureToolCapability(startupPolicy.ToolCeiling, capabilityDenies); err != nil {
 		return err
 	}
 
 	failureKind = "resume_failed"
 	trace.Phase("session_prepare")
 	sessionLease, selectedSessionID, err := prepareSessionForRun(
-		application, cfg.Session.Enabled, resumeID, continueLast, requestedSessionID, forkSession)
+		application, cfg.Session.Enabled, preparedResumeID, preparedContinue, requestedSessionID, forkSession)
 	if selectedSessionID != "" {
 		failureSessionID = selectedSessionID
 	}
@@ -607,6 +650,40 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 			}
 		}()
 	}
+	failureKind = "tool_policy"
+	storedPolicy = application.GetSession().RunPolicy()
+	effectivePolicy, narrowed, err := effectiveSessionRunPolicy(storedPolicy, requestedPolicy, resetSessionPolicy)
+	if err != nil {
+		return err
+	}
+	// A writer may have changed the saved policy between selection and lease
+	// acquisition. Tool limits can be reapplied here; mode consumers were built
+	// at startup, so a changed mode requires a fresh construction.
+	if effectivePolicy.PermissionMode != startupPolicy.PermissionMode {
+		return fmt.Errorf("session permission policy changed during startup; retry --resume %s", selectedSessionID)
+	}
+	capabilityDenies, err = capabilityDeniesForCLIRules(application.GetToolRegistry().Names(), effectivePolicy.DeniedRules)
+	if err != nil {
+		return err
+	}
+	if err := application.ConfigureToolCapability(effectivePolicy.ToolCeiling, capabilityDenies); err != nil {
+		return err
+	}
+	if err := application.ConfigureRunPermissionRules(resolvedAllowedToolRules, effectivePolicy.DeniedRules); err != nil {
+		return err
+	}
+	if storedPolicy != nil || hasRunPolicyFlags || resetSessionPolicy {
+		application.GetSession().SetRunPolicy(effectivePolicy)
+		if cfg.Session.Enabled {
+			if err := application.PersistRunPolicy(); err != nil {
+				return fmt.Errorf("persist session run policy: %w", err)
+			}
+		}
+	}
+	if narrowed {
+		noticeRetainedRunPolicy(os.Stderr, storedPolicy)
+	}
+	warnScopedGitDenies(os.Stderr, application.GetToolRegistry().Names(), effectivePolicy)
 
 	if effectiveHeadless {
 		defer func() { trace.Phase("language_servers_close"); application.CloseLanguageServers() }()

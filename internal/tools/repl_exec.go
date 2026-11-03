@@ -49,7 +49,7 @@ func (t *ReplExecTool) Name() string { return "repl_exec" }
 // one suits the question. The signatures below are pinned by a test that
 // executes each one, so this text cannot drift from the runtime.
 func (t *ReplExecTool) Description() string {
-	return `Persistent read-only Python for multi-file counts/ranks/joins; globals survive. Prefer ONE cell returning conclusions plus compact evidence. Use grep/read/bash for targeted matches; each execute costs a model round.
+	return `Persistent read-only Python for multi-file counts/ranks/joins; globals survive. Prefer ONE cell returning conclusions plus compact evidence. Use grep/read/bash for targeted matches.
 
 context.workspace -> str property (not a call)
 context.search_code(query, path=".", limit=50, case_sensitive=False, regex=False)
@@ -63,7 +63,7 @@ context.count_code_many(queries, path=".", case_sensitive=False, regex=False, gr
 context.list_files(path=".", pattern=None) -> {"files":[{"path","size"}],"scanned_files","truncated"}
 context.file_stats(path=".", pattern=None, exclude_pattern=None, group_by=None)
     -> {"matching_files","total_bytes","groups":{key:{"files","bytes"}},"scanned_files","truncated"}; group_by: "extension" or "top_dir". Prefer for totals.
-    Patterns are workspace-relative fnmatch. Scans honor Git ignores; file_stats streams, other scans share one scope snapshot/cell.
+    Workspace-relative fnmatch. Scans (including list_files) omit ignored/credential files; file_stats streams; others share a scope snapshot/cell.
 context.read_slice(path, start_line=1, end_line=200)
     -> {"path", "start_line", "end_line", "lines": [{"line","text"}]}
 context.artifact_get(id, offset=0, limit=...) -> {"id","offset","next_offset","size","content","has_more"}

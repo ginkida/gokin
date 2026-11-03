@@ -296,19 +296,14 @@ func sandboxSecrets(extra []string) []string {
 			paths = append(paths, path)
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, rel := range []string{".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker/config.json", ".netrc", ".config/gokin", ".claude", "Library/Application Support/gokin"} {
-			paths = append(paths, filepath.Join(home, filepath.FromSlash(rel)))
-		}
+	paths = append(paths, SecretPaths()...)
+	// The sandbox masks the whole Claude config tree (transcripts, settings),
+	// wider than the tool-read deny, which keeps personal skills readable.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, ".claude"))
 	}
 	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		paths = append(paths, dir)
-	}
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		paths = append(paths, filepath.Join(dir, "gokin"))
-	}
-	if dir, err := os.UserConfigDir(); err == nil {
-		paths = append(paths, filepath.Join(dir, "gokin"))
 	}
 	for _, path := range append([]string(nil), paths...) {
 		if resolved, err := resolveCacheBase(path); err == nil && resolved != path {

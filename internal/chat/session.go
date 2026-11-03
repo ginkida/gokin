@@ -66,6 +66,7 @@ type Session struct {
 	windowHistoryHandler    func(sessionID string)
 	windowArchives          []HistoryWindowArchive
 	goalState               goals.State
+	runPolicy               *SessionRunPolicy
 	scratchpad              string
 	workingMemory           string
 	sessionMemory           string
@@ -757,6 +758,7 @@ func (s *Session) GetState() *SessionState {
 		History:           history,
 		HistoryWindows:    cloneHistoryWindows(s.windowArchives),
 		Goal:              goals.Clone(s.goalState),
+		RunPolicy:         CloneRunPolicy(s.runPolicy),
 		TokenCounts:       make([]int, len(s.tokenCounts)),
 		TotalTokens:       s.totalTokens,
 		Version:           s.version,
@@ -852,6 +854,7 @@ func (s *Session) RestoreFromState(state *SessionState) error {
 	s.StartTime = state.StartTime
 	s.WorkDir = state.WorkDir
 	s.Provider = state.Provider
+	s.runPolicy = CloneRunPolicy(state.RunPolicy)
 	s.title = state.Title
 	s.History = history
 	// Align tokenCounts with history length. Legacy sessions serialised with
@@ -1138,6 +1141,7 @@ func (s *Session) Fork(name string) *Session {
 		History:                 historyCopy,
 		windowArchives:          cloneHistoryWindows(s.windowArchives),
 		goalState:               goals.Clone(s.goalState),
+		runPolicy:               CloneRunPolicy(s.runPolicy),
 		tokenCounts:             tokenCountsCopy,
 		totalTokens:             s.totalTokens,
 		scratchpad:              s.scratchpad,

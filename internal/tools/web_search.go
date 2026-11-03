@@ -101,6 +101,9 @@ func (t *WebSearchTool) Validate(args map[string]any) error {
 	if !ok || query == "" {
 		return NewValidationError("query", "is required")
 	}
+	if outboundArgumentCarriesSecret(query) {
+		return NewValidationError("query", outboundSecretRefusal)
+	}
 
 	// DuckDuckGo doesn't require an API key; when no key is configured
 	// Execute() auto-falls back to DuckDuckGo, so validation passes.
@@ -113,6 +116,9 @@ func (t *WebSearchTool) Validate(args map[string]any) error {
 
 func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) (ToolResult, error) {
 	query, _ := GetString(args, "query")
+	if outboundArgumentCarriesSecret(query) {
+		return NewErrorResult(outboundSecretRefusal), nil
+	}
 	numResults := GetIntDefault(args, "num_results", 5)
 
 	if numResults > t.maxResults {

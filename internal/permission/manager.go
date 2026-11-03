@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -231,6 +232,14 @@ func (m *Manager) cacheKey(toolName string, args map[string]any) string {
 }
 
 func (m *Manager) cacheKeyWithWorkDir(toolName string, args map[string]any, workDir string) string {
+	cacheTool := toolName
+	if _, canonical, ok := strings.Cut(toolName, "\x00"); ok {
+		cacheTool = canonical
+	}
+	if paths := sensitiveReadPaths(cacheTool, args, workDir); len(paths) > 0 {
+		payload, _ := json.Marshal(paths)
+		return fmt.Sprintf("%s:credential:%s", toolName, payload)
+	}
 	switch toolName {
 	case "write", "edit":
 		// These tools execute file_path; ignore unrelated extra fields so they
@@ -286,13 +295,18 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		}, nil
 	}
 
-	// If permissions are disabled, allow everything
-	if !enabled {
+	sensitivePaths := sensitiveReadPaths(canonicalInvocationTool(ctx, toolName), args, workDir)
+	credentialRead := len(sensitivePaths) > 0
+	// The credential confirmation floor also applies in bypass mode.
+	if !enabled && !credentialRead {
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 	}
 
 	// Get policy from rules
 	policy := invocationToolPolicy(ctx, rules, toolName)
+	if !enabled {
+		policy = LevelAllow
+	}
 	// Explicit deny is the hard policy boundary and always wins over a cached
 	// decision made under an earlier/more-permissive configuration.
 	if policy == LevelDeny {
@@ -307,12 +321,14 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 	// above still wins, and elevated Bash calls still reach the confirmation
 	// floor below.
 	runAllowed := invocationToolAllowed(ctx, runAllows, toolName, args, workDir)
+	if credentialRead {
+		runAllowed = sensitiveReadRunAllowed(runAllows, canonicalInvocationTool(ctx, toolName), sensitivePaths, workDir)
+	}
 	forceAsk := hookDecisionFor(ctx, toolName, args) == "ask"
 
-	// A normal LevelAllow is authoritative. Elevated bash commands are the one
-	// exception: an identical, explicitly session-approved call may satisfy the
-	// action-semantics confirmation floor below.
-	if policy == LevelAllow && !forceAsk && !isElevatedBash(toolName, args) {
+	// A normal LevelAllow is authoritative except at the elevated-bash and
+	// credential-read floors. Exact session approvals may satisfy those floors.
+	if policy == LevelAllow && !forceAsk && !isElevatedBash(toolName, args) && !credentialRead {
 		return &Response{Allowed: true, Decision: DecisionAllow}, nil
 	}
 
@@ -340,6 +356,9 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 		return &Response{Allowed: false, Decision: DecisionDeny, Reason: "Tool requires approval; permission prompts are disabled for skill context rendering"}, nil
 	}
 	if dontAsk {
+		if credentialRead {
+			return &Response{Allowed: false, Decision: DecisionDeny, Reason: sensitiveReadHint(sensitivePaths, workDir)}, nil
+		}
 		if !forceAsk && toolName == "bash" && !isElevatedBash(toolName, args) && isReadOnlyBashInvocation(ctx, args) {
 			return &Response{Allowed: true, Decision: DecisionAllow}, nil
 		}
@@ -349,7 +368,7 @@ func (m *Manager) Check(ctx context.Context, toolName string, args map[string]an
 			Reason:   "Tool requires approval and was auto-denied by dontAsk mode",
 		}, nil
 	}
-	if forceAsk {
+	if forceAsk || credentialRead {
 		return m.askUser(ctx, toolName, args, workDir, revision)
 	}
 
@@ -465,17 +484,28 @@ func (m *Manager) askUser(
 	handler := m.promptHandler
 	m.mu.RUnlock()
 
+	hint := sensitiveReadHint(sensitiveReadPaths(canonicalInvocationTool(ctx, toolName), args, workDir), workDir)
 	if handler == nil {
+		if hint != "" {
+			err := fmt.Errorf("%s", hint)
+			return &Response{Allowed: false, Decision: DecisionDeny, Reason: hint}, err
+		}
 		err := fmt.Errorf("permission required for %s, but no interactive approval handler is available; configure an explicit allow rule or disable permissions for intentional unattended execution", toolName)
 		return &Response{Allowed: false, Decision: DecisionDeny, Reason: err.Error()}, err
 	}
 
 	// Create permission request
 	req := NewRequest(toolName, args)
+	if hint != "" {
+		req.Reason = hint
+	}
 
 	// Ask the user
 	decision, err := handler(ctx, req)
 	if err != nil {
+		if hint != "" {
+			err = fmt.Errorf("%s", hint)
+		}
 		return &Response{
 			Allowed:  false,
 			Decision: DecisionDeny,
