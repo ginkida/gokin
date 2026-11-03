@@ -86,7 +86,7 @@ func TestSmoke_SessionMemoryLifecycle(t *testing.T) {
 	}
 }
 
-// TestSmoke_GitignoreIntegration verifies gitignore auto-creation in a simulated project.
+// TestSmoke_GitignoreIntegration verifies runtime files are excluded locally in a simulated project.
 func TestSmoke_GitignoreIntegration(t *testing.T) {
 	dir := t.TempDir()
 
@@ -95,9 +95,13 @@ func TestSmoke_GitignoreIntegration(t *testing.T) {
 
 	EnsureGokinGitignore(dir)
 
-	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	excludePath := filepath.Join(dir, ".git", "info", "exclude")
+	content, err := os.ReadFile(excludePath)
 	if err != nil {
-		t.Fatalf("gitignore not created: %v", err)
+		t.Fatalf("info/exclude not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatal(".gitignore must not be created")
 	}
 
 	required := []string{
@@ -115,7 +119,7 @@ func TestSmoke_GitignoreIntegration(t *testing.T) {
 
 	// Idempotency
 	EnsureGokinGitignore(dir)
-	content2, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	content2, _ := os.ReadFile(excludePath)
 	if string(content) != string(content2) {
 		t.Error("gitignore should be idempotent")
 	}

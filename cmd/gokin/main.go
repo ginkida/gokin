@@ -37,7 +37,7 @@ var (
 	// via `-X main.version=$(git describe --tags)` — see .github/workflows/release.yml.
 	// Bump this when merging a sprint worth of changes so `go build` without
 	// ldflags still shows something sensible in /version.
-	version              = "0.103.0"
+	version              = "0.103.1"
 	cfgFile              string
 	model                string
 	reasoningEffort      string
@@ -542,6 +542,7 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 		preparedResumeID, preparedContinue = policySession.ID, false
 		failureSessionID = policySession.ID
 	}
+	failureKind = "tool_policy"
 	startupPolicy, _, err := effectiveSessionRunPolicy(storedPolicy, requestedPolicy, resetSessionPolicy)
 	if err != nil {
 		return err
@@ -557,6 +558,8 @@ func runApp(cmd *cobra.Command, args []string) (runErr error) {
 	// append in-memory only (never persisted).
 	// Works for interactive, headless, and eval launches; the builder propagates
 	// AllowedDirs to every path-scoping tool and seeds the agent runner at boot.
+	// A refused --add-dir is a bad argument, not a resume problem.
+	failureKind = "validation"
 	if err := applyAddDirFlags(cfg, addDirs); err != nil {
 		return err
 	}

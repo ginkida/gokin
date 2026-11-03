@@ -61,6 +61,7 @@ func Load() (*Config, error) {
 	migrateLegacyModelRoundTimeout(cfg)
 	migrateLegacyProviderTimeouts(cfg)
 	migrateLegacyPlanningTimeout(cfg)
+	migrateLegacyUpdateRepo(cfg)
 
 	// Override with environment variables
 	loadFromEnv(cfg)
@@ -95,6 +96,7 @@ func LoadFrom(path string) (*Config, error) {
 	migrateLegacyModelRoundTimeout(cfg)
 	migrateLegacyProviderTimeouts(cfg)
 	migrateLegacyPlanningTimeout(cfg)
+	migrateLegacyUpdateRepo(cfg)
 	loadFromEnv(cfg)
 	loadProjectConfig(cfg)
 	migrateRemovedProviders(cfg)
@@ -114,6 +116,23 @@ func migrateLegacyModelRoundTimeout(cfg *Config) {
 	logging.Info("upgraded legacy model round timeout",
 		"from", legacyDefaultModelRoundTimeout,
 		"to", DefaultModelRoundTimeout)
+}
+
+// legacyPlaceholderUpdateRepo was the generated update.github_repo default in
+// v0.72–v0.73. The repository does not exist, so configs written then make
+// every update check fail with "no releases found".
+const legacyPlaceholderUpdateRepo = "user/gokin"
+
+// migrateLegacyUpdateRepo replaces that placeholder with the real upstream in
+// memory; the next Save persists it. Any other value is a deliberate choice
+// (a fork or mirror) and is left alone.
+func migrateLegacyUpdateRepo(cfg *Config) {
+	if cfg == nil || strings.TrimSpace(cfg.Update.GitHubRepo) != legacyPlaceholderUpdateRepo {
+		return
+	}
+	cfg.Update.GitHubRepo = DefaultConfig().Update.GitHubRepo
+	logging.Info("replaced placeholder update repository",
+		"from", legacyPlaceholderUpdateRepo, "to", cfg.Update.GitHubRepo)
 }
 
 // migrateLegacyProviderTimeouts releases the exact old generated global pair

@@ -9,7 +9,25 @@ import (
 
 // ---------- EnsureGokinGitignore ----------
 
-func TestGitignore_CreatesFileInGitRepo(t *testing.T) {
+func readExclude(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("read info/exclude: %v", err)
+	}
+	return string(data)
+}
+
+func assertNoGitignore(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("starting gokin must not create .gitignore in the user's repository (err=%v)", err)
+	}
+}
+
+// A read-only run used to create or append .gitignore, leaving a change in
+// the user's repository. The entries now go to the local exclude file.
+func TestGitignore_WritesLocalExcludeNotTrackedFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, ".git"), 0755); err != nil {
 		t.Fatal(err)
@@ -17,66 +35,82 @@ func TestGitignore_CreatesFileInGitRepo(t *testing.T) {
 
 	EnsureGokinGitignore(dir)
 
-	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	if err != nil {
-		t.Fatalf("expected .gitignore to be created: %v", err)
-	}
-	content := string(data)
-
+	assertNoGitignore(t, dir)
+	content := readExclude(t, dir)
 	for _, entry := range gokinGitignoreEntries {
-		if !strings.Contains(content, entry) {
-			t.Errorf("missing entry %q in .gitignore", entry)
+		if !strings.Contains(content, entry+"\n") {
+			t.Errorf("missing entry %q in info/exclude", entry)
 		}
 	}
-	if !strings.Contains(content, "# Gokin") {
-		t.Error("missing section header")
-	}
 }
 
-func TestGitignore_Idempotent(t *testing.T) {
+func TestGitignore_LeavesExistingGitignoreUntouched(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, ".git"), 0755); err != nil {
 		t.Fatal(err)
 	}
-
-	EnsureGokinGitignore(dir)
-	first, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
-
-	EnsureGokinGitignore(dir)
-	second, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
-
-	if string(first) != string(second) {
-		t.Errorf("second call changed .gitignore.\nFirst:\n%s\nSecond:\n%s", first, second)
-	}
-}
-
-func TestGitignore_ExistingFilePartialEntries(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, ".git"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Pre-populate .gitignore with one of the entries already present
-	existing := gokinGitignoreEntries[0] + "\n"
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(existing), 0644); err != nil {
+	original := "node_modules/\n" + gokinGitignoreEntries[0] + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	EnsureGokinGitignore(dir)
 
 	data, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	content := string(data)
+	if string(data) != original {
+		t.Fatalf(".gitignore modified:\n%s", data)
+	}
+	content := readExclude(t, dir)
+	if strings.Contains(content, gokinGitignoreEntries[0]) {
+		t.Errorf("entry already in .gitignore duplicated into info/exclude")
+	}
+	if !strings.Contains(content, gokinGitignoreEntries[1]) {
+		t.Errorf("missing entry %q", gokinGitignoreEntries[1])
+	}
+}
 
-	// All entries must be present
-	for _, entry := range gokinGitignoreEntries {
-		if !strings.Contains(content, entry) {
-			t.Errorf("missing entry %q", entry)
-		}
+func TestGitignore_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	userExclude := "# user rule\n*.swp"
+	if err := os.WriteFile(filepath.Join(dir, ".git", "info", "exclude"), []byte(userExclude), 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	// The pre-existing entry must appear exactly once
-	if strings.Count(content, gokinGitignoreEntries[0]) != 1 {
-		t.Errorf("duplicate entry %q found", gokinGitignoreEntries[0])
+	EnsureGokinGitignore(dir)
+	first := readExclude(t, dir)
+	EnsureGokinGitignore(dir)
+	second := readExclude(t, dir)
+
+	if first != second {
+		t.Errorf("second call changed info/exclude.\nFirst:\n%s\nSecond:\n%s", first, second)
+	}
+	if !strings.HasPrefix(first, userExclude+"\n") {
+		t.Errorf("user's exclude rules not preserved:\n%s", first)
+	}
+}
+
+func TestGitignore_LinkedWorktreeUsesCommonDir(t *testing.T) {
+	main := t.TempDir()
+	wtGitDir := filepath.Join(main, ".git", "worktrees", "wt")
+	if err := os.MkdirAll(wtGitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtGitDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+wtGitDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	EnsureGokinGitignore(wt)
+
+	assertNoGitignore(t, wt)
+	if !strings.Contains(readExclude(t, main), gokinGitignoreEntries[0]) {
+		t.Error("worktree entries must go to the common dir's info/exclude")
 	}
 }
 
@@ -85,9 +119,9 @@ func TestGitignore_NoGitDir_NoOp(t *testing.T) {
 
 	EnsureGokinGitignore(dir)
 
-	_, err := os.Stat(filepath.Join(dir, ".gitignore"))
-	if !os.IsNotExist(err) {
-		t.Error("expected .gitignore to NOT be created when .git is absent")
+	assertNoGitignore(t, dir)
+	if _, err := os.Stat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+		t.Error("must not create .git when absent")
 	}
 }
 
@@ -196,13 +230,10 @@ func TestGokinGitignoreCoversRuntimeFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	EnsureGokinGitignore(root)
-	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readExclude(t, root)
 	for _, entry := range []string{".gokin/execution_journal.jsonl", ".gokin/recovery_snapshot.json", ".gokin/agent-output/", ".gokin/agents/checkpoints/"} {
-		if !strings.Contains(string(data), entry+"\n") {
-			t.Errorf(".gitignore misses runtime file %s", entry)
+		if !strings.Contains(data, entry+"\n") {
+			t.Errorf("info/exclude misses runtime file %s", entry)
 		}
 	}
 }
